@@ -68,7 +68,6 @@ mod tests {
     use hfx_core::FlowDirEncoding;
 
     use super::*;
-    use crate::algo::catchment_mask::CatchmentMask;
     use crate::algo::coord::{GeoCoord, GridCoord, GridDims};
     use crate::algo::geo_transform::GeoTransform;
 
@@ -291,7 +290,4 @@ mod tests {
         assert!(!mask.contains(GridCoord::new(2, 4)));
     }
 
-    // Suppress unused import warning — CatchmentMask is used in tests via trace_upstream return type.
-    #[allow(unused_imports)]
-    use CatchmentMask as _;
 }
