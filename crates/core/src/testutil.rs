@@ -11,6 +11,32 @@ use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use serde_json::json;
 use tempfile::TempDir;
 
+/// Custom catchment specification for outlet resolution tests.
+pub(crate) struct TestCatchment {
+    pub id: i64,
+    pub area_km2: f32,
+    pub up_area_km2: Option<f32>,
+    /// Rectangle polygon as (minx, miny, maxx, maxy).
+    pub polygon: (f64, f64, f64, f64),
+}
+
+/// Custom snap target specification for outlet resolution tests.
+pub(crate) struct TestSnapTarget {
+    pub id: i64,
+    pub catchment_id: i64,
+    pub weight: f32,
+    pub is_mainstem: bool,
+    pub geometry: TestSnapGeometry,
+}
+
+/// Geometry for a test snap target.
+pub(crate) enum TestSnapGeometry {
+    /// A WKB Point at (lon, lat).
+    Point(f64, f64),
+    /// A WKB LineString from (x1, y1) to (x2, y2).
+    LineString(f64, f64, f64, f64),
+}
+
 /// Builder for synthetic HFX dataset fixtures used in integration tests.
 pub(crate) struct DatasetBuilder {
     dir: TempDir,
@@ -20,6 +46,8 @@ pub(crate) struct DatasetBuilder {
     include_rasters: bool,
     row_group_size: usize,
     dag_diamond: bool,
+    custom_catchments: Option<Vec<TestCatchment>>,
+    custom_snap_targets: Option<Vec<TestSnapTarget>>,
 }
 
 impl DatasetBuilder {
@@ -33,6 +61,8 @@ impl DatasetBuilder {
             include_rasters: false,
             row_group_size: 8192,
             dag_diamond: false,
+            custom_catchments: None,
+            custom_snap_targets: None,
         }
     }
 
@@ -58,6 +88,25 @@ impl DatasetBuilder {
     pub fn with_dag(mut self) -> Self {
         self.topology = "dag";
         self.dag_diamond = true;
+        self
+    }
+
+    /// Override auto-generated catchments with custom specifications.
+    ///
+    /// The graph will be built as a linear chain of the provided IDs.
+    /// The `atom_count` is automatically set to the number of custom catchments.
+    pub fn with_custom_catchments(mut self, catchments: Vec<TestCatchment>) -> Self {
+        self.atom_count = catchments.len();
+        self.custom_catchments = Some(catchments);
+        self
+    }
+
+    /// Override auto-generated snap targets with custom specifications.
+    ///
+    /// Automatically enables the snap artifact.
+    pub fn with_custom_snap_targets(mut self, targets: Vec<TestSnapTarget>) -> Self {
+        self.include_snap = true;
+        self.custom_snap_targets = Some(targets);
         self
     }
 
@@ -163,9 +212,6 @@ impl DatasetBuilder {
         let file = std::fs::File::create(root.join("catchments.parquet")).unwrap();
         let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props)).unwrap();
 
-        let (ids, _) = self.build_graph_data();
-        let total = ids.len();
-
         let mut id_b = Int64Builder::new();
         let mut area_b = Float32Builder::new();
         let mut up_area_b = Float32Builder::new();
@@ -175,30 +221,48 @@ impl DatasetBuilder {
         let mut maxy_b = Float32Builder::new();
         let mut geom_b = BinaryBuilder::new();
 
-        for (idx, &id) in ids.iter().enumerate() {
-            let i = idx + 1; // 1-based for bbox spacing
-            let minx = (i as f32) * 0.5;
-            let miny = 0.0f32;
-            let maxx = (i as f32) * 0.5 + 0.4;
-            let maxy = 0.4f32;
+        if let Some(customs) = &self.custom_catchments {
+            for c in customs {
+                let (poly_minx, poly_miny, poly_maxx, poly_maxy) = c.polygon;
+                id_b.append_value(c.id);
+                area_b.append_value(c.area_km2);
+                match c.up_area_km2 {
+                    Some(v) => up_area_b.append_value(v),
+                    None => up_area_b.append_null(),
+                }
+                minx_b.append_value(poly_minx as f32);
+                miny_b.append_value(poly_miny as f32);
+                maxx_b.append_value(poly_maxx as f32);
+                maxy_b.append_value(poly_maxy as f32);
+                let wkb = minimal_wkb_polygon(poly_minx, poly_miny, poly_maxx, poly_maxy);
+                geom_b.append_value(&wkb);
+            }
+        } else {
+            let (ids, _) = self.build_graph_data();
+            for (idx, &id) in ids.iter().enumerate() {
+                let i = idx + 1; // 1-based for bbox spacing
+                let minx = (i as f32) * 0.5;
+                let miny = 0.0f32;
+                let maxx = (i as f32) * 0.5 + 0.4;
+                let maxy = 0.4f32;
 
-            id_b.append_value(id);
-            area_b.append_value(10.0f32);
-            up_area_b.append_null();
-            minx_b.append_value(minx);
-            miny_b.append_value(miny);
-            maxx_b.append_value(maxx);
-            maxy_b.append_value(maxy);
+                id_b.append_value(id);
+                area_b.append_value(10.0f32);
+                up_area_b.append_null();
+                minx_b.append_value(minx);
+                miny_b.append_value(miny);
+                maxx_b.append_value(maxx);
+                maxy_b.append_value(maxy);
 
-            let wkb = minimal_wkb_polygon(
-                minx as f64,
-                miny as f64,
-                maxx as f64,
-                maxy as f64,
-            );
-            geom_b.append_value(&wkb);
+                let wkb = minimal_wkb_polygon(
+                    minx as f64,
+                    miny as f64,
+                    maxx as f64,
+                    maxy as f64,
+                );
+                geom_b.append_value(&wkb);
+            }
         }
-        let _ = total;
 
         let batch = RecordBatch::try_new(
             schema,
@@ -240,8 +304,6 @@ impl DatasetBuilder {
         let file = std::fs::File::create(root.join("snap.parquet")).unwrap();
         let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props)).unwrap();
 
-        let (ids, _) = self.build_graph_data();
-
         let mut id_b = Int64Builder::new();
         let mut catchment_id_b = Int64Builder::new();
         let mut weight_b = Float32Builder::new();
@@ -252,28 +314,58 @@ impl DatasetBuilder {
         let mut maxy_b = Float32Builder::new();
         let mut geom_b = BinaryBuilder::new();
 
-        for (idx, &atom_id) in ids.iter().enumerate() {
-            let i = idx + 1;
-            let minx = (i as f32) * 0.5;
-            let miny = 0.0f32;
-            let maxx = (i as f32) * 0.5 + 0.4;
-            let maxy = 0.4f32;
+        if let Some(customs) = &self.custom_snap_targets {
+            for t in customs {
+                id_b.append_value(t.id);
+                catchment_id_b.append_value(t.catchment_id);
+                weight_b.append_value(t.weight);
+                is_mainstem_b.append_value(t.is_mainstem);
+                match &t.geometry {
+                    TestSnapGeometry::Point(x, y) => {
+                        // Point bbox needs non-zero extent.
+                        let eps: f32 = 1e-6;
+                        minx_b.append_value(*x as f32 - eps);
+                        miny_b.append_value(*y as f32 - eps);
+                        maxx_b.append_value(*x as f32 + eps);
+                        maxy_b.append_value(*y as f32 + eps);
+                        let wkb = minimal_wkb_point(*x, *y);
+                        geom_b.append_value(&wkb);
+                    }
+                    TestSnapGeometry::LineString(x1, y1, x2, y2) => {
+                        minx_b.append_value(x1.min(*x2) as f32);
+                        miny_b.append_value(y1.min(*y2) as f32);
+                        maxx_b.append_value(x1.max(*x2) as f32);
+                        maxy_b.append_value(y1.max(*y2) as f32);
+                        let wkb = minimal_wkb_linestring(*x1, *y1, *x2, *y2);
+                        geom_b.append_value(&wkb);
+                    }
+                }
+            }
+        } else {
+            let (ids, _) = self.build_graph_data();
+            for (idx, &atom_id) in ids.iter().enumerate() {
+                let i = idx + 1;
+                let minx = (i as f32) * 0.5;
+                let miny = 0.0f32;
+                let maxx = (i as f32) * 0.5 + 0.4;
+                let maxy = 0.4f32;
 
-            // Center of the bbox for the linestring
-            let cx = ((minx + maxx) / 2.0) as f64;
-            let cy = ((miny + maxy) / 2.0) as f64;
+                // Center of the bbox for the linestring
+                let cx = ((minx + maxx) / 2.0) as f64;
+                let cy = ((miny + maxy) / 2.0) as f64;
 
-            id_b.append_value(atom_id);
-            catchment_id_b.append_value(atom_id);
-            weight_b.append_value(100.0f32);
-            is_mainstem_b.append_value(true);
-            minx_b.append_value(minx);
-            miny_b.append_value(miny);
-            maxx_b.append_value(maxx);
-            maxy_b.append_value(maxy);
+                id_b.append_value(atom_id);
+                catchment_id_b.append_value(atom_id);
+                weight_b.append_value(100.0f32);
+                is_mainstem_b.append_value(true);
+                minx_b.append_value(minx);
+                miny_b.append_value(miny);
+                maxx_b.append_value(maxx);
+                maxy_b.append_value(maxy);
 
-            let wkb = minimal_wkb_linestring(cx - 0.1, cy, cx + 0.1, cy);
-            geom_b.append_value(&wkb);
+                let wkb = minimal_wkb_linestring(cx - 0.1, cy, cx + 0.1, cy);
+                geom_b.append_value(&wkb);
+            }
         }
 
         let batch = RecordBatch::try_new(
@@ -311,15 +403,31 @@ impl DatasetBuilder {
     /// DAG mode appends four extra atoms forming a diamond on top of the chain.
     fn build_graph_data(&self) -> (Vec<i64>, Vec<Vec<i64>>) {
         let n = self.atom_count;
-        let mut ids: Vec<i64> = (1..=(n as i64)).collect();
-        let mut upstream: Vec<Vec<i64>> = Vec::with_capacity(n);
+        let mut ids: Vec<i64>;
+        let mut upstream: Vec<Vec<i64>>;
 
-        // Atom 1 is a headwater; atom i has upstream = [i-1].
-        for i in 1..=(n as i64) {
-            if i == 1 {
-                upstream.push(vec![]);
-            } else {
-                upstream.push(vec![i - 1]);
+        if let Some(customs) = &self.custom_catchments {
+            // Build a linear chain from custom IDs: first is headwater.
+            ids = customs.iter().map(|c| c.id).collect();
+            upstream = Vec::with_capacity(ids.len());
+            for (idx, _) in ids.iter().enumerate() {
+                if idx == 0 {
+                    upstream.push(vec![]);
+                } else {
+                    upstream.push(vec![ids[idx - 1]]);
+                }
+            }
+        } else {
+            ids = (1..=(n as i64)).collect();
+            upstream = Vec::with_capacity(n);
+
+            // Atom 1 is a headwater; atom i has upstream = [i-1].
+            for i in 1..=(n as i64) {
+                if i == 1 {
+                    upstream.push(vec![]);
+                } else {
+                    upstream.push(vec![i - 1]);
+                }
             }
         }
 
@@ -352,6 +460,15 @@ impl DatasetBuilder {
 // ---------------------------------------------------------------------------
 // WKB helpers
 // ---------------------------------------------------------------------------
+
+fn minimal_wkb_point(x: f64, y: f64) -> Vec<u8> {
+    let mut wkb = Vec::new();
+    wkb.push(1u8); // little-endian
+    wkb.extend_from_slice(&1u32.to_le_bytes()); // wkbPoint = 1
+    wkb.extend_from_slice(&x.to_le_bytes());
+    wkb.extend_from_slice(&y.to_le_bytes());
+    wkb
+}
 
 fn minimal_wkb_polygon(minx: f64, miny: f64, maxx: f64, maxy: f64) -> Vec<u8> {
     let mut wkb = Vec::new();
@@ -454,5 +571,36 @@ mod tests {
         assert_eq!(session.manifest().atom_count().get(), 6);
         assert!(session.snap().is_some());
         assert!(session.raster_paths().is_some());
+    }
+
+    #[test]
+    fn test_custom_catchments_dataset_opens() {
+        let catchments = vec![
+            TestCatchment { id: 10, area_km2: 5.0, up_area_km2: Some(100.0), polygon: (1.0, 0.0, 1.4, 0.4) },
+            TestCatchment { id: 20, area_km2: 8.0, up_area_km2: None, polygon: (1.5, 0.0, 1.9, 0.4) },
+        ];
+        let (_dir, root) = DatasetBuilder::new(2)
+            .with_custom_catchments(catchments)
+            .build();
+        let session = DatasetSession::open(&root).expect("custom catchments dataset should open");
+        assert_eq!(session.manifest().atom_count().get(), 2);
+    }
+
+    #[test]
+    fn test_custom_snap_targets_dataset_opens() {
+        let catchments = vec![
+            TestCatchment { id: 1, area_km2: 10.0, up_area_km2: None, polygon: (0.5, 0.0, 0.9, 0.4) },
+            TestCatchment { id: 2, area_km2: 10.0, up_area_km2: None, polygon: (1.0, 0.0, 1.4, 0.4) },
+        ];
+        let targets = vec![
+            TestSnapTarget { id: 1, catchment_id: 1, weight: 50.0, is_mainstem: true, geometry: TestSnapGeometry::Point(0.7, 0.2) },
+            TestSnapTarget { id: 2, catchment_id: 2, weight: 100.0, is_mainstem: false, geometry: TestSnapGeometry::LineString(1.1, 0.2, 1.3, 0.2) },
+        ];
+        let (_dir, root) = DatasetBuilder::new(2)
+            .with_custom_catchments(catchments)
+            .with_custom_snap_targets(targets)
+            .build();
+        let session = DatasetSession::open(&root).expect("custom snap targets dataset should open");
+        assert!(session.snap().is_some());
     }
 }
