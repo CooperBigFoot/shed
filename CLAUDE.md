@@ -2,7 +2,9 @@
 
 ## Project Overview
 
-shed
+`shed` is intended to be the watershed extraction engine that consumes compiled HFX datasets from the sibling `../hfx` repository. `../hfx` defines the open HydroFabric Exchange contract, validator, and adapter-side normalization rules; this repository is the runtime engine that should load those HFX artifacts and perform outlet resolution, upstream traversal, terminal refinement, and final watershed geometry extraction.
+
+Treat `../hfx/spec/HFX_SPEC.md` as the canonical contract for on-disk inputs. In practical terms, `shed` should read `manifest.json`, `catchments.parquet`, `graph.arrow`, and optionally `snap.parquet`, `flow_dir.tif`, and `flow_acc.tif`, while keeping all source-fabric-specific logic out of the hot path. If a question comes up about file layout, schema, topology semantics, snapping rules, or raster refinement behavior, read `../hfx` first and align this repo with the spec rather than inventing a parallel contract here.
 
 ## Version Bumping (mandatory)
 
