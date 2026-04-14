@@ -345,7 +345,7 @@ fn snap_happy_path() {
     // Outlet exactly on snap target 2
     let outlet = GeoCoord::new(1.2, 0.2);
     let config =
-        ResolverConfig::new().with_search_radius(SearchRadiusMetres::new(5_000.0));
+        ResolverConfig::new().with_search_radius(SearchRadiusMetres::new(5_000.0).unwrap());
 
     let result = resolve_outlet(&session, outlet, &config).unwrap();
 
@@ -370,7 +370,7 @@ fn snap_nearest_wins() {
     // Target 1 is at (0.7, 0.2) — much further away
     let outlet = GeoCoord::new(1.19, 0.2);
     let config =
-        ResolverConfig::new().with_search_radius(SearchRadiusMetres::new(100_000.0));
+        ResolverConfig::new().with_search_radius(SearchRadiusMetres::new(100_000.0).unwrap());
 
     let result = resolve_outlet(&session, outlet, &config).unwrap();
 
@@ -410,7 +410,7 @@ fn snap_weight_tie_break() {
 
     let session = DatasetSession::open(&root).unwrap();
     let outlet = GeoCoord::new(0.25, 0.2);
-    let config = ResolverConfig::new().with_search_radius(SearchRadiusMetres::new(5_000.0));
+    let config = ResolverConfig::new().with_search_radius(SearchRadiusMetres::new(5_000.0).unwrap());
 
     let result = resolve_outlet(&session, outlet, &config).unwrap();
 
@@ -448,7 +448,7 @@ fn snap_mainstem_tie_break() {
 
     let session = DatasetSession::open(&root).unwrap();
     let outlet = GeoCoord::new(0.25, 0.2);
-    let config = ResolverConfig::new().with_search_radius(SearchRadiusMetres::new(5_000.0));
+    let config = ResolverConfig::new().with_search_radius(SearchRadiusMetres::new(5_000.0).unwrap());
 
     let result = resolve_outlet(&session, outlet, &config).unwrap();
 
@@ -466,7 +466,7 @@ fn snap_no_candidates() {
 
     // Outlet far from all targets, tiny search radius
     let outlet = GeoCoord::new(50.0, 50.0);
-    let config = ResolverConfig::new().with_search_radius(SearchRadiusMetres::new(100.0));
+    let config = ResolverConfig::new().with_search_radius(SearchRadiusMetres::new(100.0).unwrap());
 
     let err = resolve_outlet(&session, outlet, &config).unwrap_err();
 
@@ -592,7 +592,7 @@ fn dispatch_snap_over_pip() {
     // Outlet at (1.2, 0.2) — inside atom 2 by PiP, but snap wins with atom 1
     let outlet = GeoCoord::new(1.2, 0.2);
     let config =
-        ResolverConfig::new().with_search_radius(SearchRadiusMetres::new(5_000.0));
+        ResolverConfig::new().with_search_radius(SearchRadiusMetres::new(5_000.0).unwrap());
 
     let result = resolve_outlet(&session, outlet, &config).unwrap();
 
@@ -625,5 +625,60 @@ fn dispatch_pip_when_no_snap() {
         matches!(result.method, ResolutionMethod::PointInPolygon { .. }),
         "expected PointInPolygon method, got {:?}",
         result.method
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 11: snap_linestring_target
+// ---------------------------------------------------------------------------
+
+#[test]
+fn snap_linestring_target() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().to_path_buf();
+
+    let catchments: &[CatchmentSpec] = &[
+        (1, 10.0, None, 0.5, 0.0, 0.9, 0.4),
+        (2, 10.0, None, 1.0, 0.0, 1.4, 0.4),
+    ];
+    let ids: Vec<i64> = catchments.iter().map(|c| c.0).collect();
+
+    write_manifest(&root, catchments.len(), true);
+    write_graph(&root, &ids);
+    write_catchments(&root, catchments);
+
+    // Both targets use LineString geometry
+    let g1 = SnapGeom::Line(0.6, 0.2, 0.8, 0.2);
+    let g2 = SnapGeom::Line(1.1, 0.2, 1.3, 0.2);
+    let snaps: &[SnapSpec<'_>] = &[
+        (1, 1, 100.0, true, &g1),
+        (2, 2, 100.0, true, &g2),
+    ];
+    write_snap(&root, snaps);
+
+    let session = DatasetSession::open(&root).unwrap();
+    // Outlet above target 2's line — perpendicular projection should snap to the line
+    let outlet = GeoCoord::new(1.15, 0.25);
+    let config = ResolverConfig::new()
+        .with_search_radius(SearchRadiusMetres::new(100_000.0).unwrap());
+
+    let result = resolve_outlet(&session, outlet, &config).unwrap();
+
+    assert_eq!(result.atom_id.get(), 2, "should snap to nearest LineString (target 2)");
+    assert!(
+        matches!(result.method, ResolutionMethod::Snap { .. }),
+        "expected Snap method, got {:?}",
+        result.method
+    );
+    // Resolved coord should be the projection onto the line, not the input
+    assert_ne!(
+        result.resolved_coord, result.input_coord,
+        "resolved_coord should differ from input_coord (snapped to line)"
+    );
+    // The projected point should be near (1.15, 0.2) — the perpendicular drop
+    assert!(
+        (result.resolved_coord.lat - 0.2).abs() < 0.001,
+        "projected lat should be ~0.2, got {}",
+        result.resolved_coord.lat
     );
 }

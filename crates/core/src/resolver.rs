@@ -13,7 +13,7 @@ use hfx_core::{AtomId, BoundingBox, CatchmentAtom, MainstemStatus, SnapId, Weigh
 use tracing::{debug, info, instrument, warn};
 
 use crate::algo::coord::GeoCoord;
-use crate::algo::wkb::{WkbDecodeError, decode_wkb, decode_wkb_multi_polygon};
+use crate::algo::wkb::{decode_wkb, decode_wkb_multi_polygon};
 use crate::error::SessionError;
 use crate::session::DatasetSession;
 
@@ -29,12 +29,14 @@ impl SearchRadiusMetres {
 
     /// Construct a new search radius.
     ///
-    /// # Panics (debug only)
+    /// # Errors
     ///
-    /// Panics if `metres` is not finite or is not positive.
-    pub fn new(metres: f64) -> Self {
-        debug_assert!(metres.is_finite() && metres > 0.0, "radius must be finite and positive");
-        Self(metres)
+    /// Returns an error string if `metres` is not finite or not positive.
+    pub fn new(metres: f64) -> Result<Self, &'static str> {
+        if !metres.is_finite() || metres <= 0.0 {
+            return Err("search radius must be finite and positive");
+        }
+        Ok(Self(metres))
     }
 
     /// Return the raw value in metres.
@@ -55,12 +57,13 @@ impl fmt::Display for SearchRadiusMetres {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolverConfig {
     search_radius: SearchRadiusMetres,
+    distance_tolerance_m: f64,
 }
 
 impl ResolverConfig {
     /// Create a config with default values.
     pub fn new() -> Self {
-        Self { search_radius: SearchRadiusMetres::DEFAULT }
+        Self { search_radius: SearchRadiusMetres::DEFAULT, distance_tolerance_m: 1.0 }
     }
 
     /// Override the snap-path search radius.
@@ -69,9 +72,24 @@ impl ResolverConfig {
         self
     }
 
+    /// Override the distance tolerance for snap-target tie-breaking.
+    ///
+    /// Candidates within this tolerance of the nearest candidate are
+    /// considered equidistant, allowing weight and mainstem status to
+    /// break the tie instead of floating-point noise.
+    pub fn with_distance_tolerance(mut self, tolerance_m: f64) -> Self {
+        self.distance_tolerance_m = tolerance_m;
+        self
+    }
+
     /// Return the configured search radius.
     pub fn search_radius(&self) -> SearchRadiusMetres {
         self.search_radius
+    }
+
+    /// Return the configured distance tolerance in metres.
+    pub fn distance_tolerance_m(&self) -> f64 {
+        self.distance_tolerance_m
     }
 }
 
@@ -170,18 +188,29 @@ pub enum OutletResolutionError {
         source: SessionError,
     },
 
-    /// Fired when a WKB geometry column cannot be decoded into a `geo` type.
-    #[error("geometry decode error: {source}")]
-    GeometryDecode {
-        /// Underlying WKB decode error.
-        #[from]
-        source: WkbDecodeError,
+    /// Fired when all candidate geometries failed to decode.
+    ///
+    /// Individual decode failures are logged as warnings and skipped.
+    /// This variant is returned only when every candidate in the search
+    /// area had corrupt or unsupported geometry, leaving no valid
+    /// candidates to evaluate.
+    #[error("all {count} candidate geometries near outlet {outlet} failed to decode")]
+    AllGeometriesCorrupt {
+        /// The outlet coordinate that was queried.
+        outlet: GeoCoord,
+        /// Number of candidates that failed to decode.
+        count: usize,
     },
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
 /// Convert a search radius in metres to a bounding box in degrees around a point.
+///
+/// # Limitations
+///
+/// Does not handle antimeridian wraparound. For outlets near lon=±180,
+/// candidates on the opposite side of the antimeridian will be missed.
 fn search_bbox(center: GeoCoord, radius_m: f64) -> Result<BoundingBox, OutletResolutionError> {
     let lat_rad = center.lat.to_radians();
     let cos_lat = lat_rad.cos().abs().max(1e-10);
@@ -263,6 +292,7 @@ fn resolve_via_snap(
 
     // 4. Score each candidate: decode WKB, compute nearest point, apply circular filter.
     let mut scored: Vec<ScoredCandidate> = Vec::with_capacity(candidates.len());
+    let mut decode_failures: usize = 0;
     for target in candidates {
         let geom = match decode_wkb(target.geometry()) {
             Ok(g) => g,
@@ -272,6 +302,7 @@ fn resolve_via_snap(
                     error = %e,
                     "failed to decode snap target WKB, skipping"
                 );
+                decode_failures += 1;
                 continue;
             }
         };
@@ -283,6 +314,7 @@ fn resolve_via_snap(
                     snap_id = target.id().get(),
                     "indeterminate closest point for snap target, skipping"
                 );
+                decode_failures += 1;
                 continue;
             }
         };
@@ -297,6 +329,12 @@ fn resolve_via_snap(
 
     // 5. No scored candidates after filtering → error.
     if scored.is_empty() {
+        if decode_failures > 0 {
+            return Err(OutletResolutionError::AllGeometriesCorrupt {
+                outlet,
+                count: decode_failures,
+            });
+        }
         return Err(OutletResolutionError::NoSnapCandidates {
             outlet,
             search_radius: config.search_radius(),
@@ -304,12 +342,17 @@ fn resolve_via_snap(
     }
 
     // 6. Select winner via multi-key sort:
-    //    distance ASC → weight DESC → mainstem DESC → snap_id ASC.
+    //    distance ASC (with tolerance) → weight DESC → mainstem DESC → snap_id ASC.
+    let tolerance = config.distance_tolerance_m();
     let winner = scored
         .into_iter()
         .min_by(|a, b| {
-            a.distance_m
-                .total_cmp(&b.distance_m)
+            let dist_ord = if (a.distance_m - b.distance_m).abs() <= tolerance {
+                std::cmp::Ordering::Equal
+            } else {
+                a.distance_m.total_cmp(&b.distance_m)
+            };
+            dist_ord
                 .then_with(|| {
                     b.target.weight().get().total_cmp(&a.target.weight().get())
                 })
@@ -377,6 +420,7 @@ fn resolve_via_pip(
     }
 
     // 4. Decode geometries upfront, skipping failures.
+    let mut decode_failures: usize = 0;
     let decoded: Vec<(&CatchmentAtom, geo::MultiPolygon<f64>)> = candidates
         .iter()
         .filter_map(|atom| {
@@ -388,6 +432,7 @@ fn resolve_via_pip(
                         error = %e,
                         "failed to decode WKB geometry, skipping candidate"
                     );
+                    decode_failures += 1;
                     None
                 }
             }
@@ -415,8 +460,14 @@ fn resolve_via_pip(
         debug!(phase2_hits = hits.len(), "PiP phase 2 (intersects) complete");
     }
 
-    // 8. No hits at all → outside all catchments.
+    // 8. No hits at all → outside all catchments (or all geometries corrupt).
     if hits.is_empty() {
+        if decode_failures > 0 {
+            return Err(OutletResolutionError::AllGeometriesCorrupt {
+                outlet,
+                count: decode_failures,
+            });
+        }
         return Err(OutletResolutionError::OutsideAllCatchments { outlet });
     }
 
@@ -506,7 +557,7 @@ fn resolve_via_pip(
 /// | [`OutletResolutionError::NoSnapCandidates`] | Snap path: no targets within search radius |
 /// | [`OutletResolutionError::OutsideAllCatchments`] | PiP path: outlet not in any catchment |
 /// | [`OutletResolutionError::DatasetRead`] | Parquet store query failed |
-/// | [`OutletResolutionError::GeometryDecode`] | WKB decoding failed |
+/// | [`OutletResolutionError::AllGeometriesCorrupt`] | All candidate geometries in the search area failed to decode |
 #[instrument(skip(session, config), fields(outlet = %outlet))]
 pub fn resolve_outlet(
     session: &DatasetSession,
@@ -537,7 +588,22 @@ mod tests {
 
     #[test]
     fn search_radius_display() {
-        assert_eq!(format!("{}", SearchRadiusMetres::new(1500.0)), "1500 m");
+        assert_eq!(format!("{}", SearchRadiusMetres::new(1500.0).unwrap()), "1500 m");
+    }
+
+    #[test]
+    fn search_radius_rejects_negative() {
+        assert!(SearchRadiusMetres::new(-1.0).is_err());
+    }
+
+    #[test]
+    fn search_radius_rejects_zero() {
+        assert!(SearchRadiusMetres::new(0.0).is_err());
+    }
+
+    #[test]
+    fn search_radius_rejects_nan() {
+        assert!(SearchRadiusMetres::new(f64::NAN).is_err());
     }
 
     // ── Group B: ResolverConfig ───────────────────────────────────────────────
@@ -550,8 +616,21 @@ mod tests {
 
     #[test]
     fn config_with_custom_radius() {
-        let config = ResolverConfig::new().with_search_radius(SearchRadiusMetres::new(5000.0));
+        let config =
+            ResolverConfig::new().with_search_radius(SearchRadiusMetres::new(5000.0).unwrap());
         assert_eq!(config.search_radius().as_f64(), 5000.0);
+    }
+
+    #[test]
+    fn config_default_tolerance() {
+        let config = ResolverConfig::new();
+        assert_eq!(config.distance_tolerance_m(), 1.0);
+    }
+
+    #[test]
+    fn config_with_custom_tolerance() {
+        let config = ResolverConfig::new().with_distance_tolerance(5.0);
+        assert_eq!(config.distance_tolerance_m(), 5.0);
     }
 
     // ── Group C: search_bbox ──────────────────────────────────────────────────
