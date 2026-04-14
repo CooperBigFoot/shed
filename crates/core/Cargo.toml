@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 hfx-core = { path = "../../../hfx/crates/hfx-core" }
 arrow = { version = "54", default-features = false, features = ["ipc"] }
+geo = "0.29"
 parquet = { version = "54", default-features = false, features = ["arrow", "zstd", "snap", "lz4", "flate2"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
