@@ -163,6 +163,20 @@ impl DatasetSession {
             None
         };
 
+        // If snap is present, verify all snap catchment_id references exist
+        if let Some(ref snap_store) = snap {
+            let snap_catchment_ids = snap_store.read_all_catchment_ids()?;
+            for &snap_cid in &snap_catchment_ids {
+                if !catchment_id_set.contains(&snap_cid) {
+                    return Err(SessionError::integrity(format!(
+                        "snap target references catchment {} which has no catchment row",
+                        snap_cid.get(),
+                    )));
+                }
+            }
+            debug!(snap_refs = snap_catchment_ids.len(), "snap catchment_id integrity verified");
+        }
+
         let raster_paths = if matches!(manifest.rasters(), RasterAvailability::Present(_)) {
             Some(RasterPaths {
                 flow_dir: root.join("flow_dir.tif"),

@@ -345,6 +345,83 @@ fn write_snap_with_degenerate_bbox(root: &Path, atom_count: usize) {
     writer.close().unwrap();
 }
 
+/// Write snap targets with explicit catchment IDs.
+///
+/// The row geometry and bbox placement follow the same layout as [`write_snap`],
+/// but `catchment_id` values are supplied by the caller so integrity failures
+/// can be constructed.
+fn write_snap_with_custom_catchment_ids(root: &Path, catchment_ids: &[i64]) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("catchment_id", DataType::Int64, false),
+        Field::new("weight", DataType::Float32, false),
+        Field::new("is_mainstem", DataType::Boolean, false),
+        Field::new("bbox_minx", DataType::Float32, false),
+        Field::new("bbox_miny", DataType::Float32, false),
+        Field::new("bbox_maxx", DataType::Float32, false),
+        Field::new("bbox_maxy", DataType::Float32, false),
+        Field::new("geometry", DataType::Binary, false),
+    ]));
+
+    let props = WriterProperties::builder()
+        .set_max_row_group_size(8192)
+        .set_statistics_enabled(EnabledStatistics::Chunk)
+        .build();
+
+    let file = std::fs::File::create(root.join("snap.parquet")).unwrap();
+    let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props)).unwrap();
+
+    let mut id_b = Int64Builder::new();
+    let mut catchment_id_b = Int64Builder::new();
+    let mut weight_b = Float32Builder::new();
+    let mut is_mainstem_b = BooleanBuilder::new();
+    let mut minx_b = Float32Builder::new();
+    let mut miny_b = Float32Builder::new();
+    let mut maxx_b = Float32Builder::new();
+    let mut maxy_b = Float32Builder::new();
+    let mut geom_b = BinaryBuilder::new();
+
+    for (idx, &catchment_id) in catchment_ids.iter().enumerate() {
+        let row_id = (idx + 1) as i64;
+        let bbox_idx = row_id as f32;
+        let minx = bbox_idx * 0.5;
+        let miny = 0.0f32;
+        let maxx = bbox_idx * 0.5 + 0.4;
+        let maxy = 0.4f32;
+        let cx = ((minx + maxx) / 2.0) as f64;
+        let cy = ((miny + maxy) / 2.0) as f64;
+
+        id_b.append_value(row_id);
+        catchment_id_b.append_value(catchment_id);
+        weight_b.append_value(100.0f32);
+        is_mainstem_b.append_value(true);
+        minx_b.append_value(minx);
+        miny_b.append_value(miny);
+        maxx_b.append_value(maxx);
+        maxy_b.append_value(maxy);
+        geom_b.append_value(&minimal_wkb_linestring(cx - 0.1, cy, cx + 0.1, cy));
+    }
+
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(id_b.finish()),
+            Arc::new(catchment_id_b.finish()),
+            Arc::new(weight_b.finish()),
+            Arc::new(is_mainstem_b.finish()),
+            Arc::new(minx_b.finish()),
+            Arc::new(miny_b.finish()),
+            Arc::new(maxx_b.finish()),
+            Arc::new(maxy_b.finish()),
+            Arc::new(geom_b.finish()),
+        ],
+    )
+    .unwrap();
+
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+}
+
 /// Build a complete synthetic HFX dataset directory. Returns (TempDir, root path).
 /// The TempDir must stay alive for the duration of the test.
 fn build_dataset(
@@ -737,5 +814,31 @@ fn test_degenerate_snap_bbox_opens_and_queries() {
     assert!(
         !results.is_empty(),
         "should find snap targets with degenerate bboxes within the covering query"
+    );
+}
+
+#[test]
+fn test_snap_catchment_id_missing_from_catchments() {
+    // Snap row 2 points at catchment 99, which is absent from catchments.parquet.
+    // Session open must reject the dataset instead of deferring failure to later
+    // outlet-resolution logic.
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    write_manifest(root, 3, true, false, "tree");
+    write_graph(root, 3);
+    write_catchments(root, 3, 8192);
+    write_snap_with_custom_catchment_ids(root, &[1, 99, 3]);
+
+    let err = DatasetSession::open(root).unwrap_err();
+    assert!(
+        matches!(err, SessionError::IntegrityViolation { .. }),
+        "expected IntegrityViolation, got: {err}"
+    );
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains("snap") && msg.contains("catchment") && msg.contains("99"),
+        "error should mention the missing snap catchment reference: {msg}"
     );
 }

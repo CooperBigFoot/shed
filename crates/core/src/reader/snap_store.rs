@@ -46,8 +46,8 @@ fn snap_bbox(
     // Spec allows degenerate bboxes for snap targets (Points, axis-aligned LineStrings).
     // Bump the max by one ULP on each degenerate axis so that BoundingBox::new()'s
     // strict-inequality requirement is satisfied.
-    let padded_maxx = if maxx <= minx { next_up_f32(minx) } else { maxx };
-    let padded_maxy = if maxy <= miny { next_up_f32(miny) } else { maxy };
+    let padded_maxx = if maxx == minx { next_up_f32(minx) } else { maxx };
+    let padded_maxy = if maxy == miny { next_up_f32(miny) } else { maxy };
     BoundingBox::new(minx, miny, padded_maxx, padded_maxy).map_err(|e| {
         SessionError::invalid_row(
             ARTIFACT,
@@ -418,6 +418,62 @@ impl SnapStore {
         Ok(results)
     }
 
+    /// Read all catchment IDs referenced by snap targets (projection read of catchment_id column only).
+    ///
+    /// Used at session open time for referential integrity checks.
+    ///
+    /// # Errors
+    ///
+    /// | Condition | Error variant |
+    /// |---|---|
+    /// | File cannot be opened | [`SessionError::Io`] |
+    /// | File is not valid Parquet | [`SessionError::ParquetParse`] |
+    /// | `catchment_id` column missing | [`SessionError::ParquetSchema`] |
+    /// | Row contains a null `catchment_id` | [`SessionError::InvalidRow`] |
+    /// | `catchment_id` value fails domain validation | [`SessionError::InvalidRow`] |
+    pub fn read_all_catchment_ids(&self) -> Result<Vec<hfx_core::AtomId>, SessionError> {
+        let file = std::fs::File::open(&self.path).map_err(|e| SessionError::io(ARTIFACT, e))?;
+        let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
+            .map_err(|e| SessionError::ParquetParse { artifact: ARTIFACT, source: e })?;
+
+        let parquet_schema = builder.parquet_schema();
+        let col_idx = parquet_schema
+            .columns()
+            .iter()
+            .position(|c| c.name() == "catchment_id")
+            .ok_or_else(|| SessionError::parquet_schema(ARTIFACT, "missing column \"catchment_id\""))?;
+
+        let mask = parquet::arrow::ProjectionMask::roots(parquet_schema, [col_idx]);
+        let reader = builder
+            .with_projection(mask)
+            .with_batch_size(8192)
+            .build()
+            .map_err(|e| SessionError::ParquetParse { artifact: ARTIFACT, source: e })?;
+
+        let mut ids = Vec::new();
+        let mut global_row = 0usize;
+        for batch_result in reader {
+            let batch = batch_result
+                .map_err(|e| SessionError::ParquetParse { artifact: ARTIFACT, source: e.into() })?;
+            let col = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .ok_or_else(|| SessionError::parquet_schema(ARTIFACT, "catchment_id column is not Int64"))?;
+            for i in 0..batch.num_rows() {
+                if col.is_null(i) {
+                    return Err(SessionError::invalid_row(ARTIFACT, global_row + i, "null catchment_id"));
+                }
+                let atom_id = hfx_core::AtomId::new(col.value(i)).map_err(|e| {
+                    SessionError::invalid_row(ARTIFACT, global_row + i, format!("invalid catchment_id: {e}"))
+                })?;
+                ids.push(atom_id);
+            }
+            global_row += batch.num_rows();
+        }
+        Ok(ids)
+    }
+
     /// Return the total number of snap target rows across all row groups.
     pub fn total_rows(&self) -> u64 {
         self.total_rows
@@ -728,6 +784,38 @@ mod tests {
 
         assert_eq!(results.len(), 1, "vertical-line snap target must be returned");
         assert_eq!(results[0].id(), SnapId::new(2).unwrap());
+    }
+
+    #[test]
+    fn test_reversed_bbox_is_rejected() {
+        let geom = minimal_wkb_linestring(1.0, 1.0, 2.0, 2.0);
+        let rows = vec![SnapRow {
+            id: 1,
+            catchment_id: 10,
+            weight: 1.0,
+            is_mainstem: true,
+            minx: 2.0,
+            miny: 1.0,
+            maxx: 1.0,
+            maxy: 2.0,
+            geom,
+        }];
+
+        let tmp = write_snap_parquet(&rows);
+        let store = SnapStore::open(tmp.path()).unwrap();
+
+        let query = BoundingBox::new(0.0, 0.0, 3.0, 3.0).unwrap();
+        let err = store.query_by_bbox(&query).unwrap_err();
+
+        assert!(
+            matches!(err, SessionError::InvalidRow { row: 0, .. }),
+            "expected InvalidRow at row 0, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("bbox") || msg.contains("invalid snap bbox"),
+            "expected bbox-related error, got: {msg}"
+        );
     }
 
     #[test]
