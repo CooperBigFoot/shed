@@ -1,28 +1,59 @@
 //! Pure-Rust watershed delineation algorithms.
 
-pub mod accumulation_tile;
+// ── Foundation types ─────────────────────────────────────────────────────────
 pub mod area;
-pub mod catchment_mask;
 pub mod clean_epsilon;
 pub mod coord;
 pub mod distance;
 pub mod flow_dir;
-pub mod flow_direction_tile;
 pub mod geo_transform;
-pub mod raster_tile;
 pub mod snap_threshold;
 pub mod tile_state;
 
-// Re-exports for convenience.
-pub use accumulation_tile::AccumulationTile;
+// ── Raster infrastructure ────────────────────────────────────────────────────
+pub mod accumulation_tile;
+pub mod catchment_mask;
+pub mod flow_direction_tile;
+pub mod raster_tile;
+
+// ── Raster algorithms ────────────────────────────────────────────────────────
+pub mod polygonize;
+pub mod rasterize;
+pub mod snap;
+pub mod trace;
+
+// ── Geometry processing ──────────────────────────────────────────────────────
+pub mod clean_topology;
+pub mod dissolve;
+pub mod hole_fill;
+pub mod largest_polygon;
+pub mod watershed_area;
+
+// ── Re-exports: foundation types ─────────────────────────────────────────────
 pub use area::AreaKm2;
-pub use catchment_mask::CatchmentMask;
 pub use clean_epsilon::{CleanEpsilon, DEFAULT_CLEANING_EPSILON};
 pub use coord::{GeoCoord, GridCoord, GridDims};
 pub use distance::{DistanceMetres, geodesic_distance};
 pub use flow_dir::{FlowDir, InvalidFlowDir};
-pub use flow_direction_tile::FlowDirectionTile;
 pub use geo_transform::GeoTransform;
-pub use raster_tile::{RasterTile, RasterTileError};
 pub use snap_threshold::SnapThreshold;
 pub use tile_state::{Masked, Raw};
+
+// ── Re-exports: raster infrastructure ────────────────────────────────────────
+pub use accumulation_tile::AccumulationTile;
+pub use catchment_mask::CatchmentMask;
+pub use flow_direction_tile::FlowDirectionTile;
+pub use raster_tile::{RasterTile, RasterTileError};
+
+// ── Re-exports: raster algorithms ────────────────────────────────────────────
+pub use polygonize::polygonize;
+pub use rasterize::rasterize_polygon;
+pub use snap::{SnapError, SnappedPoint, snap_pour_point};
+pub use trace::trace_upstream;
+
+// ── Re-exports: geometry processing ──────────────────────────────────────────
+pub use clean_topology::clean_topology;
+pub use dissolve::{DissolveError, dissolve};
+pub use hole_fill::{HoleFillMode, DEFAULT_FILL_THRESHOLD_PX, fill_holes};
+pub use largest_polygon::largest_polygon;
+pub use watershed_area::{WatershedAreaError, geodesic_area, geodesic_area_multi};
