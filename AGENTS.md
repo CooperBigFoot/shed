@@ -6,6 +6,38 @@
 
 Treat `../hfx/spec/HFX_SPEC.md` as the canonical contract for on-disk inputs. In practical terms, `shed` should read `manifest.json`, `catchments.parquet`, `graph.arrow`, and optionally `snap.parquet`, `flow_dir.tif`, and `flow_acc.tif`, while keeping all source-fabric-specific logic out of the hot path. If a question comes up about file layout, schema, topology semantics, snapping rules, or raster refinement behavior, read `../hfx` first and align this repo with the spec rather than inventing a parallel contract here.
 
+## Behavioral Guidelines
+
+These guidelines are guardrails against common LLM coding mistakes. They bias toward caution over speed, but use judgment for trivial tasks.
+
+### Think Before Coding
+
+- State assumptions explicitly.
+- If a request has multiple plausible interpretations, surface them instead of silently picking one.
+- Prefer the simpler approach when it solves the problem.
+- If the task depends on HFX contract details, check `../hfx` first rather than guessing.
+
+### Simplicity First
+
+- Write the minimum code that solves the requested problem.
+- Do not add speculative abstractions, configurability, or future-proofing.
+- Do not add handling for scenarios that are impossible or outside the request.
+- If the solution feels overbuilt, simplify it before shipping.
+
+### Surgical Changes
+
+- Touch only the lines required for the request.
+- Do not refactor, reformat, or "clean up" adjacent code unless the change requires it.
+- Match the existing local style and structure.
+- Remove only unused code or imports created by your own change; mention unrelated cleanup separately.
+
+### Goal-Driven Execution
+
+- Translate requests into concrete checks or acceptance criteria before implementing.
+- For multi-step tasks, keep a short plan with a verification step for each phase.
+- Bug fixes should be tied to a reproduction or regression test when practical.
+- Behavior changes should end with the smallest useful verification: tests, build, or a concrete manual check.
+
 ## Version Bumping (mandatory)
 
 **Every commit MUST include a patch version bump.** No exceptions.
