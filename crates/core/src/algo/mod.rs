@@ -29,6 +29,11 @@ pub mod hole_fill;
 pub mod largest_polygon;
 pub mod watershed_area;
 
+// ── Pipeline + traits ────────────────────────────────────────────────────────
+pub mod self_intersection;
+pub mod traits;
+pub mod watershed_geometry;
+
 // ── Re-exports: foundation types ─────────────────────────────────────────────
 pub use area::AreaKm2;
 pub use clean_epsilon::{CleanEpsilon, DEFAULT_CLEANING_EPSILON};
@@ -57,3 +62,8 @@ pub use dissolve::{DissolveError, dissolve};
 pub use hole_fill::{HoleFillMode, DEFAULT_FILL_THRESHOLD_PX, fill_holes};
 pub use largest_polygon::largest_polygon;
 pub use watershed_area::{WatershedAreaError, geodesic_area, geodesic_area_multi};
+
+// ── Re-exports: pipeline + traits ────────────────────────────────────────────
+pub use self_intersection::has_self_intersections;
+pub use traits::{GeometryRepair, GeometryRepairError, RasterSource, RasterSourceError};
+pub use watershed_geometry::{Dissolved, HolesFilled, TopologyCleaned, WatershedGeometry};
