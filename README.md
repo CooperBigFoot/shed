@@ -5,7 +5,7 @@
 | # | Component | Status | Version | Tests |
 |---|---|---|---|---|
 | 1 | Dataset Session | **Done** | v0.1.10 | 68 |
-| 2 | Generic Algorithm Core | Not started | — | — |
+| 2 | Generic Algorithm Core | **Done** | v0.1.17 | 222 |
 | 3 | Outlet Resolution | Not started | — | — |
 | 4 | Inclusive Upstream Traversal | Not started | — | — |
 | 5 | Terminal Refinement | Not started | — | — |
