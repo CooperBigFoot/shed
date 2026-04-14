@@ -1,6 +1,6 @@
 //! Scanline polygon rasterizer.
 
-use geo::Polygon;
+use geo::{MultiPolygon, Polygon};
 use rayon::prelude::*;
 use tracing::instrument;
 
@@ -10,16 +10,59 @@ use crate::algo::geo_transform::GeoTransform;
 /// Grid cell count above which rasterization runs scanlines in parallel.
 const PARALLEL_THRESHOLD: usize = 100_000;
 
-/// Fill a single scanline row using the even-odd rule.
+/// Collect all ring vertices (exterior + interior) from a MultiPolygon in pixel space.
+///
+/// Each ring is appended as a closed sequence of `(row_f64, col_f64)` pairs,
+/// with a sentinel `(f64::NAN, f64::NAN)` between rings so `fill_row` treats
+/// them as independent edge lists. The even-odd rule naturally handles holes:
+/// both exterior and interior ring edges toggle the inside/outside parity.
+fn collect_all_vertices(multi_polygon: &MultiPolygon<f64>, geo: &GeoTransform) -> Vec<(f64, f64)> {
+    let mut all_vertices: Vec<(f64, f64)> = Vec::new();
+
+    for polygon in &multi_polygon.0 {
+        // Exterior ring
+        let ext_verts: Vec<(f64, f64)> = polygon
+            .exterior()
+            .coords()
+            .map(|c| geo.coord_to_pixel_f64(c.x, c.y))
+            .collect();
+        all_vertices.extend_from_slice(&ext_verts);
+        // Sentinel separates rings so edges don't bleed across ring boundaries.
+        all_vertices.push((f64::NAN, f64::NAN));
+
+        // Interior rings (holes)
+        for hole in polygon.interiors() {
+            let hole_verts: Vec<(f64, f64)> = hole
+                .coords()
+                .map(|c| geo.coord_to_pixel_f64(c.x, c.y))
+                .collect();
+            all_vertices.extend_from_slice(&hole_verts);
+            all_vertices.push((f64::NAN, f64::NAN));
+        }
+    }
+
+    all_vertices
+}
+
+/// Fill a single scanline row using the even-odd rule across multiple rings.
+///
+/// Vertices are expected in the format produced by [`collect_all_vertices`]:
+/// consecutive `(row_f64, col_f64)` pairs per ring, separated by `NAN` sentinels.
+/// Edges that span a NAN are skipped, so rings remain independent.
 #[inline]
-fn fill_row(r: usize, cols: usize, vertices: &[(f64, f64)], row_cells: &mut [bool]) {
+fn fill_row_multi(r: usize, cols: usize, vertices: &[(f64, f64)], row_cells: &mut [bool]) {
     let scan_y = r as f64 + 0.5;
     let mut intersections: Vec<f64> = Vec::new();
 
     let n = vertices.len();
-    for i in 0..n - 1 {
+    for i in 0..n.saturating_sub(1) {
         let (y0, x0) = vertices[i];
         let (y1, x1) = vertices[i + 1];
+
+        // Skip edges that touch a sentinel.
+        if y0.is_nan() || x0.is_nan() || y1.is_nan() || x1.is_nan() {
+            continue;
+        }
 
         let (lo, hi) = if y0 <= y1 { (y0, y1) } else { (y1, y0) };
         if scan_y <= lo || scan_y > hi {
@@ -46,10 +89,10 @@ fn fill_row(r: usize, cols: usize, vertices: &[(f64, f64)], row_cells: &mut [boo
     }
 }
 
-/// Rasterize a polygon into a flat boolean grid using the even-odd scanline fill rule.
+/// Rasterize a [`MultiPolygon`] into a flat boolean grid using the even-odd scanline fill rule.
 ///
 /// Returns a `Vec<bool>` of length `dims.rows * dims.cols` where `true` indicates the pixel
-/// center falls inside the polygon exterior ring. Interior rings are ignored.
+/// center falls inside the MultiPolygon (accounting for holes via the even-odd rule).
 ///
 /// The grid is laid out in row-major order: index `r * cols + c` corresponds to
 /// pixel `(row=r, col=c)`.
@@ -57,21 +100,20 @@ fn fill_row(r: usize, cols: usize, vertices: &[(f64, f64)], row_cells: &mut [boo
 /// # Algorithm
 ///
 /// For each scanline row `r`, the scanline Y is `r + 0.5` in pixel-row space.
-/// For each edge of the polygon exterior ring, the algorithm computes the
-/// fractional column at which the scanline crosses the edge. Intersections are
-/// sorted and pixels between consecutive pairs (even-odd rule) are filled.
-#[instrument(skip(polygon, geo))]
-pub fn rasterize_polygon(polygon: &Polygon<f64>, geo: &GeoTransform, dims: GridDims) -> Vec<bool> {
+/// Edges from all rings (exterior and interior) of all component polygons are collected.
+/// The even-odd rule naturally handles holes: each ring boundary toggles the parity,
+/// so interior ring edges toggle back to "outside".
+#[instrument(skip(multi_polygon, geo))]
+pub fn rasterize_multi_polygon(
+    multi_polygon: &MultiPolygon<f64>,
+    geo: &GeoTransform,
+    dims: GridDims,
+) -> Vec<bool> {
     let rows = dims.rows;
     let cols = dims.cols;
     let mut mask = vec![false; rows * cols];
 
-    // Convert exterior ring vertices to pixel-space (row_f64, col_f64).
-    let vertices: Vec<(f64, f64)> = polygon
-        .exterior()
-        .coords()
-        .map(|c| geo.coord_to_pixel_f64(c.x, c.y))
-        .collect();
+    let vertices = collect_all_vertices(multi_polygon, geo);
 
     if vertices.len() < 2 {
         return mask;
@@ -81,20 +123,35 @@ pub fn rasterize_polygon(polygon: &Polygon<f64>, geo: &GeoTransform, dims: GridD
         mask.par_chunks_mut(cols)
             .enumerate()
             .for_each(|(r, row_cells)| {
-                fill_row(r, cols, &vertices, row_cells);
+                fill_row_multi(r, cols, &vertices, row_cells);
             });
     } else {
         for (r, row_cells) in mask.chunks_mut(cols).enumerate() {
-            fill_row(r, cols, &vertices, row_cells);
+            fill_row_multi(r, cols, &vertices, row_cells);
         }
     }
 
     mask
 }
 
+/// Rasterize a single [`Polygon`] into a flat boolean grid using the even-odd scanline fill rule.
+///
+/// Convenience wrapper around [`rasterize_multi_polygon`] for callers that already have
+/// a single polygon. Interior rings (holes) are correctly excluded.
+///
+/// Returns a `Vec<bool>` of length `dims.rows * dims.cols` where `true` indicates the pixel
+/// center falls inside the polygon (outside any holes).
+///
+/// The grid is laid out in row-major order: index `r * cols + c` corresponds to
+/// pixel `(row=r, col=c)`.
+#[instrument(skip(polygon, geo))]
+pub fn rasterize_polygon(polygon: &Polygon<f64>, geo: &GeoTransform, dims: GridDims) -> Vec<bool> {
+    rasterize_multi_polygon(&MultiPolygon::new(vec![polygon.clone()]), geo, dims)
+}
+
 #[cfg(test)]
 mod tests {
-    use geo::polygon;
+    use geo::{polygon, MultiPolygon, Polygon, LineString};
 
     use super::*;
     use crate::algo::coord::{GeoCoord, GridDims};
@@ -270,5 +327,135 @@ mod tests {
             "all cells should be true for full-coverage polygon"
         );
         assert_eq!(mask.len(), 160_000);
+    }
+
+    #[test]
+    fn polygon_with_hole() {
+        // 4x4 square with a 2x2 hole in the center.
+        // Exterior: x in [0,4], y in [0,-4]
+        // Hole:     x in [1,3], y in [-1,-3]  (pixel rows 1-2, cols 1-2)
+        let geo = simple_geo();
+        let exterior = LineString::from(vec![
+            (0.0_f64, 0.0_f64),
+            (4.0, 0.0),
+            (4.0, -4.0),
+            (0.0, -4.0),
+            (0.0, 0.0),
+        ]);
+        let hole = LineString::from(vec![
+            (1.0_f64, -1.0_f64),
+            (3.0, -1.0),
+            (3.0, -3.0),
+            (1.0, -3.0),
+            (1.0, -1.0),
+        ]);
+        let poly = Polygon::new(exterior, vec![hole]);
+        let mask = rasterize_polygon(&poly, &geo, GridDims::new(4, 4));
+
+        // Hole pixels (rows 1-2, cols 1-2) must be false.
+        for r in 1..3usize {
+            for c in 1..3usize {
+                assert!(!mask[r * 4 + c], "hole pixel row={r}, col={c} should be false");
+            }
+        }
+        // Corner pixels (row 0 / row 3, cols all; rows 1-2 col 0 / col 3) must be true.
+        for c in 0..4usize {
+            assert!(mask[0 * 4 + c], "top row pixel col={c} should be true");
+            assert!(mask[3 * 4 + c], "bottom row pixel col={c} should be true");
+        }
+        for r in 1..3usize {
+            assert!(mask[r * 4 + 0], "left col pixel row={r} should be true");
+            assert!(mask[r * 4 + 3], "right col pixel row={r} should be true");
+        }
+    }
+
+    #[test]
+    fn multi_polygon_two_components() {
+        // Two non-overlapping 1x1 rectangles in a 4x4 grid.
+        // Component 1: x in [0,1], y in [0,-1]  → pixel (row=0, col=0)
+        // Component 2: x in [3,4], y in [-3,-4] → pixel (row=3, col=3)
+        let geo = simple_geo();
+        let p1 = Polygon::new(
+            LineString::from(vec![
+                (0.0_f64, 0.0_f64),
+                (1.0, 0.0),
+                (1.0, -1.0),
+                (0.0, -1.0),
+                (0.0, 0.0),
+            ]),
+            vec![],
+        );
+        let p2 = Polygon::new(
+            LineString::from(vec![
+                (3.0_f64, -3.0_f64),
+                (4.0, -3.0),
+                (4.0, -4.0),
+                (3.0, -4.0),
+                (3.0, -3.0),
+            ]),
+            vec![],
+        );
+        let mp = MultiPolygon::new(vec![p1, p2]);
+        let mask = rasterize_multi_polygon(&mp, &geo, GridDims::new(4, 4));
+
+        assert!(mask[0 * 4 + 0], "component 1 pixel (0,0) should be true");
+        assert!(mask[3 * 4 + 3], "component 2 pixel (3,3) should be true");
+
+        // All other pixels should be false.
+        let filled: Vec<usize> = mask
+            .iter()
+            .enumerate()
+            .filter(|&(_, v)| *v)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(filled, vec![0, 15], "only pixels 0 and 15 should be filled");
+    }
+
+    #[test]
+    fn multi_polygon_with_hole() {
+        // MultiPolygon with one 4x4 square that has a 2x2 hole, plus a separate 1x1 square.
+        // Holed square: x in [0,4], y in [0,-4] with hole x in [1,3], y in [-1,-3]
+        // Extra square: x in [5,6], y in [0,-1] → pixel (row=0, col=5) — needs 4x6 grid
+        let geo = simple_geo();
+        let holed = Polygon::new(
+            LineString::from(vec![
+                (0.0_f64, 0.0_f64),
+                (4.0, 0.0),
+                (4.0, -4.0),
+                (0.0, -4.0),
+                (0.0, 0.0),
+            ]),
+            vec![LineString::from(vec![
+                (1.0_f64, -1.0_f64),
+                (3.0, -1.0),
+                (3.0, -3.0),
+                (1.0, -3.0),
+                (1.0, -1.0),
+            ])],
+        );
+        let extra = Polygon::new(
+            LineString::from(vec![
+                (5.0_f64, 0.0_f64),
+                (6.0, 0.0),
+                (6.0, -1.0),
+                (5.0, -1.0),
+                (5.0, 0.0),
+            ]),
+            vec![],
+        );
+        let mp = MultiPolygon::new(vec![holed, extra]);
+        let mask = rasterize_multi_polygon(&mp, &geo, GridDims::new(4, 6));
+
+        // Hole pixels (rows 1-2, cols 1-2) must be false.
+        for r in 1..3usize {
+            for c in 1..3usize {
+                assert!(
+                    !mask[r * 6 + c],
+                    "hole pixel row={r}, col={c} should be false"
+                );
+            }
+        }
+        // Extra component pixel (row=0, col=5) must be true.
+        assert!(mask[0 * 6 + 5], "extra component pixel (0,5) should be true");
     }
 }

@@ -41,6 +41,15 @@ pub enum RasterReadError {
         /// Reason why tile construction failed.
         reason: String,
     },
+
+    /// Raster has rotation or shear terms that are not supported.
+    #[error("unsupported raster transform: skew_x={skew_x}, skew_y={skew_y} (only axis-aligned north-up rasters are supported)")]
+    UnsupportedTransform {
+        /// Rotation/shear term in the x direction (GDAL array index 2).
+        skew_x: f64,
+        /// Rotation/shear term in the y direction (GDAL array index 4).
+        skew_y: f64,
+    },
 }
 
 /// Errors from GDAL-backed geometry repair.
@@ -71,22 +80,3 @@ impl From<gdal::errors::GdalError> for GdalRepairError {
     }
 }
 
-/// Errors from WKB decoding.
-#[derive(Debug, thiserror::Error)]
-pub enum WkbDecodeError {
-    /// WKB decoding by the geozero backend failed.
-    #[error("WKB decoding failed: {reason}")]
-    DecodeFailed {
-        /// Reason reported by the decoder.
-        reason: String,
-    },
-
-    /// The decoded geometry type did not match what was expected.
-    #[error("expected {expected}, got {actual}")]
-    UnexpectedType {
-        /// The geometry type that was expected.
-        expected: &'static str,
-        /// The geometry type that was actually decoded.
-        actual: String,
-    },
-}

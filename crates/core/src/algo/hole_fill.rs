@@ -13,13 +13,13 @@ pub enum HoleFillMode {
     RemoveAll,
     /// Remove holes smaller than the given pixel count.
     ///
-    /// The area threshold is `threshold_pixels as f64 * pixel_area_deg2`.
-    /// The caller computes `pixel_area_deg2` from [`crate::algo::geo_transform::GeoTransform::pixel_area_deg2`].
+    /// The area threshold is `threshold_pixels as f64 * pixel_area`.
+    /// The caller computes `pixel_area` from [`crate::algo::geo_transform::GeoTransform::pixel_area`].
     BelowThreshold {
         /// Number of pixels below which a hole is removed.
         threshold_pixels: u32,
-        /// Area of a single raster pixel in square degrees.
-        pixel_area_deg2: f64,
+        /// Area of a single raster pixel in the CRS coordinate units squared.
+        pixel_area: f64,
     },
 }
 
@@ -28,7 +28,7 @@ pub enum HoleFillMode {
 /// For each polygon in `geom`, interior rings are filtered based on `mode`:
 /// - [`HoleFillMode::RemoveAll`]: all holes are dropped.
 /// - [`HoleFillMode::BelowThreshold`]: holes with unsigned area less than
-///   `threshold_pixels as f64 * pixel_area_deg2` are dropped.
+///   `threshold_pixels as f64 * pixel_area` are dropped.
 #[instrument(skip(geom))]
 pub fn fill_holes(geom: MultiPolygon<f64>, mode: HoleFillMode) -> MultiPolygon<f64> {
     let mut total_holes: usize = 0;
@@ -44,9 +44,9 @@ pub fn fill_holes(geom: MultiPolygon<f64>, mode: HoleFillMode) -> MultiPolygon<f
                 HoleFillMode::RemoveAll => vec![],
                 HoleFillMode::BelowThreshold {
                     threshold_pixels,
-                    pixel_area_deg2,
+                    pixel_area,
                 } => {
-                    let threshold_area = threshold_pixels as f64 * pixel_area_deg2;
+                    let threshold_area = threshold_pixels as f64 * pixel_area;
                     interiors
                         .into_iter()
                         .filter(|ring| {
@@ -86,7 +86,7 @@ mod tests {
 
     /// Pixel area matching the original MERIT-Hydro 3 arc-sec pixel, used in tests
     /// to preserve the same numeric thresholds as the hydra-shed originals.
-    const TEST_PIXEL_AREA_DEG2: f64 = 0.000_000_694_444;
+    const TEST_PIXEL_AREA: f64 = 0.000_000_694_444;
 
     /// A tiny hole: 0.001 × 0.001 = 0.000_001 sq-deg, well below threshold.
     ///
@@ -121,7 +121,7 @@ mod tests {
             mp,
             HoleFillMode::BelowThreshold {
                 threshold_pixels: DEFAULT_FILL_THRESHOLD_PX,
-                pixel_area_deg2: TEST_PIXEL_AREA_DEG2,
+                pixel_area: TEST_PIXEL_AREA,
             },
         );
         assert_eq!(result.0.len(), 1);
@@ -136,7 +136,7 @@ mod tests {
             mp,
             HoleFillMode::BelowThreshold {
                 threshold_pixels: DEFAULT_FILL_THRESHOLD_PX,
-                pixel_area_deg2: TEST_PIXEL_AREA_DEG2,
+                pixel_area: TEST_PIXEL_AREA,
             },
         );
         assert_eq!(result.0.len(), 1);
@@ -154,7 +154,7 @@ mod tests {
             mp,
             HoleFillMode::BelowThreshold {
                 threshold_pixels: DEFAULT_FILL_THRESHOLD_PX,
-                pixel_area_deg2: TEST_PIXEL_AREA_DEG2,
+                pixel_area: TEST_PIXEL_AREA,
             },
         );
         assert_eq!(result.0.len(), 1);
@@ -185,7 +185,7 @@ mod tests {
             mp,
             HoleFillMode::BelowThreshold {
                 threshold_pixels: DEFAULT_FILL_THRESHOLD_PX,
-                pixel_area_deg2: TEST_PIXEL_AREA_DEG2,
+                pixel_area: TEST_PIXEL_AREA,
             },
         );
         assert_eq!(result.0.len(), 1);
@@ -231,7 +231,7 @@ mod tests {
             mp,
             HoleFillMode::BelowThreshold {
                 threshold_pixels: DEFAULT_FILL_THRESHOLD_PX,
-                pixel_area_deg2: TEST_PIXEL_AREA_DEG2,
+                pixel_area: TEST_PIXEL_AREA,
             },
         );
 

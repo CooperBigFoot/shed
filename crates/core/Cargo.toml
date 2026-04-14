@@ -7,6 +7,7 @@ edition = "2024"
 hfx-core = { path = "../../../hfx/crates/hfx-core" }
 arrow = { version = "54", default-features = false, features = ["ipc"] }
 geo = "0.29"
+geozero = { version = "0.14", default-features = false, features = ["with-geo", "with-wkb"] }
 rayon = "1"
 parquet = { version = "54", default-features = false, features = ["arrow", "zstd", "snap", "lz4", "flate2"] }
 serde = { version = "1", features = ["derive"] }

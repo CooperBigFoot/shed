@@ -28,8 +28,9 @@ pub struct HolesFilled;
 /// A watershed geometry that progresses through post-processing states.
 ///
 /// The typestate parameter `State` enforces the correct processing order:
-/// 1. [`Dissolved`] → [`TopologyCleaned`] via [`clean_topology`](WatershedGeometry::clean_topology)
-///    or [`repair_topology`](WatershedGeometry::repair_topology)
+/// 1. [`Dissolved`] → [`TopologyCleaned`] via [`clean_topology`](WatershedGeometry::clean_topology),
+///    [`repair_topology`](WatershedGeometry::repair_topology), or
+///    [`assume_clean_topology`](WatershedGeometry::assume_clean_topology)
 /// 2. [`TopologyCleaned`] → [`HolesFilled`] via [`fill_holes`](WatershedGeometry::fill_holes)
 /// 3. [`HolesFilled`] → extract the final polygon via [`largest_polygon`](WatershedGeometry::largest_polygon)
 ///    or [`into_inner`](WatershedGeometry::into_inner)
@@ -79,8 +80,12 @@ impl WatershedGeometry<Dissolved> {
         })
     }
 
-    /// Skip cleaning — geometry is already valid.
-    pub fn with_cleaned_topology(self) -> WatershedGeometry<TopologyCleaned> {
+    /// Assume the geometry is already topologically clean and skip cleaning.
+    ///
+    /// **Use with care.** This bypasses both pure-Rust `clean_topology` and
+    /// GDAL-backed repair. The caller asserts that the geometry has no
+    /// self-intersections, slivers, or micro-gaps.
+    pub fn assume_clean_topology(self) -> WatershedGeometry<TopologyCleaned> {
         WatershedGeometry {
             inner: self.inner,
             _state: PhantomData,
@@ -226,7 +231,7 @@ mod tests {
             .clean_topology(DEFAULT_CLEANING_EPSILON)
             .fill_holes(HoleFillMode::BelowThreshold {
                 threshold_pixels: 100,
-                pixel_area_deg2: 0.000_000_694_444,
+                pixel_area: 0.000_000_694_444,
             })
             .largest_polygon()
             .unwrap();
@@ -239,11 +244,11 @@ mod tests {
     }
 
     #[test]
-    fn with_cleaned_topology_skips_cleaning() {
+    fn assume_clean_topology_skips_cleaning() {
         let mp = MultiPolygon::new(vec![unit_square()]);
-        // with_cleaned_topology should produce a valid TopologyCleaned without running buffer-unbuffer
+        // assume_clean_topology should produce a valid TopologyCleaned without running buffer-unbuffer
         let result = WatershedGeometry::from_dissolved(mp)
-            .with_cleaned_topology()
+            .assume_clean_topology()
             .fill_holes(HoleFillMode::RemoveAll)
             .largest_polygon();
         assert!(result.is_some());

@@ -34,6 +34,9 @@ pub mod self_intersection;
 pub mod traits;
 pub mod watershed_geometry;
 
+// ── WKB decoding ─────────────────────────────────────────────────────────────
+pub mod wkb;
+
 // ── Re-exports: foundation types ─────────────────────────────────────────────
 pub use area::AreaKm2;
 pub use clean_epsilon::{CleanEpsilon, DEFAULT_CLEANING_EPSILON};
@@ -52,7 +55,7 @@ pub use raster_tile::{RasterTile, RasterTileError};
 
 // ── Re-exports: raster algorithms ────────────────────────────────────────────
 pub use polygonize::polygonize;
-pub use rasterize::rasterize_polygon;
+pub use rasterize::{rasterize_multi_polygon, rasterize_polygon};
 pub use snap::{SnapError, SnappedPoint, snap_pour_point};
 pub use trace::trace_upstream;
 
@@ -67,3 +70,6 @@ pub use watershed_area::{WatershedAreaError, geodesic_area, geodesic_area_multi}
 pub use self_intersection::has_self_intersections;
 pub use traits::{GeometryRepair, GeometryRepairError, RasterSource, RasterSourceError};
 pub use watershed_geometry::{Dissolved, HolesFilled, TopologyCleaned, WatershedGeometry};
+
+// ── Re-exports: WKB decoding ──────────────────────────────────────────────────
+pub use wkb::{WkbDecodeError, decode_wkb, decode_wkb_multi_polygon, decode_wkb_polygon};

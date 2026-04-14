@@ -1270,7 +1270,7 @@ dependencies = [
 
 [[package]]
 name = "shed"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "anyhow",
  "shed-core",
@@ -1284,6 +1284,7 @@ version = "0.1.0"
 dependencies = [
  "arrow",
  "geo",
+ "geozero",
  "hfx-core",
  "parquet",
  "rayon",
@@ -1300,7 +1301,6 @@ version = "0.1.0"
 dependencies = [
  "gdal",
  "geo",
- "geozero",
  "hfx-core",
  "shed-core",
  "tempfile",

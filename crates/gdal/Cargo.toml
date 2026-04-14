@@ -8,7 +8,6 @@ shed-core = { path = "../core" }
 hfx-core = { path = "../../../hfx/crates/hfx-core" }
 gdal = { version = "0.19", features = ["bindgen"] }
 geo = "0.29"
-geozero = { version = "0.14", default-features = false, features = ["with-geo", "with-wkb"] }
 thiserror = "2"
 tracing = "0.1"
 

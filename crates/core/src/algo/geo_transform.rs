@@ -26,8 +26,8 @@ impl GeoTransform {
         }
     }
 
-    /// Returns the area of one pixel in square degrees.
-    pub fn pixel_area_deg2(&self) -> f64 {
+    /// Returns the area of one pixel in the CRS coordinate units squared.
+    pub fn pixel_area(&self) -> f64 {
         (self.pixel_width * self.pixel_height).abs()
     }
 
@@ -156,9 +156,9 @@ mod tests {
     }
 
     #[test]
-    fn pixel_area_deg2_is_positive() {
+    fn pixel_area_is_positive() {
         let gt = GeoTransform::new(GeoCoord::new(0.0, 0.0), MERIT_RES, -MERIT_RES);
-        let area = gt.pixel_area_deg2();
+        let area = gt.pixel_area();
         assert!(area > 0.0, "pixel area must be positive, got {area}");
         assert!(
             (area - MERIT_RES * MERIT_RES).abs() < f64::EPSILON,

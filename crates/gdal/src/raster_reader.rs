@@ -66,7 +66,8 @@ impl RasterSource for GdalRasterSource {
                 path: path_str.clone(),
                 reason: e.to_string(),
             })?;
-        let gt = gdal_to_geo_transform(&raw_gt);
+        let gt = gdal_to_geo_transform(&raw_gt)
+            .map_err(|e| map_raster_read_error(e, &path_str))?;
 
         let (raster_width, raster_height) = ds.raster_size();
         let (x_off, y_off, x_size, y_size) =
@@ -116,7 +117,8 @@ impl RasterSource for GdalRasterSource {
                 path: path_str.clone(),
                 reason: e.to_string(),
             })?;
-        let gt = gdal_to_geo_transform(&raw_gt);
+        let gt = gdal_to_geo_transform(&raw_gt)
+            .map_err(|e| map_raster_read_error(e, &path_str))?;
 
         let (raster_width, raster_height) = ds.raster_size();
         let (x_off, y_off, x_size, y_size) =
@@ -175,8 +177,21 @@ fn open_dataset(path: &Path) -> Result<Dataset, RasterReadError> {
 /// GDAL layout: `[origin_x, pixel_w, skew_x, origin_y, skew_y, pixel_h]`
 /// Indices 0 and 3 are the top-left corner; 1 is the pixel width; 5 is the
 /// pixel height (negative for north-up rasters).
-fn gdal_to_geo_transform(gt: &[f64; 6]) -> GeoTransform {
-    GeoTransform::new(GeoCoord::new(gt[0], gt[3]), gt[1], gt[5])
+///
+/// # Errors
+///
+/// | Variant | When |
+/// |---|---|
+/// | [`RasterReadError::UnsupportedTransform`] | `skew_x` or `skew_y` is non-zero (rotated/sheared raster) |
+fn gdal_to_geo_transform(gt: &[f64; 6]) -> Result<GeoTransform, RasterReadError> {
+    // Reject rotated/sheared rasters — our GeoTransform assumes axis-aligned north-up.
+    if gt[2].abs() > f64::EPSILON || gt[4].abs() > f64::EPSILON {
+        return Err(RasterReadError::UnsupportedTransform {
+            skew_x: gt[2],
+            skew_y: gt[4],
+        });
+    }
+    Ok(GeoTransform::new(GeoCoord::new(gt[0], gt[3]), gt[1], gt[5]))
 }
 
 /// Convert a geographic [`Rect`] bounding box to a pixel window `(x_off, y_off, x_size, y_size)`.
@@ -246,7 +261,7 @@ fn replace_nodata_with_nan(mut data: Vec<f32>, gdal_nodata: Option<f64>) -> Vec<
 }
 
 /// Map a `RasterReadError` to the trait's `RasterSourceError`.
-fn map_raster_read_error(e: RasterReadError, _path: &str) -> RasterSourceError {
+fn map_raster_read_error(e: RasterReadError, path: &str) -> RasterSourceError {
     match e {
         RasterReadError::FileNotFound { path } => RasterSourceError::FileNotFound { path },
         RasterReadError::GdalOpen { path, reason } => {
@@ -258,6 +273,14 @@ fn map_raster_read_error(e: RasterReadError, _path: &str) -> RasterSourceError {
         RasterReadError::EmptyWindow { path } => RasterSourceError::EmptyWindow { path },
         RasterReadError::TileConstruction { reason } => {
             RasterSourceError::TileConstruction { reason }
+        }
+        RasterReadError::UnsupportedTransform { skew_x, skew_y } => {
+            RasterSourceError::ReadFailed {
+                path: path.to_owned(),
+                reason: format!(
+                    "unsupported raster transform: skew_x={skew_x}, skew_y={skew_y} (only axis-aligned north-up rasters are supported)"
+                ),
+            }
         }
     }
 }
@@ -272,14 +295,15 @@ mod tests {
 
     fn standard_gt() -> GeoTransform {
         // origin (10.0, 50.0), pixel_width 0.5, pixel_height -0.5
-        gdal_to_geo_transform(&[10.0, 0.5, 0.0, 50.0, 0.0, -0.5])
+        gdal_to_geo_transform(&[10.0, 0.5, 0.0, 50.0, 0.0, -0.5]).expect("standard gt must not fail")
     }
 
     // ── gdal_to_geo_transform ────────────────────────────────────────────────
 
     #[test]
     fn gdal_to_geo_transform_extracts_fields() {
-        let gt = gdal_to_geo_transform(&[10.0, 0.5, 0.0, 50.0, 0.0, -0.5]);
+        let gt = gdal_to_geo_transform(&[10.0, 0.5, 0.0, 50.0, 0.0, -0.5])
+            .expect("axis-aligned raster must not fail");
         assert_eq!(gt.origin_x(), 10.0);
         assert_eq!(gt.origin_y(), 50.0);
         assert_eq!(gt.pixel_width(), 0.5);
@@ -289,11 +313,31 @@ mod tests {
     #[test]
     fn gdal_to_geo_transform_merit_resolution() {
         let pixel = 1.0_f64 / 1200.0;
-        let gt = gdal_to_geo_transform(&[-180.0, pixel, 0.0, 90.0, 0.0, -pixel]);
+        let gt = gdal_to_geo_transform(&[-180.0, pixel, 0.0, 90.0, 0.0, -pixel])
+            .expect("MERIT-resolution raster must not fail");
         assert!((gt.origin_x() - (-180.0)).abs() < f64::EPSILON);
         assert!((gt.origin_y() - 90.0).abs() < f64::EPSILON);
         assert!((gt.pixel_width() - pixel).abs() < 1e-15);
         assert!((gt.pixel_height() - (-pixel)).abs() < 1e-15);
+    }
+
+    #[test]
+    fn gdal_to_geo_transform_rejects_skewed_raster() {
+        // Non-zero skew_x (index 2)
+        let err = gdal_to_geo_transform(&[10.0, 0.5, 0.1, 50.0, 0.0, -0.5])
+            .expect_err("rotated raster must be rejected");
+        assert!(
+            matches!(err, RasterReadError::UnsupportedTransform { skew_x, skew_y: _ } if skew_x.abs() > f64::EPSILON),
+            "expected UnsupportedTransform, got: {err}"
+        );
+
+        // Non-zero skew_y (index 4)
+        let err = gdal_to_geo_transform(&[10.0, 0.5, 0.0, 50.0, 0.1, -0.5])
+            .expect_err("sheared raster must be rejected");
+        assert!(
+            matches!(err, RasterReadError::UnsupportedTransform { skew_x: _, skew_y } if skew_y.abs() > f64::EPSILON),
+            "expected UnsupportedTransform, got: {err}"
+        );
     }
 
     // ── bbox_to_pixel_window ─────────────────────────────────────────────────
