@@ -2,12 +2,12 @@
 members = ["crates/*"]
 
 [package]
-name = "myproject"
+name = "shed"
 version = "0.1.4"
 edition = "2024"
 
 [dependencies]
-myproject-core = { path = "crates/core" }
+shed-core = { path = "crates/core" }
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
