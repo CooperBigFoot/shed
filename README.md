@@ -1,5 +1,17 @@
 # shed
 
+## Component Tracker
+
+| # | Component | Status | Version | Tests |
+|---|---|---|---|---|
+| 1 | Dataset Session | **Done** | v0.1.10 | 68 |
+| 2 | Generic Algorithm Core | Not started | — | — |
+| 3 | Outlet Resolution | Not started | — | — |
+| 4 | Inclusive Upstream Traversal | Not started | — | — |
+| 5 | Terminal Refinement | Not started | — | — |
+| 6 | Geometry Fetch and Final Assembly | Not started | — | — |
+| 7 | Engine Surface | Not started | — | — |
+
 ## Port Plan
 
 ### Summary
