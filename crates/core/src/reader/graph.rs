@@ -1,10 +1,9 @@
 //! Graph reader — loads graph.arrow into a DrainageGraph.
 
 use std::path::Path;
-use std::sync::Arc;
 
-use arrow::array::{Int64Array, LargeListArray, ListArray};
-use arrow::datatypes::{DataType, Field};
+use arrow::array::{Array, Int64Array, LargeListArray, ListArray};
+use arrow::datatypes::DataType;
 use arrow::ipc::reader::FileReader;
 use hfx_core::{AdjacencyRow, AtomId, DrainageGraph};
 use tracing::{debug, info, instrument};
@@ -84,13 +83,15 @@ fn validate_schema(reader: &FileReader<std::fs::File>) -> Result<(), SessionErro
 }
 
 /// Return `true` if `dt` is `List<Int64>` or `LargeList<Int64>`.
+///
+/// Only the inner data type is checked; child field name and nullability are
+/// ignored to stay compatible with Arrow writers that use non-standard child
+/// field names (e.g. `"element"`, `"values"`).
 fn is_list_int64(dt: &DataType) -> bool {
-    let expected = DataType::List(Arc::new(Field::new("item", DataType::Int64, true)));
-    if dt == &expected {
-        return true;
-    }
-    // Also accept LargeList variant.
-    matches!(dt, DataType::LargeList(f) if f.data_type() == &DataType::Int64)
+    matches!(
+        dt,
+        DataType::List(f) | DataType::LargeList(f) if f.data_type() == &DataType::Int64
+    )
 }
 
 /// Read all record batches from the reader and convert each row into an [`AdjacencyRow`].
@@ -106,20 +107,29 @@ fn read_rows(
 
         let num_rows = batch.num_rows();
 
-        // SAFETY: schema was validated above; columns are guaranteed to exist with correct types.
-        let id_col = batch
-            .column_by_name("id")
-            .expect("id column must exist after schema validation");
+        let id_col = batch.column_by_name("id").ok_or_else(|| {
+            SessionError::graph_schema("column \"id\" missing from record batch")
+        })?;
         let id_arr = id_col
             .as_any()
             .downcast_ref::<Int64Array>()
-            .expect("id column must be Int64 after schema validation");
+            .ok_or_else(|| SessionError::graph_schema("column \"id\" is not Int64"))?;
 
-        let upstream_col = batch
-            .column_by_name("upstream_ids")
-            .expect("upstream_ids column must exist after schema validation");
+        let upstream_col =
+            batch.column_by_name("upstream_ids").ok_or_else(|| {
+                SessionError::graph_schema(
+                    "column \"upstream_ids\" missing from record batch",
+                )
+            })?;
 
         for i in 0..num_rows {
+            if id_arr.is_null(i) {
+                return Err(SessionError::invalid_row(
+                    "graph.arrow",
+                    global_row + i,
+                    "null value in non-nullable column \"id\"",
+                ));
+            }
             let raw_id = id_arr.value(i);
             let atom_id = AtomId::new(raw_id).map_err(|e| {
                 SessionError::invalid_row(
@@ -149,18 +159,40 @@ fn extract_upstream(
     row_idx: usize,
 ) -> Result<Vec<AtomId>, SessionError> {
     if let Some(list_arr) = col.as_any().downcast_ref::<ListArray>() {
+        if list_arr.is_null(i) {
+            return Err(SessionError::invalid_row(
+                "graph.arrow",
+                row_idx,
+                "null value in non-nullable column \"upstream_ids\"",
+            ));
+        }
         let values = list_arr.value(i);
         let int_arr = values
             .as_any()
             .downcast_ref::<Int64Array>()
-            .expect("inner values must be Int64 after schema validation");
+            .ok_or_else(|| {
+                SessionError::graph_schema(
+                    "inner values of \"upstream_ids\" are not Int64",
+                )
+            })?;
         convert_upstream_values(int_arr.values(), row_idx)
     } else if let Some(list_arr) = col.as_any().downcast_ref::<LargeListArray>() {
+        if list_arr.is_null(i) {
+            return Err(SessionError::invalid_row(
+                "graph.arrow",
+                row_idx,
+                "null value in non-nullable column \"upstream_ids\"",
+            ));
+        }
         let values = list_arr.value(i);
         let int_arr = values
             .as_any()
             .downcast_ref::<Int64Array>()
-            .expect("inner values must be Int64 after schema validation");
+            .ok_or_else(|| {
+                SessionError::graph_schema(
+                    "inner values of \"upstream_ids\" are not Int64",
+                )
+            })?;
         convert_upstream_values(int_arr.values(), row_idx)
     } else {
         // Schema validation guarantees this branch is unreachable.
@@ -396,6 +428,95 @@ mod tests {
         assert!(
             matches!(err, SessionError::GraphDomain { .. }),
             "expected GraphDomain, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_null_id_value() {
+        use arrow::array::Int64Builder;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph.arrow");
+
+        // Use nullable: true on "id" so the Arrow writer accepts the null at
+        // write time, even though our reader treats nulls as invalid.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, true),
+            Field::new(
+                "upstream_ids",
+                DataType::List(Arc::new(Field::new("item", DataType::Int64, true))),
+                false,
+            ),
+        ]));
+
+        let mut id_builder = Int64Builder::new();
+        id_builder.append_value(1);
+        id_builder.append_null(); // null id at row 1
+        let id_arr = id_builder.finish();
+
+        let mut list_builder = ListBuilder::new(Int64Builder::new());
+        list_builder.append(true); // row 0: empty list
+        list_builder.append(true); // row 1: empty list
+        let upstream_arr = list_builder.finish();
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(id_arr), Arc::new(upstream_arr)],
+        )
+        .unwrap();
+
+        let file = std::fs::File::create(&path).unwrap();
+        let mut writer = FileWriter::try_new(file, &schema).unwrap();
+        writer.write(&batch).unwrap();
+        writer.finish().unwrap();
+
+        let err = load_graph(&path).unwrap_err();
+        assert!(
+            matches!(err, SessionError::InvalidRow { row: 1, .. }),
+            "expected InvalidRow at row 1 for null id, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_null_upstream_ids() {
+        use arrow::array::Int64Builder;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph.arrow");
+
+        // Use nullable: true on "upstream_ids" so the Arrow writer accepts the
+        // null at write time.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new(
+                "upstream_ids",
+                DataType::List(Arc::new(Field::new("item", DataType::Int64, true))),
+                true,
+            ),
+        ]));
+
+        let id_arr = Int64Array::from(vec![1_i64, 2]);
+
+        let mut list_builder = ListBuilder::new(Int64Builder::new());
+        list_builder.append(true); // row 0: valid empty list
+        list_builder.append_null(); // row 1: null list
+        let upstream_arr = list_builder.finish();
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(id_arr), Arc::new(upstream_arr)],
+        )
+        .unwrap();
+
+        let file = std::fs::File::create(&path).unwrap();
+        let mut writer = FileWriter::try_new(file, &schema).unwrap();
+        writer.write(&batch).unwrap();
+        writer.finish().unwrap();
+
+        let err = load_graph(&path).unwrap_err();
+        assert!(
+            matches!(err, SessionError::InvalidRow { row: 1, .. }),
+            "expected InvalidRow at row 1 for null upstream_ids, got {err:?}"
         );
     }
 }

@@ -155,6 +155,14 @@ pub enum SessionError {
         /// Underlying Parquet error.
         source: parquet::errors::ParquetError,
     },
+
+    /// Fired when referential integrity between dataset artifacts is violated —
+    /// for example, a graph atom ID that has no corresponding catchment row.
+    #[error("integrity violation: {detail}")]
+    IntegrityViolation {
+        /// Human-readable description of the integrity failure.
+        detail: String,
+    },
 }
 
 impl SessionError {
@@ -198,5 +206,10 @@ impl SessionError {
         detail: impl Into<String>,
     ) -> Self {
         Self::InvalidRow { artifact, row, detail: detail.into() }
+    }
+
+    /// Construct a [`SessionError::IntegrityViolation`] variant.
+    pub(crate) fn integrity(detail: impl Into<String>) -> Self {
+        Self::IntegrityViolation { detail: detail.into() }
     }
 }

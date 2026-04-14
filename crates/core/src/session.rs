@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use hfx_core::{Manifest, RasterAvailability, SnapAvailability, Topology};
-use tracing::{info, instrument};
+use tracing::{debug, info, instrument};
 
 use crate::error::SessionError;
 use crate::reader::catchment_store::CatchmentStore;
@@ -114,6 +114,48 @@ impl DatasetSession {
                 actual_count: actual,
             });
         }
+
+        // --- Referential integrity: graph ↔ catchments ---
+        debug!("verifying graph ↔ catchment referential integrity");
+        let catchment_ids = catchments.read_all_ids()?;
+        let catchment_id_set: std::collections::HashSet<hfx_core::AtomId> =
+            catchment_ids.iter().copied().collect();
+
+        // Every graph atom must have a catchment row
+        for row in graph.rows() {
+            if !catchment_id_set.contains(&row.id()) {
+                return Err(SessionError::integrity(format!(
+                    "graph atom {} has no corresponding catchment row",
+                    row.id().get(),
+                )));
+            }
+            // Every upstream reference must point to an existing catchment
+            for &upstream_id in row.upstream_ids() {
+                if !catchment_id_set.contains(&upstream_id) {
+                    return Err(SessionError::integrity(format!(
+                        "graph atom {} references upstream atom {} which has no catchment row",
+                        row.id().get(),
+                        upstream_id.get(),
+                    )));
+                }
+            }
+        }
+
+        // Every catchment must have a graph row
+        for &catchment_id in &catchment_ids {
+            if graph.get(catchment_id).is_none() {
+                return Err(SessionError::integrity(format!(
+                    "catchment atom {} has no corresponding graph row",
+                    catchment_id.get(),
+                )));
+            }
+        }
+
+        debug!(
+            graph_atoms = graph.len(),
+            catchment_atoms = catchment_ids.len(),
+            "integrity checks passed"
+        );
 
         let snap = if manifest.snap() == SnapAvailability::Present {
             Some(SnapStore::open(&root.join("snap.parquet"))?)

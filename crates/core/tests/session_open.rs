@@ -84,6 +84,15 @@ fn write_graph(root: &Path, atom_count: usize) {
     write_graph_raw(root, &ids, &upstream);
 }
 
+/// Write a graph with explicit atom IDs and upstream-ID lists.
+///
+/// Unlike [`write_graph`], which always generates a linear chain `1..=N`,
+/// this helper lets callers specify arbitrary IDs so mismatches between graph
+/// and catchments can be constructed.
+fn write_graph_custom(root: &Path, ids: &[i64], upstream_ids: &[Vec<i64>]) {
+    write_graph_raw(root, ids, upstream_ids);
+}
+
 /// Write a DAG graph with the given id and upstream vectors.
 fn write_graph_raw(root: &Path, ids: &[i64], upstream_ids: &[Vec<i64>]) {
     let schema = Arc::new(Schema::new(vec![
@@ -236,6 +245,84 @@ fn write_snap(root: &Path, atom_count: usize) {
         maxx_b.append_value(maxx);
         maxy_b.append_value(maxy);
         geom_b.append_value(&minimal_wkb_linestring(cx - 0.1, cy, cx + 0.1, cy));
+    }
+
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(id_b.finish()),
+            Arc::new(catchment_id_b.finish()),
+            Arc::new(weight_b.finish()),
+            Arc::new(is_mainstem_b.finish()),
+            Arc::new(minx_b.finish()),
+            Arc::new(miny_b.finish()),
+            Arc::new(maxx_b.finish()),
+            Arc::new(maxy_b.finish()),
+            Arc::new(geom_b.finish()),
+        ],
+    )
+    .unwrap();
+
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+}
+
+/// Write snap targets where every bbox is degenerate (minx == maxx, miny == maxy).
+///
+/// Each snap target is a point at the centre of the corresponding catchment
+/// bbox. The HFX spec permits degenerate snap bboxes; the session must open
+/// without error and return results when queried with a covering bbox.
+fn write_snap_with_degenerate_bbox(root: &Path, atom_count: usize) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("catchment_id", DataType::Int64, false),
+        Field::new("weight", DataType::Float32, false),
+        Field::new("is_mainstem", DataType::Boolean, false),
+        Field::new("bbox_minx", DataType::Float32, false),
+        Field::new("bbox_miny", DataType::Float32, false),
+        Field::new("bbox_maxx", DataType::Float32, false),
+        Field::new("bbox_maxy", DataType::Float32, false),
+        Field::new("geometry", DataType::Binary, false),
+    ]));
+
+    let props = WriterProperties::builder()
+        .set_max_row_group_size(8192)
+        .set_statistics_enabled(EnabledStatistics::Chunk)
+        .build();
+
+    let file = std::fs::File::create(root.join("snap.parquet")).unwrap();
+    let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props)).unwrap();
+
+    let mut id_b = Int64Builder::new();
+    let mut catchment_id_b = Int64Builder::new();
+    let mut weight_b = Float32Builder::new();
+    let mut is_mainstem_b = BooleanBuilder::new();
+    let mut minx_b = Float32Builder::new();
+    let mut miny_b = Float32Builder::new();
+    let mut maxx_b = Float32Builder::new();
+    let mut maxy_b = Float32Builder::new();
+    let mut geom_b = BinaryBuilder::new();
+
+    for i in 1..=(atom_count as i64) {
+        let idx = i as f32;
+        // Degenerate point bbox: minx == maxx, miny == maxy at catchment centre.
+        let px = idx * 0.5 + 0.2;
+        let py = 0.2f32;
+
+        id_b.append_value(i);
+        catchment_id_b.append_value(i);
+        weight_b.append_value(100.0f32);
+        is_mainstem_b.append_value(true);
+        minx_b.append_value(px);
+        miny_b.append_value(py);
+        maxx_b.append_value(px); // intentionally equal to minx
+        maxy_b.append_value(py); // intentionally equal to miny
+        geom_b.append_value(&minimal_wkb_linestring(
+            px as f64 - 0.01,
+            py as f64,
+            px as f64 + 0.01,
+            py as f64,
+        ));
     }
 
     let batch = RecordBatch::try_new(
@@ -579,4 +666,76 @@ fn test_dag_topology() {
     // Atom 1 is a headwater
     let row1 = graph.get(AtomId::new(1).unwrap()).unwrap();
     assert!(row1.is_headwater());
+}
+
+#[test]
+fn test_graph_catchment_id_mismatch() {
+    // Graph contains atom 4; catchments only have atoms 1, 2, 3.
+    // The atom_count check passes (manifest=3, catchments=3, graph len=3),
+    // but the referential integrity check must fire because graph atom 4 has
+    // no matching catchment row.
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    write_manifest(root, 3, false, false, "tree");
+    // Catchments: atoms 1, 2, 3
+    write_catchments(root, 3, 8192);
+    // Graph: atoms 1, 2, 4 — atom 4 is absent from catchments, atom 3 is absent from graph
+    write_graph_custom(root, &[1, 2, 4], &[vec![], vec![1], vec![2]]);
+
+    let err = DatasetSession::open(root).unwrap_err();
+    assert!(
+        matches!(err, SessionError::IntegrityViolation { .. }),
+        "expected IntegrityViolation, got: {err}"
+    );
+}
+
+#[test]
+fn test_graph_upstream_id_missing_from_catchments() {
+    // Graph atoms [1, 2, 3] are all present in catchments, but atom 3's
+    // upstream list references atom 99 which does not exist in catchments.
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    write_manifest(root, 3, false, false, "tree");
+    write_catchments(root, 3, 8192);
+    // Atom 3 references upstream atom 99 — not in catchments
+    write_graph_custom(root, &[1, 2, 3], &[vec![], vec![1], vec![99]]);
+
+    let err = DatasetSession::open(root).unwrap_err();
+    assert!(
+        matches!(err, SessionError::IntegrityViolation { .. }),
+        "expected IntegrityViolation, got: {err}"
+    );
+    // The error message should name the missing upstream atom
+    let msg = err.to_string();
+    assert!(msg.contains("99"), "error should mention atom 99: {msg}");
+}
+
+#[test]
+fn test_degenerate_snap_bbox_opens_and_queries() {
+    // Snap targets whose bboxes are degenerate (minx == maxx, miny == maxy).
+    // The session must open without error, and a covering bbox query must
+    // return results.
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    write_manifest(root, 3, true, false, "tree");
+    write_graph(root, 3);
+    write_catchments(root, 3, 8192);
+    write_snap_with_degenerate_bbox(root, 3);
+
+    let session = DatasetSession::open(root)
+        .expect("session with degenerate snap bboxes should open successfully");
+
+    let snap = session.snap().expect("snap store should be present");
+
+    // A large bbox that covers all three point locations:
+    //   atom 1 point: (0.7, 0.2), atom 2: (1.2, 0.2), atom 3: (1.7, 0.2)
+    let bbox = BoundingBox::new(0.0, 0.0, 5.0, 1.0).unwrap();
+    let results = snap.query_by_bbox(&bbox).unwrap();
+    assert!(
+        !results.is_empty(),
+        "should find snap targets with degenerate bboxes within the covering query"
+    );
 }

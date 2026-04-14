@@ -14,6 +14,49 @@ use tracing::{debug, instrument};
 use crate::error::SessionError;
 use crate::reader::{extract_row_group_bbox, require_column, BboxColIndices};
 
+/// Advance a `f32` value to the next representable float strictly greater than `v`.
+///
+/// Used to pad degenerate bbox axes by the smallest possible amount, ensuring
+/// the result is actually greater than the input regardless of magnitude.
+fn next_up_f32(v: f32) -> f32 {
+    // Bit-cast to u32, increment the integer, cast back. This is the
+    // standard "next representable float" trick for positive finite values.
+    // For negative values and -0.0 the increment still moves toward +∞.
+    let bits = v.to_bits();
+    f32::from_bits(bits + 1)
+}
+
+/// Construct a [`BoundingBox`] for a snap target row, padding degenerate axes by epsilon.
+///
+/// The HFX spec (line 292) allows `bbox_min* <= bbox_max*`, so Point and
+/// axis-aligned LineString geometries produce equal min/max values. Since
+/// [`BoundingBox::new`] requires strict inequality, we pad equal axes by one
+/// ULP rather than rejecting valid snap targets.
+fn snap_bbox(
+    minx: f32,
+    miny: f32,
+    maxx: f32,
+    maxy: f32,
+    row: usize,
+) -> Result<BoundingBox, SessionError> {
+    // Fast path: non-degenerate bbox (common case).
+    if let Ok(bbox) = BoundingBox::new(minx, miny, maxx, maxy) {
+        return Ok(bbox);
+    }
+    // Spec allows degenerate bboxes for snap targets (Points, axis-aligned LineStrings).
+    // Bump the max by one ULP on each degenerate axis so that BoundingBox::new()'s
+    // strict-inequality requirement is satisfied.
+    let padded_maxx = if maxx <= minx { next_up_f32(minx) } else { maxx };
+    let padded_maxy = if maxy <= miny { next_up_f32(miny) } else { maxy };
+    BoundingBox::new(minx, miny, padded_maxx, padded_maxy).map_err(|e| {
+        SessionError::invalid_row(
+            ARTIFACT,
+            row,
+            format!("invalid snap bbox even after epsilon padding: {e}"),
+        )
+    })
+}
+
 const ARTIFACT: &str = "snap.parquet";
 
 /// Row-group bounding box with metadata for pruning.
@@ -147,21 +190,39 @@ impl SnapStore {
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)
             .map_err(|e| SessionError::ParquetParse { artifact: ARTIFACT, source: e })?;
 
-        let row_group_indices: Vec<usize> = candidate_indices;
+        // Pre-compute the absolute start row of each selected row group so that
+        // error messages report the correct row index in the file, even after
+        // row-group pruning.
+        let metadata = builder.metadata().clone();
+        let mut rg_absolute_starts: Vec<usize> = Vec::with_capacity(candidate_indices.len());
+        let mut cumulative = 0usize;
+        for rg_idx in 0..metadata.num_row_groups() {
+            if candidate_indices.contains(&rg_idx) {
+                rg_absolute_starts.push(cumulative);
+            }
+            cumulative += metadata.row_group(rg_idx).num_rows() as usize;
+        }
+        let selected_sizes: Vec<usize> = candidate_indices
+            .iter()
+            .map(|&rg| metadata.row_group(rg).num_rows() as usize)
+            .collect();
 
         let reader = builder
-            .with_row_groups(row_group_indices.clone())
+            .with_row_groups(candidate_indices.clone())
             .build()
             .map_err(|e| SessionError::ParquetParse { artifact: ARTIFACT, source: e })?;
 
         let mut results = Vec::new();
-        let mut global_row: usize = 0;
+        // `sel_idx` is the index into `candidate_indices` of the row group
+        // currently being read. `offset_in_group` is the row within that group.
+        let mut sel_idx = 0usize;
+        let mut offset_in_group = 0usize;
 
         for batch_result in reader {
             let batch =
                 batch_result.map_err(|e| SessionError::RowGroupReadError {
                     artifact: ARTIFACT,
-                    row_group: 0,
+                    row_group: candidate_indices[sel_idx],
                     source: e.into(),
                 })?;
 
@@ -248,38 +309,60 @@ impl SnapStore {
                 })?;
 
             for i in 0..num_rows {
-                let row_idx = global_row + i;
+                let absolute_row = rg_absolute_starts[sel_idx] + offset_in_group;
+                offset_in_group += 1;
 
-                // Build per-row bbox for post-filtering.
-                let row_bbox = BoundingBox::new(
+                // Null checks on all non-nullable columns.
+                macro_rules! check_null {
+                    ($col:expr, $name:expr) => {
+                        if $col.is_null(i) {
+                            return Err(SessionError::invalid_row(
+                                ARTIFACT,
+                                absolute_row,
+                                format!("null value in non-nullable column \"{}\"", $name),
+                            ));
+                        }
+                    };
+                }
+                check_null!(id_col, "id");
+                check_null!(catchment_id_col, "catchment_id");
+                check_null!(weight_col, "weight");
+                check_null!(is_mainstem_col, "is_mainstem");
+                check_null!(bbox_minx_col, "bbox_minx");
+                check_null!(bbox_miny_col, "bbox_miny");
+                check_null!(bbox_maxx_col, "bbox_maxx");
+                check_null!(bbox_maxy_col, "bbox_maxy");
+                check_null!(geometry_col_array, "geometry");
+
+                // Build per-row bbox for post-filtering. Uses epsilon padding for
+                // degenerate bboxes (Points, axis-aligned LineStrings) per the spec.
+                let row_bbox = snap_bbox(
                     bbox_minx_col.value(i),
                     bbox_miny_col.value(i),
                     bbox_maxx_col.value(i),
                     bbox_maxy_col.value(i),
-                )
-                .map_err(|e| {
-                    SessionError::invalid_row(ARTIFACT, row_idx, format!("bbox error: {e}"))
-                })?;
+                    absolute_row,
+                )?;
 
                 if !row_bbox.intersects(query_bbox) {
                     continue;
                 }
 
                 let id = SnapId::new(id_col.value(i)).map_err(|e| {
-                    SessionError::invalid_row(ARTIFACT, row_idx, format!("id error: {e}"))
+                    SessionError::invalid_row(ARTIFACT, absolute_row, format!("id error: {e}"))
                 })?;
 
                 let catchment_id =
                     AtomId::new(catchment_id_col.value(i)).map_err(|e| {
                         SessionError::invalid_row(
                             ARTIFACT,
-                            row_idx,
+                            absolute_row,
                             format!("catchment_id error: {e}"),
                         )
                     })?;
 
                 let weight = Weight::new(weight_col.value(i)).map_err(|e| {
-                    SessionError::invalid_row(ARTIFACT, row_idx, format!("weight error: {e}"))
+                    SessionError::invalid_row(ARTIFACT, absolute_row, format!("weight error: {e}"))
                 })?;
 
                 let mainstem_status = if is_mainstem_col.value(i) {
@@ -304,7 +387,11 @@ impl SnapStore {
                 };
 
                 let geometry = WkbGeometry::new(geom_bytes).map_err(|e| {
-                    SessionError::invalid_row(ARTIFACT, row_idx, format!("geometry error: {e}"))
+                    SessionError::invalid_row(
+                        ARTIFACT,
+                        absolute_row,
+                        format!("geometry error: {e}"),
+                    )
                 })?;
 
                 results.push(SnapTarget::new(
@@ -317,7 +404,14 @@ impl SnapStore {
                 ));
             }
 
-            global_row += num_rows;
+            // Advance the selected-group tracker after exhausting this batch.
+            if !selected_sizes.is_empty()
+                && offset_in_group >= selected_sizes[sel_idx]
+                && sel_idx + 1 < candidate_indices.len()
+            {
+                offset_in_group = 0;
+                sel_idx += 1;
+            }
         }
 
         debug!(matched = results.len(), "query_by_bbox complete");
@@ -570,6 +664,205 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].mainstem_status(), MainstemStatus::Mainstem);
         assert_eq!(results[1].mainstem_status(), MainstemStatus::Tributary);
+    }
+
+    /// Minimal valid WKB Point geometry.
+    fn minimal_wkb_point(x: f64, y: f64) -> Vec<u8> {
+        let mut wkb = Vec::new();
+        wkb.push(1u8); // little-endian
+        wkb.extend_from_slice(&1u32.to_le_bytes()); // point type
+        wkb.extend_from_slice(&x.to_le_bytes());
+        wkb.extend_from_slice(&y.to_le_bytes());
+        wkb
+    }
+
+    #[test]
+    fn test_degenerate_bbox_point() {
+        // A snap target with a Point geometry: minx==maxx and miny==maxy.
+        // The spec allows this; snap_bbox() must pad it instead of erroring.
+        let geom = minimal_wkb_point(5.0, 10.0);
+        let rows = vec![SnapRow {
+            id: 1,
+            catchment_id: 10,
+            weight: 1.0,
+            is_mainstem: false,
+            minx: 5.0,
+            miny: 10.0,
+            maxx: 5.0, // equal to minx — degenerate x axis
+            maxy: 10.0, // equal to miny — degenerate y axis
+            geom,
+        }];
+
+        let tmp = write_snap_parquet(&rows);
+        let store = SnapStore::open(tmp.path()).unwrap();
+
+        // Query bbox that covers the point.
+        let query = BoundingBox::new(4.0, 9.0, 6.0, 11.0).unwrap();
+        let results = store.query_by_bbox(&query).unwrap();
+
+        assert_eq!(results.len(), 1, "point snap target must be returned");
+        assert_eq!(results[0].id(), SnapId::new(1).unwrap());
+    }
+
+    #[test]
+    fn test_degenerate_bbox_vertical_line() {
+        // A snap target where minx==maxx (vertical LineString), but miny < maxy.
+        let geom = minimal_wkb_linestring(5.0, 9.0, 5.0, 11.0);
+        let rows = vec![SnapRow {
+            id: 2,
+            catchment_id: 20,
+            weight: 0.5,
+            is_mainstem: true,
+            minx: 5.0,
+            miny: 9.0,
+            maxx: 5.0, // equal to minx — degenerate x axis only
+            maxy: 11.0,
+            geom,
+        }];
+
+        let tmp = write_snap_parquet(&rows);
+        let store = SnapStore::open(tmp.path()).unwrap();
+
+        let query = BoundingBox::new(4.0, 8.0, 6.0, 12.0).unwrap();
+        let results = store.query_by_bbox(&query).unwrap();
+
+        assert_eq!(results.len(), 1, "vertical-line snap target must be returned");
+        assert_eq!(results[0].id(), SnapId::new(2).unwrap());
+    }
+
+    #[test]
+    fn test_null_id_returns_error() {
+        use arrow::array::Int64Builder;
+
+        // Write a snap parquet where the id column is declared nullable and
+        // row 0 has a null id.  The reader must reject this with InvalidRow.
+        let null_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, true), // nullable so writer accepts null
+            Field::new("catchment_id", DataType::Int64, false),
+            Field::new("weight", DataType::Float32, false),
+            Field::new("is_mainstem", DataType::Boolean, false),
+            Field::new("bbox_minx", DataType::Float32, false),
+            Field::new("bbox_miny", DataType::Float32, false),
+            Field::new("bbox_maxx", DataType::Float32, false),
+            Field::new("bbox_maxy", DataType::Float32, false),
+            Field::new("geometry", DataType::Binary, false),
+        ]));
+
+        let mut id_b = Int64Builder::new();
+        id_b.append_null(); // null id at row 0
+        let mut cid_b = Int64Builder::new();
+        cid_b.append_value(10);
+        let mut w_b = Float32Builder::new();
+        w_b.append_value(1.0);
+        let mut ms_b = BooleanBuilder::new();
+        ms_b.append_value(false);
+        let mut minx_b = Float32Builder::new();
+        minx_b.append_value(1.0);
+        let mut miny_b = Float32Builder::new();
+        miny_b.append_value(1.0);
+        let mut maxx_b = Float32Builder::new();
+        maxx_b.append_value(2.0);
+        let mut maxy_b = Float32Builder::new();
+        maxy_b.append_value(2.0);
+        let mut geom_b = BinaryBuilder::new();
+        geom_b.append_value(&minimal_wkb_linestring(1.0, 1.0, 2.0, 2.0));
+
+        let batch = RecordBatch::try_new(
+            null_schema.clone(),
+            vec![
+                Arc::new(id_b.finish()),
+                Arc::new(cid_b.finish()),
+                Arc::new(w_b.finish()),
+                Arc::new(ms_b.finish()),
+                Arc::new(minx_b.finish()),
+                Arc::new(miny_b.finish()),
+                Arc::new(maxx_b.finish()),
+                Arc::new(maxy_b.finish()),
+                Arc::new(geom_b.finish()),
+            ],
+        )
+        .unwrap();
+
+        let tmp = NamedTempFile::new().unwrap();
+        let file = tmp.reopen().unwrap();
+        let mut writer = ArrowWriter::try_new(file, null_schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        let store = SnapStore::open(tmp.path()).unwrap();
+        let query = BoundingBox::new(0.0, 0.0, 5.0, 5.0).unwrap();
+        let err = store.query_by_bbox(&query).unwrap_err();
+        assert!(
+            matches!(err, SessionError::InvalidRow { .. }),
+            "expected InvalidRow for null id, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_null_weight_returns_error() {
+        use arrow::array::Float32Builder as F32B;
+
+        // Row 0 has a null weight column.
+        let null_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("catchment_id", DataType::Int64, false),
+            Field::new("weight", DataType::Float32, true), // nullable so writer accepts null
+            Field::new("is_mainstem", DataType::Boolean, false),
+            Field::new("bbox_minx", DataType::Float32, false),
+            Field::new("bbox_miny", DataType::Float32, false),
+            Field::new("bbox_maxx", DataType::Float32, false),
+            Field::new("bbox_maxy", DataType::Float32, false),
+            Field::new("geometry", DataType::Binary, false),
+        ]));
+
+        let mut id_b = Int64Builder::new();
+        id_b.append_value(1);
+        let mut cid_b = Int64Builder::new();
+        cid_b.append_value(10);
+        let mut w_b = F32B::new();
+        w_b.append_null(); // null weight at row 0
+        let mut ms_b = BooleanBuilder::new();
+        ms_b.append_value(false);
+        let mut minx_b = Float32Builder::new();
+        minx_b.append_value(1.0);
+        let mut miny_b = Float32Builder::new();
+        miny_b.append_value(1.0);
+        let mut maxx_b = Float32Builder::new();
+        maxx_b.append_value(2.0);
+        let mut maxy_b = Float32Builder::new();
+        maxy_b.append_value(2.0);
+        let mut geom_b = BinaryBuilder::new();
+        geom_b.append_value(&minimal_wkb_linestring(1.0, 1.0, 2.0, 2.0));
+
+        let batch = RecordBatch::try_new(
+            null_schema.clone(),
+            vec![
+                Arc::new(id_b.finish()),
+                Arc::new(cid_b.finish()),
+                Arc::new(w_b.finish()),
+                Arc::new(ms_b.finish()),
+                Arc::new(minx_b.finish()),
+                Arc::new(miny_b.finish()),
+                Arc::new(maxx_b.finish()),
+                Arc::new(maxy_b.finish()),
+                Arc::new(geom_b.finish()),
+            ],
+        )
+        .unwrap();
+
+        let tmp = NamedTempFile::new().unwrap();
+        let file = tmp.reopen().unwrap();
+        let mut writer = ArrowWriter::try_new(file, null_schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        let store = SnapStore::open(tmp.path()).unwrap();
+        let query = BoundingBox::new(0.0, 0.0, 5.0, 5.0).unwrap();
+        let err = store.query_by_bbox(&query).unwrap_err();
+        assert!(
+            matches!(err, SessionError::InvalidRow { .. }),
+            "expected InvalidRow for null weight, got {err:?}"
+        );
     }
 
     #[test]

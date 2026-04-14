@@ -173,24 +173,44 @@ impl CatchmentStore {
             .map_err(|e| SessionError::io(ARTIFACT, e))?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)
             .map_err(|e| SessionError::ParquetParse { artifact: ARTIFACT, source: e })?;
+
+        // Pre-compute absolute start row for each selected row group so that
+        // error messages report the correct file-level row index even after
+        // row-group pruning.
+        let all_metadata = builder.metadata().clone();
+        let mut rg_absolute_starts: Vec<usize> = Vec::new();
+        let mut cumulative = 0usize;
+        for rg_idx in 0..all_metadata.num_row_groups() {
+            if matching.contains(&rg_idx) {
+                rg_absolute_starts.push(cumulative);
+            }
+            cumulative += all_metadata.row_group(rg_idx).num_rows() as usize;
+        }
+
+        let selected_sizes: Vec<usize> = matching
+            .iter()
+            .map(|&rg| all_metadata.row_group(rg).num_rows() as usize)
+            .collect();
+
         let reader = builder
-            .with_row_groups(matching)
+            .with_row_groups(matching.clone())
             .with_batch_size(8192)
             .build()
             .map_err(|e| SessionError::ParquetParse { artifact: ARTIFACT, source: e })?;
 
         let mut results = Vec::new();
-        let mut global_row = 0usize;
+        let mut sel_idx = 0usize;
+        let mut offset_in_group = 0usize;
 
         for batch_result in reader {
-            let batch =
-                batch_result.map_err(|e| SessionError::ParquetParse {
-                    artifact: ARTIFACT,
-                    source: parquet::errors::ParquetError::ArrowError(e.to_string()),
-                })?;
+            let batch = batch_result.map_err(|e| SessionError::RowGroupReadError {
+                artifact: ARTIFACT,
+                row_group: matching[sel_idx],
+                source: parquet::errors::ParquetError::ArrowError(e.to_string()),
+            })?;
 
-            let rows =
-                extract_atoms_from_batch(&batch, global_row, ARTIFACT)?;
+            let absolute_row = rg_absolute_starts[sel_idx] + offset_in_group;
+            let rows = extract_atoms_from_batch(&batch, absolute_row, ARTIFACT)?;
 
             for atom in rows {
                 if atom.bbox().intersects(query_bbox) {
@@ -198,7 +218,13 @@ impl CatchmentStore {
                 }
             }
 
-            global_row += batch.num_rows();
+            offset_in_group += batch.num_rows();
+            if sel_idx + 1 < matching.len()
+                && offset_in_group >= selected_sizes[sel_idx]
+            {
+                offset_in_group = 0;
+                sel_idx += 1;
+            }
         }
 
         Ok(results)
@@ -260,6 +286,79 @@ impl CatchmentStore {
         Ok(results)
     }
 
+    /// Read all atom IDs from the catchments file (projection read of the id column only).
+    ///
+    /// Used at session open time for referential integrity checks against the graph.
+    ///
+    /// # Errors
+    ///
+    /// | Condition | Variant |
+    /// |---|---|
+    /// | File not found / unreadable | [`SessionError::Io`] |
+    /// | Not valid Parquet | [`SessionError::ParquetParse`] |
+    /// | Missing or mis-typed id column | [`SessionError::ParquetSchema`] |
+    /// | Null value in id column | [`SessionError::InvalidRow`] |
+    pub fn read_all_ids(&self) -> Result<Vec<AtomId>, SessionError> {
+        let file =
+            std::fs::File::open(&self.path).map_err(|e| SessionError::io(ARTIFACT, e))?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+            .map_err(|e| SessionError::ParquetParse { artifact: ARTIFACT, source: e })?;
+
+        let parquet_schema = builder.parquet_schema();
+        let id_col_idx = parquet_schema
+            .columns()
+            .iter()
+            .position(|c| c.name() == "id")
+            .ok_or_else(|| {
+                SessionError::parquet_schema(ARTIFACT, "missing column \"id\"")
+            })?;
+
+        let mask = parquet::arrow::ProjectionMask::roots(parquet_schema, [id_col_idx]);
+        let reader = builder
+            .with_projection(mask)
+            .with_batch_size(8192)
+            .build()
+            .map_err(|e| SessionError::ParquetParse { artifact: ARTIFACT, source: e })?;
+
+        let mut ids = Vec::new();
+        let mut global_row = 0usize;
+
+        for batch_result in reader {
+            let batch = batch_result
+                .map_err(|e| SessionError::ParquetParse {
+                    artifact: ARTIFACT,
+                    source: parquet::errors::ParquetError::ArrowError(e.to_string()),
+                })?;
+            let id_col = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .ok_or_else(|| {
+                    SessionError::parquet_schema(ARTIFACT, "id column is not Int64")
+                })?;
+            for i in 0..batch.num_rows() {
+                if id_col.is_null(i) {
+                    return Err(SessionError::invalid_row(
+                        ARTIFACT,
+                        global_row + i,
+                        "null id",
+                    ));
+                }
+                let atom_id = AtomId::new(id_col.value(i)).map_err(|e| {
+                    SessionError::invalid_row(
+                        ARTIFACT,
+                        global_row + i,
+                        format!("invalid atom id: {e}"),
+                    )
+                })?;
+                ids.push(atom_id);
+            }
+            global_row += batch.num_rows();
+        }
+
+        Ok(ids)
+    }
+
     /// Return the total number of rows in the Parquet file.
     pub fn total_rows(&self) -> u64 {
         self.total_rows
@@ -306,11 +405,25 @@ fn extract_atoms_from_batch(
     for i in 0..n {
         let global_i = row_offset + i;
 
+        if id_col.is_null(i) {
+            return Err(SessionError::invalid_row(
+                artifact,
+                global_i,
+                "null value in non-nullable column \"id\"",
+            ));
+        }
         let raw_id = id_col.value(i);
         let atom_id = AtomId::new(raw_id).map_err(|e| {
             SessionError::invalid_row(artifact, global_i, format!("id: {e}"))
         })?;
 
+        if area_col.is_null(i) {
+            return Err(SessionError::invalid_row(
+                artifact,
+                global_i,
+                "null value in non-nullable column \"area_km2\"",
+            ));
+        }
         let area = AreaKm2::new(area_col.value(i)).map_err(|e| {
             SessionError::invalid_row(artifact, global_i, format!("area_km2: {e}"))
         })?;
@@ -327,6 +440,34 @@ fn extract_atoms_from_batch(
             })?)
         };
 
+        if minx_col.is_null(i) {
+            return Err(SessionError::invalid_row(
+                artifact,
+                global_i,
+                "null value in non-nullable column \"bbox_minx\"",
+            ));
+        }
+        if miny_col.is_null(i) {
+            return Err(SessionError::invalid_row(
+                artifact,
+                global_i,
+                "null value in non-nullable column \"bbox_miny\"",
+            ));
+        }
+        if maxx_col.is_null(i) {
+            return Err(SessionError::invalid_row(
+                artifact,
+                global_i,
+                "null value in non-nullable column \"bbox_maxx\"",
+            ));
+        }
+        if maxy_col.is_null(i) {
+            return Err(SessionError::invalid_row(
+                artifact,
+                global_i,
+                "null value in non-nullable column \"bbox_maxy\"",
+            ));
+        }
         let bbox =
             BoundingBox::new(
                 minx_col.value(i),
@@ -337,6 +478,29 @@ fn extract_atoms_from_batch(
             .map_err(|e| {
                 SessionError::invalid_row(artifact, global_i, format!("bbox: {e}"))
             })?;
+
+        // Check geometry nullability before dispatching on array type.
+        let geom_is_null = if let Some(arr) =
+            geom_array.as_any().downcast_ref::<BinaryArray>()
+        {
+            arr.is_null(i)
+        } else if let Some(arr) =
+            geom_array.as_any().downcast_ref::<LargeBinaryArray>()
+        {
+            arr.is_null(i)
+        } else {
+            return Err(SessionError::parquet_schema(
+                artifact,
+                "geometry column is not Binary or LargeBinary",
+            ));
+        };
+        if geom_is_null {
+            return Err(SessionError::invalid_row(
+                artifact,
+                global_i,
+                "null value in non-nullable column \"geometry\"",
+            ));
+        }
 
         let geom_bytes: Vec<u8> = if let Some(arr) =
             geom_array.as_any().downcast_ref::<BinaryArray>()
@@ -655,5 +819,211 @@ mod tests {
 
         let result = CatchmentStore::open(tmp.path());
         assert!(matches!(result, Err(SessionError::ParquetSchema { .. })));
+    }
+
+    // -----------------------------------------------------------------------
+    // Null-check tests
+    // -----------------------------------------------------------------------
+
+    /// Write a parquet fixture using a custom schema where one column is
+    /// nullable, then insert a null at position `null_row` in that column.
+    ///
+    /// All other columns get valid values. The `null_col` name must be one of
+    /// the standard schema columns.
+    fn write_fixture_with_null(
+        path: &std::path::Path,
+        null_col: &str,
+        null_row: usize,
+    ) {
+        // Build a schema with the target column overridden to nullable=true.
+        let fields: Vec<Field> = vec![
+            Field::new(
+                "id",
+                DataType::Int64,
+                null_col == "id",
+            ),
+            Field::new(
+                "area_km2",
+                DataType::Float32,
+                null_col == "area_km2",
+            ),
+            Field::new("up_area_km2", DataType::Float32, true),
+            Field::new(
+                "bbox_minx",
+                DataType::Float32,
+                null_col == "bbox_minx",
+            ),
+            Field::new(
+                "bbox_miny",
+                DataType::Float32,
+                null_col == "bbox_miny",
+            ),
+            Field::new(
+                "bbox_maxx",
+                DataType::Float32,
+                null_col == "bbox_maxx",
+            ),
+            Field::new(
+                "bbox_maxy",
+                DataType::Float32,
+                null_col == "bbox_maxy",
+            ),
+            Field::new(
+                "geometry",
+                DataType::Binary,
+                null_col == "geometry",
+            ),
+        ];
+        let schema = Arc::new(Schema::new(fields));
+
+        let props = WriterProperties::builder()
+            .set_statistics_enabled(EnabledStatistics::Chunk)
+            .build();
+        let file = std::fs::File::create(path).unwrap();
+        let mut writer =
+            ArrowWriter::try_new(file, schema.clone(), Some(props)).unwrap();
+
+        // Write 3 rows; row `null_row` gets a null in the target column.
+        let n = 3usize;
+        let mut ids = Int64Builder::new();
+        let mut areas = Float32Builder::new();
+        let mut up_areas = Float32Builder::new();
+        let mut minxs = Float32Builder::new();
+        let mut minys = Float32Builder::new();
+        let mut maxxs = Float32Builder::new();
+        let mut maxys = Float32Builder::new();
+        let mut geoms = BinaryBuilder::new();
+
+        for row in 0..n {
+            let is_null = row == null_row;
+
+            if null_col == "id" && is_null {
+                ids.append_null();
+            } else {
+                ids.append_value(row as i64 + 1);
+            }
+
+            if null_col == "area_km2" && is_null {
+                areas.append_null();
+            } else {
+                areas.append_value(1.0f32);
+            }
+
+            up_areas.append_null(); // always nullable
+
+            if null_col == "bbox_minx" && is_null {
+                minxs.append_null();
+            } else {
+                minxs.append_value(row as f32);
+            }
+            if null_col == "bbox_miny" && is_null {
+                minys.append_null();
+            } else {
+                minys.append_value(0.0f32);
+            }
+            if null_col == "bbox_maxx" && is_null {
+                maxxs.append_null();
+            } else {
+                maxxs.append_value(row as f32 + 1.0);
+            }
+            if null_col == "bbox_maxy" && is_null {
+                maxys.append_null();
+            } else {
+                maxys.append_value(1.0f32);
+            }
+
+            if null_col == "geometry" && is_null {
+                geoms.append_null();
+            } else {
+                let wkb = minimal_wkb_polygon(
+                    row as f64,
+                    0.0,
+                    row as f64 + 1.0,
+                    1.0,
+                );
+                geoms.append_value(&wkb);
+            }
+        }
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(ids.finish()),
+                Arc::new(areas.finish()),
+                Arc::new(up_areas.finish()),
+                Arc::new(minxs.finish()),
+                Arc::new(minys.finish()),
+                Arc::new(maxxs.finish()),
+                Arc::new(maxys.finish()),
+                Arc::new(geoms.finish()),
+            ],
+        )
+        .unwrap();
+
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    #[test]
+    fn test_null_id_returns_error() {
+        let tmp = NamedTempFile::new().unwrap();
+        write_fixture_with_null(tmp.path(), "id", 1);
+
+        let store = CatchmentStore::open(tmp.path()).unwrap();
+        // Cover all 3 rows (lon ∈ [0,3], lat ∈ [0,1])
+        let q = BoundingBox::new(0.0, 0.0, 5.0, 2.0).unwrap();
+        let result = store.query_by_bbox(&q);
+        assert!(
+            matches!(result, Err(SessionError::InvalidRow { ref detail, .. }) if detail.contains("null")),
+            "expected InvalidRow with 'null' detail, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_null_area_returns_error() {
+        let tmp = NamedTempFile::new().unwrap();
+        write_fixture_with_null(tmp.path(), "area_km2", 0);
+
+        let store = CatchmentStore::open(tmp.path()).unwrap();
+        let q = BoundingBox::new(0.0, 0.0, 5.0, 2.0).unwrap();
+        let result = store.query_by_bbox(&q);
+        assert!(
+            matches!(result, Err(SessionError::InvalidRow { ref detail, .. }) if detail.contains("null")),
+            "expected InvalidRow with 'null' detail, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_null_geometry_returns_error() {
+        let tmp = NamedTempFile::new().unwrap();
+        write_fixture_with_null(tmp.path(), "geometry", 2);
+
+        let store = CatchmentStore::open(tmp.path()).unwrap();
+        let q = BoundingBox::new(0.0, 0.0, 5.0, 2.0).unwrap();
+        let result = store.query_by_bbox(&q);
+        assert!(
+            matches!(result, Err(SessionError::InvalidRow { ref detail, .. }) if detail.contains("null")),
+            "expected InvalidRow with 'null' detail, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_read_all_ids() {
+        let tmp = NamedTempFile::new().unwrap();
+        let atoms = [
+            (10i64, 1.0f32, None, [0.0f32, 0.0f32, 1.0f32, 1.0f32]),
+            (20, 2.0, None, [1.0, 0.0, 2.0, 1.0]),
+            (30, 3.0, None, [2.0, 0.0, 3.0, 1.0]),
+        ];
+        write_fixture(tmp.path(), &atoms, 1024);
+
+        let store = CatchmentStore::open(tmp.path()).unwrap();
+        let ids = store.read_all_ids().unwrap();
+
+        assert_eq!(ids.len(), 3);
+        let raw: Vec<i64> = ids.iter().map(|id| id.get()).collect();
+        assert!(raw.contains(&10));
+        assert!(raw.contains(&20));
+        assert!(raw.contains(&30));
     }
 }
