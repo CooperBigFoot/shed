@@ -77,7 +77,17 @@ impl ResolverConfig {
     /// Candidates within this tolerance of the nearest candidate are
     /// considered equidistant, allowing weight and mainstem status to
     /// break the tie instead of floating-point noise.
+    ///
+    /// Must be finite and non-negative (zero disables tolerance).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `tolerance_m` is negative, NaN, or infinite.
     pub fn with_distance_tolerance(mut self, tolerance_m: f64) -> Self {
+        assert!(
+            tolerance_m.is_finite() && tolerance_m >= 0.0,
+            "distance tolerance must be finite and non-negative, got {tolerance_m}"
+        );
         self.distance_tolerance_m = tolerance_m;
         self
     }
@@ -329,7 +339,10 @@ fn resolve_via_snap(
 
     // 5. No scored candidates after filtering → error.
     if scored.is_empty() {
-        if decode_failures > 0 {
+        // Only report corrupt geometries when every candidate failed to
+        // decode. Mixed outcomes (some decoded, some filtered by radius)
+        // are a normal "no candidates" situation.
+        if decode_failures > 0 && decode_failures == total_candidates {
             return Err(OutletResolutionError::AllGeometriesCorrupt {
                 outlet,
                 count: decode_failures,
@@ -341,21 +354,26 @@ fn resolve_via_snap(
         });
     }
 
-    // 6. Select winner via multi-key sort:
-    //    distance ASC (with tolerance) → weight DESC → mainstem DESC → snap_id ASC.
+    // 6. Two-step selection with distance tolerance:
+    //    a) Find the minimum distance among all scored candidates.
+    //    b) Restrict to candidates within min_distance + tolerance.
+    //    c) Among those, rank by weight DESC → mainstem DESC → snap_id ASC.
     let tolerance = config.distance_tolerance_m();
+    let min_distance = scored
+        .iter()
+        .map(|c| c.distance_m)
+        .min_by(f64::total_cmp)
+        .expect("scored is non-empty");
+    let threshold = min_distance + tolerance;
+
     let winner = scored
         .into_iter()
+        .filter(|c| c.distance_m <= threshold)
         .min_by(|a, b| {
-            let dist_ord = if (a.distance_m - b.distance_m).abs() <= tolerance {
-                std::cmp::Ordering::Equal
-            } else {
-                a.distance_m.total_cmp(&b.distance_m)
-            };
-            dist_ord
-                .then_with(|| {
-                    b.target.weight().get().total_cmp(&a.target.weight().get())
-                })
+            // Within the tolerance band: rank by weight, mainstem, then id.
+            // Distance is NOT used here — all candidates in the band are
+            // treated as equidistant.
+            b.target.weight().get().total_cmp(&a.target.weight().get())
                 .then_with(|| {
                     let mainstem_rank = |s: MainstemStatus| match s {
                         MainstemStatus::Mainstem => 1u8,
@@ -368,7 +386,7 @@ fn resolve_via_snap(
                     a.target.id().get().cmp(&b.target.id().get())
                 })
         })
-        .expect("scored is non-empty, min_by always returns Some");
+        .expect("at least one candidate is within threshold");
 
     // 7. Build result.
     info!(
@@ -462,7 +480,10 @@ fn resolve_via_pip(
 
     // 8. No hits at all → outside all catchments (or all geometries corrupt).
     if hits.is_empty() {
-        if decode_failures > 0 {
+        // Only report corrupt geometries when every candidate failed to
+        // decode. Mixed outcomes (some decoded but didn't contain the
+        // point) are a normal "outside all catchments" situation.
+        if decode_failures > 0 && decode_failures == candidates.len() {
             return Err(OutletResolutionError::AllGeometriesCorrupt {
                 outlet,
                 count: decode_failures,
@@ -631,6 +652,30 @@ mod tests {
     fn config_with_custom_tolerance() {
         let config = ResolverConfig::new().with_distance_tolerance(5.0);
         assert_eq!(config.distance_tolerance_m(), 5.0);
+    }
+
+    #[test]
+    fn config_tolerance_zero_is_valid() {
+        let config = ResolverConfig::new().with_distance_tolerance(0.0);
+        assert_eq!(config.distance_tolerance_m(), 0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "finite and non-negative")]
+    fn config_tolerance_rejects_negative() {
+        ResolverConfig::new().with_distance_tolerance(-1.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "finite and non-negative")]
+    fn config_tolerance_rejects_nan() {
+        ResolverConfig::new().with_distance_tolerance(f64::NAN);
+    }
+
+    #[test]
+    #[should_panic(expected = "finite and non-negative")]
+    fn config_tolerance_rejects_infinity() {
+        ResolverConfig::new().with_distance_tolerance(f64::INFINITY);
     }
 
     // ── Group C: search_bbox ──────────────────────────────────────────────────
