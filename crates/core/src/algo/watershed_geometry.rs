@@ -133,13 +133,22 @@ impl WatershedGeometry<HolesFilled> {
     /// | [`WatershedAreaError::EmptyGeometry`] | Multi-polygon contains no polygons |
     /// | [`WatershedAreaError::NonFiniteArea`] | Geodesic area computation yields non-finite value |
     pub fn geodesic_area(&self) -> Result<AreaKm2, WatershedAreaError> {
-        let normalized = normalize_winding(&self.inner);
+        let normalized = self.canonical_multi_polygon();
         geodesic_area_multi(&normalized)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn into_canonical_multi_polygon(self) -> MultiPolygon<f64> {
+        MultiPolygon::new(self.inner.0.into_iter().map(normalize_polygon_winding).collect())
     }
 
     /// Access the inner geometry.
     pub fn into_inner(self) -> MultiPolygon<f64> {
         self.inner
+    }
+
+    fn canonical_multi_polygon(&self) -> MultiPolygon<f64> {
+        normalize_winding(&self.inner)
     }
 }
 
@@ -317,6 +326,9 @@ mod tests {
         let result = WatershedGeometry::from_dissolved(mp)
             .repair_topology(&repairer, DEFAULT_CLEANING_EPSILON);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), GeometryRepairError::StillInvalid));
+        assert!(matches!(
+            result.unwrap_err(),
+            GeometryRepairError::StillInvalid
+        ));
     }
 }
