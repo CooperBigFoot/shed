@@ -22,6 +22,9 @@ pub mod rasterize;
 pub mod snap;
 pub mod trace;
 
+// ── Graph traversal ──────────────────────────────────────────────────────────
+pub mod upstream;
+
 // ── Geometry processing ──────────────────────────────────────────────────────
 pub mod clean_topology;
 pub mod dissolve;
@@ -58,6 +61,9 @@ pub use polygonize::polygonize;
 pub use rasterize::{rasterize_multi_polygon, rasterize_polygon};
 pub use snap::{SnapError, SnappedPoint, snap_pour_point};
 pub use trace::trace_upstream;
+
+// ── Re-exports: graph traversal ──────────────────────────────────────────────
+pub use upstream::{TraversalError, UpstreamAtoms, collect_upstream};
 
 // ── Re-exports: geometry processing ──────────────────────────────────────────
 pub use clean_topology::clean_topology;

@@ -6,7 +6,7 @@ use geo::{Area, BooleanOps, Coord, LineString, MultiPolygon, Polygon};
 use rayon::prelude::*;
 use tracing::{debug, instrument};
 
-use crate::algo::clean_epsilon::{CleanEpsilon, DEFAULT_CLEANING_EPSILON};
+use crate::algo::clean_epsilon::CleanEpsilon;
 
 /// Mitre-join denominator threshold. When `1 + cos(angle)` falls below this,
 /// switch from mitre to bevel join to prevent spikes. Corresponds to a mitre
@@ -199,6 +199,7 @@ fn edge_normal(a: Coord<f64>, b: Coord<f64>) -> Option<Coord<f64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::algo::clean_epsilon::DEFAULT_CLEANING_EPSILON;
 
     fn unit_square() -> Polygon<f64> {
         Polygon::new(

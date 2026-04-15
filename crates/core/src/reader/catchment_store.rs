@@ -23,6 +23,7 @@ const ARTIFACT: &str = "catchments.parquet";
 struct RowGroupBbox {
     index: usize,
     bbox: BoundingBox,
+    #[allow(dead_code)]
     row_count: usize,
 }
 
@@ -41,6 +42,7 @@ pub struct CatchmentStore {
     /// Row groups that lacked bbox statistics (included conservatively in all queries).
     groups_without_stats: Vec<usize>,
     total_rows: u64,
+    #[allow(dead_code)]
     bbox_col_indices: BboxColIndices,
 }
 

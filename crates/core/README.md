@@ -15,6 +15,7 @@ graph TD
     algo[algo/] --> foundation[Foundation Types\ncoord · area · distance\ngeo_transform · flow_dir\nsnap_threshold · clean_epsilon\ntile_state]
     algo --> raster_infra[Raster Infrastructure\nraster_tile · flow_direction_tile\naccumulation_tile · catchment_mask]
     algo --> algorithms[Raster Algorithms\ntrace · snap · rasterize · polygonize]
+    algo --> graph_traversal[Graph Traversal\ncollect_upstream]
     algo --> geometry[Geometry Processing\ndissolve · clean_topology · hole_fill\nlargest_polygon · watershed_area\nself_intersection]
     algo --> pipeline[Pipeline + Traits\nwatershed_geometry · traits]
 
@@ -52,6 +53,7 @@ sequenceDiagram
 | D8 | Eight-direction flow model where each raster cell drains to exactly one of its 8 neighbours |
 | ESRI D8 | D8 encoding using powers of two: E=1, SE=2, S=4, SW=8, W=16, NW=32, N=64, NE=128 |
 | TauDEM D8 | D8 encoding counter-clockwise from east: E=1, NE=2, N=3, NW=4, W=5, SW=6, S=7, SE=8 |
+| Upstream set | All atoms reachable via upstream adjacency from a terminal atom, inclusive of the terminal itself |
 | Pour point | The outlet cell of a watershed — the single cell where flow exits the catchment |
 | Snap | Moving a pour point to the nearest high-accumulation cell within a catchment mask |
 | SnapThreshold | Minimum flow-accumulation pixel count a cell must exceed to be a snap candidate |
@@ -88,6 +90,8 @@ sequenceDiagram
 | `SnappedPoint` | `algo/snap.rs` | Result of a successful pour-point snap (grid cell + geo coord + accumulation) |
 | `snap_pour_point` | `algo/snap.rs` | Snap outlet to nearest masked cell above `SnapThreshold` |
 | `trace_upstream` | `algo/trace.rs` | DFS upstream traversal returning a `CatchmentMask` |
+| `collect_upstream` | `algo/upstream.rs` | BFS upstream traversal over `DrainageGraph` — returns `UpstreamAtoms` |
+| `UpstreamAtoms` | `algo/upstream.rs` | Terminal atom + full upstream set with O(1) membership check |
 | `dissolve` | `algo/dissolve.rs` | Parallel boolean union of polygon slices |
 | `RasterSource` | `algo/traits.rs` | Trait for windowed GeoTIFF reads; implemented by `shed-gdal::GdalRasterSource` |
 | `GeometryRepair` | `algo/traits.rs` | Trait for geometry repair; implemented by `shed-gdal::GdalGeometryRepair` |

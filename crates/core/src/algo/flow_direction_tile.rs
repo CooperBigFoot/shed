@@ -187,10 +187,7 @@ fn decode(raw: u8, encoding: FlowDirEncoding) -> Option<FlowDir> {
     if raw == NODATA {
         return None;
     }
-    match FlowDir::from_encoded(raw, encoding) {
-        Ok(dir) => dir,
-        Err(_) => None, // treat invalid encodings as nodata
-    }
+    FlowDir::from_encoded(raw, encoding).unwrap_or_default()
 }
 
 #[cfg(test)]

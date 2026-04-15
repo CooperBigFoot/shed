@@ -6,8 +6,8 @@
 |---|---|---|---|---|
 | 1 | Dataset Session | **Done** | v0.1.10 | 68 |
 | 2 | Generic Algorithm Core | **Done** | v0.1.19 | 296 |
-| 3 | Outlet Resolution | **Done** | v0.1.25 | 38 |
-| 4 | Inclusive Upstream Traversal | Not started | — | — |
+| 3 | Outlet Resolution | **Done** | v0.1.27 | 38 |
+| 4 | Inclusive Upstream Traversal | **Done** | v0.1.28 | 23 |
 | 5 | Terminal Refinement | Not started | — | — |
 | 6 | Geometry Fetch and Final Assembly | Not started | — | — |
 | 7 | Engine Surface | Not started | — | — |
