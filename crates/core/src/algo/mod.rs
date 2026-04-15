@@ -21,6 +21,7 @@ pub mod polygonize;
 pub mod rasterize;
 pub mod snap;
 pub mod trace;
+pub mod refine;
 
 // ── Graph traversal ──────────────────────────────────────────────────────────
 pub mod upstream;
@@ -61,6 +62,7 @@ pub use polygonize::polygonize;
 pub use rasterize::{rasterize_multi_polygon, rasterize_polygon};
 pub use snap::{SnapError, SnappedPoint, snap_pour_point};
 pub use trace::trace_upstream;
+pub use refine::{RefinementError, RefinementResult, refine_terminal, refine_terminal_from_source};
 
 // ── Re-exports: graph traversal ──────────────────────────────────────────────
 pub use upstream::{TraversalError, UpstreamAtoms, collect_upstream};

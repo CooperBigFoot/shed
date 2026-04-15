@@ -14,11 +14,11 @@
 pub struct SnapThreshold(u32);
 
 impl SnapThreshold {
-    /// Default threshold for a single, isolated outlet.
-    pub const FALLBACK_SINGLE: Self = Self(500);
-
-    /// Default threshold when processing multiple outlets simultaneously.
-    pub const FALLBACK_MULTI: Self = Self(5000);
+    /// Default snap threshold aligned with the HFX spec (1,000 upstream cells).
+    ///
+    /// Used when the caller does not supply an explicit threshold.
+    /// See HFX v0.1 §5: "configurable, default: 1,000 cells".
+    pub const DEFAULT: Self = Self(1000);
 
     /// Creates a new threshold from a raw pixel count.
     pub fn new(pixels: u32) -> Self {
@@ -41,9 +41,9 @@ mod tests {
     use super::SnapThreshold;
 
     #[test]
-    fn constants() {
-        assert_eq!(SnapThreshold::FALLBACK_SINGLE.pixels(), 500);
-        assert_eq!(SnapThreshold::FALLBACK_MULTI.pixels(), 5000);
+    fn default_constant() {
+        assert_eq!(SnapThreshold::DEFAULT.pixels(), 1000);
+        assert_eq!(SnapThreshold::DEFAULT.as_f32(), 1000.0f32);
     }
 
     #[test]
@@ -67,20 +67,8 @@ mod tests {
     }
 
     #[test]
-    fn fallback_single_value() {
-        assert_eq!(SnapThreshold::FALLBACK_SINGLE.pixels(), 500);
-        assert_eq!(SnapThreshold::FALLBACK_SINGLE.as_f32(), 500.0f32);
-    }
-
-    #[test]
-    fn fallback_multi_value() {
-        assert_eq!(SnapThreshold::FALLBACK_MULTI.pixels(), 5000);
-        assert_eq!(SnapThreshold::FALLBACK_MULTI.as_f32(), 5000.0f32);
-    }
-
-    #[test]
     fn ordering() {
         assert!(SnapThreshold::new(100) < SnapThreshold::new(200));
-        assert!(SnapThreshold::FALLBACK_SINGLE < SnapThreshold::FALLBACK_MULTI);
+        assert!(SnapThreshold::new(100) < SnapThreshold::DEFAULT);
     }
 }
