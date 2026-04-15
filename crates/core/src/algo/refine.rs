@@ -6,6 +6,19 @@
 //! 3. Snapping the outlet to the nearest high-accumulation cell.
 //! 4. Tracing all upstream cells from the snapped outlet.
 //! 5. Polygonizing the upstream trace mask back to geographic coordinates.
+//!
+//! # Semantic divergence from hydra-shed
+//!
+//! The original `high_res_path` in hydra-shed masks only the accumulation tile
+//! (to constrain snapping) and traces on the **unmasked** flow direction tile,
+//! allowing the refined polygon to extend beyond the coarse terminal boundary.
+//!
+//! This implementation masks **both** tiles, so the trace is strictly contained
+//! within the terminal polygon. This guarantees the refined polygon is a
+//! sub-polygon of the coarse terminal, preventing overlap with upstream atoms
+//! in Component 6's dissolve step. The tradeoff is that raster-supported area
+//! outside the coarse boundary is lost — if the coarse polygon is too tight,
+//! refinement can only shrink, never correct outward.
 
 use std::path::Path;
 
@@ -28,9 +41,9 @@ use crate::algo::traits::{RasterSource, RasterSourceError};
 /// Errors from terminal atom raster refinement.
 #[derive(Debug, thiserror::Error)]
 pub enum RefinementError {
-    /// Flow direction and accumulation tiles have mismatched dimensions or geo-transforms.
-    #[error("tile mismatch: flow_dir is {fd_rows}x{fd_cols}, accumulation is {acc_rows}x{acc_cols}")]
-    TileMismatch {
+    /// Flow direction and accumulation tiles have different grid dimensions.
+    #[error("tile dimension mismatch: flow_dir is {fd_rows}x{fd_cols}, accumulation is {acc_rows}x{acc_cols}")]
+    DimensionMismatch {
         /// Number of rows in the flow direction tile.
         fd_rows: usize,
         /// Number of columns in the flow direction tile.
@@ -40,6 +53,22 @@ pub enum RefinementError {
         /// Number of columns in the accumulation tile.
         acc_cols: usize,
     },
+
+    /// Flow direction and accumulation tiles have the same dimensions but
+    /// different geo-transforms (origin or pixel size).
+    #[error("tile geo-transform mismatch: tiles share {rows}x{cols} dims but have different origins or pixel sizes")]
+    GeoTransformMismatch {
+        /// Shared row count.
+        rows: usize,
+        /// Shared column count.
+        cols: usize,
+    },
+
+    /// The terminal polygon has no bounding rectangle (degenerate or empty geometry).
+    ///
+    /// Only produced by the loader wrapper [`refine_terminal_from_source`].
+    #[error("terminal polygon has no bounding rectangle (degenerate or empty geometry)")]
+    DegenerateTerminalPolygon,
 
     /// Rasterizing the terminal polygon produced an all-false mask.
     #[error("terminal polygon produced an empty raster mask ({rows}x{cols} tile)")]
@@ -127,11 +156,20 @@ impl RefinementResult {
 ///
 /// | Condition | Error |
 /// |-----------|-------|
-/// | Flow-dir and accumulation tiles have different dims or geo-transforms | [`RefinementError::TileMismatch`] |
+/// | Flow-dir and accumulation tiles have different dims | [`RefinementError::DimensionMismatch`] |
+/// | Flow-dir and accumulation tiles have different geo-transforms | [`RefinementError::GeoTransformMismatch`] |
 /// | Terminal polygon rasterizes to an empty mask | [`RefinementError::EmptyRasterMask`] |
 /// | Tile masking fails due to dimension mismatch | [`RefinementError::MaskFailed`] |
 /// | No cell above threshold near outlet | [`RefinementError::SnapFailed`] |
 /// | Trace mask polygonizes to nothing | [`RefinementError::EmptyPolygonization`] |
+///
+/// # Design note — boundary containment
+///
+/// Both tiles are masked to the terminal polygon before tracing. This means
+/// the refined polygon is always a strict sub-polygon of the coarse terminal.
+/// If the coarse boundary is too tight relative to the raster-derived
+/// watershed, refinement cannot recover that area. See module-level
+/// documentation for the full rationale.
 #[instrument(skip(terminal_polygon, flow_dir, accumulation))]
 pub fn refine_terminal(
     terminal_polygon: &MultiPolygon<f64>,
@@ -143,12 +181,18 @@ pub fn refine_terminal(
     // Step 1: Validate tile alignment
     let fd_dims = flow_dir.dims();
     let acc_dims = accumulation.dims();
-    if fd_dims != acc_dims || flow_dir.geo() != accumulation.geo() {
-        return Err(RefinementError::TileMismatch {
+    if fd_dims != acc_dims {
+        return Err(RefinementError::DimensionMismatch {
             fd_rows: fd_dims.rows,
             fd_cols: fd_dims.cols,
             acc_rows: acc_dims.rows,
             acc_cols: acc_dims.cols,
+        });
+    }
+    if flow_dir.geo() != accumulation.geo() {
+        return Err(RefinementError::GeoTransformMismatch {
+            rows: fd_dims.rows,
+            cols: fd_dims.cols,
         });
     }
 
@@ -225,7 +269,7 @@ pub fn refine_terminal(
 ///
 /// | Condition | Error |
 /// |-----------|-------|
-/// | Terminal polygon has no bounding rect | [`RefinementError::EmptyRasterMask`] |
+/// | Terminal polygon has no bounding rect | [`RefinementError::DegenerateTerminalPolygon`] |
 /// | Raster source fails to load a tile | [`RefinementError::RasterLoad`] |
 /// | Any error from [`refine_terminal`] | (propagated) |
 #[instrument(skip(source, terminal_polygon))]
@@ -239,7 +283,7 @@ pub fn refine_terminal_from_source(
 ) -> Result<RefinementResult, RefinementError> {
     let bbox = terminal_polygon
         .bounding_rect()
-        .ok_or(RefinementError::EmptyRasterMask { rows: 0, cols: 0 })?;
+        .ok_or(RefinementError::DegenerateTerminalPolygon)?;
 
     let flow_dir = source.load_flow_direction(flow_dir_path, &bbox)?;
     let accumulation = source.load_accumulation(flow_acc_path, &bbox)?;
@@ -469,6 +513,16 @@ mod tests {
             refined_bbox.max().x <= terminal_bbox.max().x + 1e-9,
             "refined max_x {} outside terminal",
             refined_bbox.max().x
+        );
+        assert!(
+            refined_bbox.min().y >= terminal_bbox.min().y - 1e-9,
+            "refined min_y {} outside terminal",
+            refined_bbox.min().y
+        );
+        assert!(
+            refined_bbox.max().y <= terminal_bbox.max().y + 1e-9,
+            "refined max_y {} outside terminal",
+            refined_bbox.max().y
         );
     }
 
@@ -877,8 +931,33 @@ mod tests {
             refine_terminal(&terminal_polygon, outlet, flow_dir, accumulation, threshold)
                 .unwrap_err();
         assert!(
-            matches!(err, RefinementError::TileMismatch { .. }),
-            "expected TileMismatch, got {err:?}"
+            matches!(err, RefinementError::DimensionMismatch { .. }),
+            "expected DimensionMismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn tile_geo_transform_mismatch() {
+        // Same dims (3x3) but different geo-transforms (different origins)
+        let fd_values = [4u8; 9];
+        let acc_values = [1000.0_f32; 9];
+
+        let geo_a = GeoTransform::new(GeoCoord::new(0.0, 0.0), 1.0, -1.0);
+        let geo_b = GeoTransform::new(GeoCoord::new(1.0, 1.0), 1.0, -1.0); // different origin
+
+        let flow_dir = make_flow_tile_with(3, 3, &fd_values, geo_a, FlowDirEncoding::Esri);
+        let accumulation = make_acc_tile_with(3, 3, &acc_values, geo_b);
+
+        let terminal_polygon = rect_polygon(0.0, 0.0, 3.0, -3.0);
+        let outlet = GeoCoord::new(1.5, -1.5);
+        let threshold = SnapThreshold::new(500);
+
+        let err =
+            refine_terminal(&terminal_polygon, outlet, flow_dir, accumulation, threshold)
+                .unwrap_err();
+        assert!(
+            matches!(err, RefinementError::GeoTransformMismatch { .. }),
+            "expected GeoTransformMismatch, got {err:?}"
         );
     }
 
@@ -1016,6 +1095,92 @@ mod tests {
         assert!(
             matches!(err, RefinementError::RasterLoad { .. }),
             "expected RasterLoad, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn loader_computes_correct_bbox() {
+        use std::sync::Mutex;
+
+        // 3x3 star convergence
+        #[rustfmt::skip]
+        let fd_values: [u8; 9] = [
+              2,   4,   8,
+              1,   4,  16,
+            128,  64,  32,
+        ];
+        let mut acc_values = [1.0_f32; 9];
+        acc_values[1 * 3 + 1] = 900.0;
+
+        struct BboxCapturingSource {
+            flow_dir: FlowDirectionTile<Raw>,
+            accumulation: AccumulationTile<Raw>,
+            captured_bbox: Mutex<Option<Rect<f64>>>,
+        }
+
+        impl RasterSource for BboxCapturingSource {
+            fn load_flow_direction(
+                &self,
+                _path: &Path,
+                bbox: &Rect<f64>,
+            ) -> Result<FlowDirectionTile<Raw>, RasterSourceError> {
+                *self.captured_bbox.lock().unwrap() = Some(*bbox);
+                Ok(self.flow_dir.clone())
+            }
+
+            fn load_accumulation(
+                &self,
+                _path: &Path,
+                _bbox: &Rect<f64>,
+            ) -> Result<AccumulationTile<Raw>, RasterSourceError> {
+                Ok(self.accumulation.clone())
+            }
+        }
+
+        let source = BboxCapturingSource {
+            flow_dir: make_flow_tile(3, 3, &fd_values),
+            accumulation: make_acc_tile(3, 3, &acc_values),
+            captured_bbox: Mutex::new(None),
+        };
+
+        // Terminal polygon: [1.0, 4.0] x [-1.0, -4.0]
+        let terminal_polygon = rect_polygon(1.0, -1.0, 4.0, -4.0);
+        let outlet = GeoCoord::new(1.5, -1.5);
+        let threshold = SnapThreshold::new(500);
+
+        // We don't care about the result (the mock tiles don't match the bbox),
+        // just that the bbox was computed correctly from the polygon geometry.
+        let _ = refine_terminal_from_source(
+            &source,
+            Path::new("flow.tif"),
+            Path::new("acc.tif"),
+            &terminal_polygon,
+            outlet,
+            threshold,
+        );
+
+        let captured = source.captured_bbox.lock().unwrap().unwrap();
+        // BoundingRect of rect_polygon(1.0, -1.0, 4.0, -4.0) should be:
+        // min: (1.0, -4.0), max: (4.0, -1.0)
+        assert!(
+            (captured.min().x - 1.0).abs() < 1e-9,
+            "expected bbox min_x=1.0, got {}",
+            captured.min().x
+        );
+        assert!(
+            (captured.min().y - (-4.0)).abs() < 1e-9,
+            "expected bbox min_y=-4.0, got {}",
+            captured.min().y
+        );
+        assert!(
+            (captured.max().x - 4.0).abs() < 1e-9,
+            "expected bbox max_x=4.0, got {}",
+            captured.max().x
+        );
+        assert!(
+            (captured.max().y - (-1.0)).abs() < 1e-9,
+            "expected bbox max_y=-1.0, got {}",
+            captured.max().y
         );
     }
 }
