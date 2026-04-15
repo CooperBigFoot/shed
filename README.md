@@ -9,7 +9,7 @@
 | 3 | Outlet Resolution | **Done** | v0.1.27 | 38 |
 | 4 | Inclusive Upstream Traversal | **Done** | v0.1.29 | 25 |
 | 5 | Terminal Refinement | **Done** | v0.1.31 | 20 |
-| 6 | Geometry Fetch and Final Assembly | Not started | — | — |
+| 6 | Geometry Fetch and Final Assembly | **Done** | v0.1.33 | 13 |
 | 7 | Engine Surface | Not started | — | — |
 
 ## Port Plan
@@ -199,7 +199,7 @@
 - Substitute the refined terminal polygon when available.
 - Dissolve the geometry set.
 - Run cleanup and repair.
-- Select the final polygon or multipolygon policy for v1.
+- Keep `MultiPolygon<f64>` as the canonical internal geometry output for v1.
 - Compute final geodesic area.
 
 #### Carry Over From `hydra-shed`
@@ -209,7 +209,7 @@
 
 #### Output
 
-- The final watershed boundary and area.
+- The final watershed boundary as a canonical `MultiPolygon<f64>` plus geodesic area.
 
 #### Done When
 
