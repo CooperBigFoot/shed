@@ -49,7 +49,7 @@ pub enum TraversalError {
 /// callers must rely only on [`terminal()`](Self::terminal) and
 /// membership semantics ([`contains`](Self::contains), [`len`](Self::len)),
 /// not on the position of non-terminal atoms.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct UpstreamAtoms {
     atoms: Vec<AtomId>,
     index: HashSet<AtomId>,
@@ -91,6 +91,14 @@ impl UpstreamAtoms {
         self.atoms
     }
 }
+
+impl PartialEq for UpstreamAtoms {
+    fn eq(&self, other: &Self) -> bool {
+        self.atoms.first() == other.atoms.first() && self.index == other.index
+    }
+}
+
+impl Eq for UpstreamAtoms {}
 
 impl IntoIterator for UpstreamAtoms {
     type Item = AtomId;
@@ -294,6 +302,24 @@ mod tests {
         assert_eq!(result.atom_ids()[0], aid(4));
     }
 
+    #[test]
+    fn bfs_visits_shallower_levels_before_deeper_levels() {
+        let g = graph(&[(1, &[]), (2, &[1]), (3, &[1]), (4, &[2, 3])]);
+        let result = collect_upstream(aid(4), &g).unwrap();
+        let ids = result.atom_ids();
+
+        let pos = |id: i64| {
+            ids.iter()
+                .position(|&atom_id| atom_id == aid(id))
+                .unwrap()
+        };
+
+        // BFS level order is the contract; sibling order within a level is not.
+        assert_eq!(ids[0], aid(4));
+        assert!(pos(2) < pos(1), "depth-1 atom 2 must appear before depth-2 atom 1");
+        assert!(pos(3) < pos(1), "depth-1 atom 3 must appear before depth-2 atom 1");
+    }
+
     // ── Group C: Error paths ──────────────────────────────────────────────────
 
     #[test]
@@ -407,5 +433,17 @@ mod tests {
         let g = graph(&[(1, &[]), (2, &[1]), (3, &[2])]);
         let result = collect_upstream(aid(3), &g).unwrap();
         assert_eq!(result.into_iter().count(), 3);
+    }
+
+    #[test]
+    fn partial_eq_is_set_based() {
+        // Two UpstreamAtoms with the same terminal and same set are equal
+        // regardless of internal Vec ordering.
+        let atoms_a = vec![aid(3), aid(1), aid(2)];
+        let atoms_b = vec![aid(3), aid(2), aid(1)];
+        let index: HashSet<AtomId> = [aid(1), aid(2), aid(3)].into_iter().collect();
+        let a = UpstreamAtoms { atoms: atoms_a, index: index.clone() };
+        let b = UpstreamAtoms { atoms: atoms_b, index };
+        assert_eq!(a, b, "same set with different non-terminal order must be equal");
     }
 }
