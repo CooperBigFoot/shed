@@ -82,6 +82,27 @@ pub fn decode_wkb_polygon(wkb: &WkbGeometry) -> Result<Polygon<f64>, WkbDecodeEr
     }
 }
 
+/// Errors from WKB encoding.
+#[derive(Debug, thiserror::Error)]
+pub enum WkbEncodeError {
+    /// geozero failed to encode the geometry to WKB.
+    #[error("WKB encoding failed: {reason}")]
+    EncodeFailed {
+        /// Reason reported by the encoder.
+        reason: String,
+    },
+}
+
+/// Encode a [`MultiPolygon`] to OGC WKB bytes (little-endian, 2D).
+pub fn encode_wkb_multi_polygon(mp: &MultiPolygon<f64>) -> Result<Vec<u8>, WkbEncodeError> {
+    use geozero::{CoordDimensions, ToWkb};
+    let geom: geo::Geometry<f64> = mp.clone().into();
+    geom.to_wkb(CoordDimensions::xy())
+        .map_err(|e| WkbEncodeError::EncodeFailed {
+            reason: e.to_string(),
+        })
+}
+
 /// Return a static name string for a [`Geometry`] variant.
 fn geometry_type_name(geom: &Geometry<f64>) -> &'static str {
     match geom {
@@ -103,6 +124,7 @@ fn geometry_type_name(geom: &Geometry<f64>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use geo::{LineString, Polygon};
 
     // WKB for a simple unit square polygon (WKB Little-Endian):
     // Polygon with one ring: (0,0), (1,0), (1,1), (0,1), (0,0)
@@ -248,5 +270,34 @@ mod tests {
             matches!(err, WkbDecodeError::UnexpectedType { expected: "Polygon", .. }),
             "unexpected error variant: {err:?}"
         );
+    }
+
+    // ── encode_wkb_multi_polygon ─────────────────────────────────────────────
+
+    #[test]
+    fn encode_decode_round_trip() {
+        let polygon = Polygon::new(
+            LineString::from(vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.0, 0.0)]),
+            vec![],
+        );
+        let mp = MultiPolygon::new(vec![polygon]);
+        let wkb_bytes = encode_wkb_multi_polygon(&mp).unwrap();
+        assert!(!wkb_bytes.is_empty());
+        // First byte is endianness: 0x01 = LE
+        assert_eq!(wkb_bytes[0], 0x01);
+
+        // Round-trip: decode back
+        let wkb = make_wkb(wkb_bytes);
+        let decoded = decode_wkb_multi_polygon(&wkb).unwrap();
+        assert_eq!(decoded.0.len(), 1);
+        let exterior = decoded.0[0].exterior();
+        assert_eq!(exterior.0.len(), 5); // closed ring
+    }
+
+    #[test]
+    fn encode_empty_multi_polygon() {
+        let mp = MultiPolygon::new(vec![]);
+        let result = encode_wkb_multi_polygon(&mp);
+        assert!(result.is_ok());
     }
 }

@@ -10,7 +10,7 @@
 | 4 | Inclusive Upstream Traversal | **Done** | v0.1.29 | 25 |
 | 5 | Terminal Refinement | **Done** | v0.1.31 | 20 |
 | 6 | Geometry Fetch and Final Assembly | **Done** | v0.1.33 | 13 |
-| 7 | Engine Surface | Not started | — | — |
+| 7 | Engine Surface, CLI, and PyO3 Bindings | **Done** | v0.1.34 | 17 |
 
 ## Port Plan
 

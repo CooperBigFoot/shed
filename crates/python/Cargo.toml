@@ -1,0 +1,18 @@
+[package]
+name = "pyshed"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "pyshed"
+crate-type = ["cdylib"]
+
+[dependencies]
+shed-core = { path = "../core" }
+shed-gdal = { path = "../gdal" }
+hfx-core = { path = "../../../hfx/crates/hfx-core" }
+pyo3 = { version = "0.24", features = ["extension-module", "abi3-py39"] }
+geo = "0.29"
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"

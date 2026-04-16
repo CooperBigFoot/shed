@@ -80,4 +80,4 @@ pub use traits::{GeometryRepair, GeometryRepairError, RasterSource, RasterSource
 pub use watershed_geometry::{Dissolved, HolesFilled, TopologyCleaned, WatershedGeometry};
 
 // ── Re-exports: WKB decoding ──────────────────────────────────────────────────
-pub use wkb::{WkbDecodeError, decode_wkb, decode_wkb_multi_polygon, decode_wkb_polygon};
+pub use wkb::{WkbDecodeError, WkbEncodeError, decode_wkb, decode_wkb_multi_polygon, decode_wkb_polygon, encode_wkb_multi_polygon};

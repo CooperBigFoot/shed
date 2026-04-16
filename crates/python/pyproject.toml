@@ -1,0 +1,12 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "pyshed"
+requires-python = ">=3.9"
+description = "Python bindings for the shed watershed delineation engine"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "pyshed"

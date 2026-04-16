@@ -12,7 +12,7 @@ use serde_json::json;
 use tempfile::TempDir;
 
 /// Custom catchment specification for outlet resolution tests.
-pub(crate) struct TestCatchment {
+pub struct TestCatchment {
     pub id: i64,
     pub area_km2: f32,
     pub up_area_km2: Option<f32>,
@@ -21,7 +21,7 @@ pub(crate) struct TestCatchment {
 }
 
 /// Custom snap target specification for outlet resolution tests.
-pub(crate) struct TestSnapTarget {
+pub struct TestSnapTarget {
     pub id: i64,
     pub catchment_id: i64,
     pub weight: f32,
@@ -30,7 +30,7 @@ pub(crate) struct TestSnapTarget {
 }
 
 /// Geometry for a test snap target.
-pub(crate) enum TestSnapGeometry {
+pub enum TestSnapGeometry {
     /// A WKB Point at (lon, lat).
     Point(f64, f64),
     /// A WKB LineString from (x1, y1) to (x2, y2).
@@ -38,7 +38,7 @@ pub(crate) enum TestSnapGeometry {
 }
 
 /// Builder for synthetic HFX dataset fixtures used in integration tests.
-pub(crate) struct DatasetBuilder {
+pub struct DatasetBuilder {
     dir: TempDir,
     atom_count: usize,
     topology: &'static str,
