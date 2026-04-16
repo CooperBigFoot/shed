@@ -11,3 +11,4 @@ description = "Python bindings for the shed watershed delineation engine"
 [tool.maturin]
 features = ["pyo3/extension-module"]
 module-name = "pyshed"
+auditwheel = "skip"
