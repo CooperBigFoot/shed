@@ -224,6 +224,9 @@ pub enum EngineError {
         atom_id: i64,
         /// Human-readable description of the assembly failure.
         message: String,
+        /// The original assembly error, preserved for error-chain inspection.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
 }
 
@@ -325,7 +328,11 @@ impl Engine {
             refined_geometry.as_ref(),
             assembly_options,
         )
-        .map_err(|e| EngineError::Assembly { atom_id: terminal.get(), message: e.to_string() })?;
+        .map_err(|e| EngineError::Assembly {
+            atom_id: terminal.get(),
+            message: e.to_string(),
+            source: Box::new(e),
+        })?;
         let (geometry, area_km2) = result.into_parts();
 
         // Step 5: Compose result
