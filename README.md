@@ -10,7 +10,8 @@
 | 4 | Inclusive Upstream Traversal | **Done** | v0.1.29 | 25 |
 | 5 | Terminal Refinement | **Done** | v0.1.31 | 20 |
 | 6 | Geometry Fetch and Final Assembly | **Done** | v0.1.33 | 13 |
-| 7 | Engine Surface, CLI, and PyO3 Bindings | **Done** | v0.1.34 | 17 |
+| 7 | Engine Surface, CLI, and PyO3 Bindings | **Done** | v0.1.37 | 31 |
+| 8 | Wire pyshed into watershed-retrieve | Not started | — | — |
 
 ## Port Plan
 
