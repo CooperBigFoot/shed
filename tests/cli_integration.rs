@@ -199,6 +199,75 @@ fn cli_json_envelope() {
     assert_eq!(json["failed"].as_u64().unwrap(), 0, "failed should be 0");
 }
 
+// ── --json with mixed batch results ──────────────────────────────────────────
+
+#[test]
+fn cli_json_batch_with_failure() {
+    let (_dir, root) = DatasetBuilder::new(3).build();
+
+    // CSV with one valid coordinate (inside atom 3) and one invalid coordinate
+    // (far outside any catchment).
+    let mut csv_file = NamedTempFile::new().unwrap();
+    writeln!(csv_file, "lat,lon").unwrap();
+    writeln!(csv_file, "0.20,1.70").unwrap(); // valid — inside atom 3
+    writeln!(csv_file, "50.0,50.0").unwrap(); // valid coord but outside all catchments
+    csv_file.flush().unwrap();
+
+    let output = shed()
+        .args([
+            "delineate",
+            "--dataset",
+            root.to_str().unwrap(),
+            "--outlets",
+            csv_file.path().to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("failed to execute shed delineate --json");
+
+    // Exit code must be non-zero because one outlet failed.
+    assert!(
+        !output.status.success(),
+        "exit code should be non-zero when some outlets fail"
+    );
+
+    // stdout must be exactly one valid JSON document.
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let json: Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout must be a single valid JSON document: {e}\nstdout={stdout}"));
+
+    assert_eq!(
+        json["succeeded"].as_u64().unwrap(),
+        1,
+        "expected 1 success, got {}",
+        json["succeeded"]
+    );
+    assert_eq!(
+        json["failed"].as_u64().unwrap(),
+        1,
+        "expected 1 failure, got {}",
+        json["failed"]
+    );
+    assert_eq!(
+        json["total"].as_u64().unwrap(),
+        2,
+        "expected total=2, got {}",
+        json["total"]
+    );
+
+    // Verify the successes and failures arrays are present and correctly sized.
+    let successes = json["successes"].as_array().expect("successes must be an array");
+    assert_eq!(successes.len(), 1, "successes array must have 1 entry");
+    let failures = json["failures"].as_array().expect("failures must be an array");
+    assert_eq!(failures.len(), 1, "failures array must have 1 entry");
+
+    // The failure entry must contain an error message.
+    assert!(
+        failures[0]["error"].as_str().is_some(),
+        "failure entry must have an 'error' string field"
+    );
+}
+
 // ── --no-refine flag ──────────────────────────────────────────────────────────
 
 #[test]

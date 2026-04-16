@@ -2,6 +2,7 @@
 
 use shed_core::DelineationResult;
 use shed_core::RefinementOutcome;
+use shed_core::ResolutionMethod;
 
 /// Serialize a [`DelineationResult`] as a GeoJSON Feature string.
 pub fn result_to_geojson_feature(result: &DelineationResult) -> Result<String, serde_json::Error> {
@@ -20,6 +21,10 @@ pub fn result_to_geojson_feature(result: &DelineationResult) -> Result<String, s
     properties.insert(
         "upstream_atom_count".into(),
         serde_json::json!(result.upstream_atom_ids().len()),
+    );
+    properties.insert(
+        "resolution_method".into(),
+        serde_json::json!(format_resolution_method(result.resolution_method())),
     );
     properties.insert(
         "refinement".into(),
@@ -56,11 +61,32 @@ fn ring_to_coords(ls: &geo::LineString<f64>) -> Vec<[f64; 2]> {
     ls.coords().map(|c| [c.x, c.y]).collect()
 }
 
-fn format_refinement(r: &RefinementOutcome) -> &'static str {
+fn format_resolution_method(method: &ResolutionMethod) -> String {
+    match method {
+        ResolutionMethod::Snap {
+            snap_id,
+            distance_m,
+            weight,
+            mainstem_status,
+            candidates_considered,
+        } => format!(
+            "snap(id={snap_id:?}, dist={distance_m:.1}m, weight={weight:?}, \
+             mainstem={mainstem_status:?}, candidates={candidates_considered})"
+        ),
+        ResolutionMethod::PointInPolygon { candidates_considered, tie_break } => match tie_break {
+            Some(tb) => format!("pip(candidates={candidates_considered}, tie_break={tb:?})"),
+            None => format!("pip(candidates={candidates_considered})"),
+        },
+    }
+}
+
+fn format_refinement(r: &RefinementOutcome) -> String {
     match r {
-        RefinementOutcome::Applied { .. } => "applied",
-        RefinementOutcome::NoRastersAvailable => "no_rasters",
-        RefinementOutcome::NoRasterSourceProvided => "no_raster_source",
-        RefinementOutcome::Disabled => "disabled",
+        RefinementOutcome::Applied { refined_outlet } => {
+            format!("applied(lon={:.6}, lat={:.6})", refined_outlet.lon, refined_outlet.lat)
+        }
+        RefinementOutcome::NoRastersAvailable => "no_rasters_available".into(),
+        RefinementOutcome::NoRasterSourceProvided => "no_raster_source_provided".into(),
+        RefinementOutcome::Disabled => "disabled".into(),
     }
 }

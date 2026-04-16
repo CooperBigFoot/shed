@@ -92,7 +92,9 @@ fn main() -> ExitCode {
 
     match cli.command {
         Command::Delineate(args) => match run_delineate(&args, cli.json) {
-            Ok(()) => ExitCode::SUCCESS,
+            Ok(any_failed) => {
+                if any_failed { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+            }
             Err(e) => {
                 if cli.json {
                     let envelope = json!({"error": format!("{e:#}")});
@@ -138,7 +140,7 @@ fn init_tracing(verbose: u8, quiet: bool, json: bool) {
 
 // ── run_delineate ─────────────────────────────────────────────────────────────
 
-fn run_delineate(args: &DelineateArgs, json_mode: bool) -> Result<()> {
+fn run_delineate(args: &DelineateArgs, json_mode: bool) -> Result<bool> {
     // 1. Parse outlets.
     let outlets = parse_outlets(args)?;
 
@@ -294,7 +296,7 @@ fn write_output(
     outlets: &[Outlet],
     results: &[Result<DelineationResult, EngineError>],
     json_mode: bool,
-) -> Result<()> {
+) -> Result<bool> {
     let any_failed = results.iter().any(|r| r.is_err());
 
     if json_mode {
@@ -347,6 +349,26 @@ fn write_output(
                 .with_context(|| format!("failed to write output to {}", output_path.display()))?;
         }
     } else {
+        // Log each failure to stderr before writing the partial FeatureCollection.
+        let mut failed_count = 0usize;
+        for (outlet, result) in outlets.iter().zip(results.iter()) {
+            if let Err(e) = result {
+                failed_count += 1;
+                error!(
+                    lat = outlet.coord.lat,
+                    lon = outlet.coord.lon,
+                    "outlet failed to delineate: {e:#}"
+                );
+            }
+        }
+        if failed_count > 0 {
+            error!(
+                failed = failed_count,
+                total = outlets.len(),
+                "partial output: some outlets failed to delineate"
+            );
+        }
+
         // Normal mode: GeoJSON FeatureCollection.
         let fc = build_feature_collection(outlets, results);
         let json_str = serde_json::to_string_pretty(&fc).context("failed to serialize GeoJSON")?;
@@ -359,11 +381,7 @@ fn write_output(
         }
     }
 
-    if any_failed {
-        anyhow::bail!("one or more outlets failed to delineate");
-    }
-
-    Ok(())
+    Ok(any_failed)
 }
 
 fn build_feature_collection(

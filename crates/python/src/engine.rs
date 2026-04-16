@@ -13,6 +13,21 @@ use crate::config::EngineConfig;
 use crate::error::engine_err_to_py;
 use crate::result::PyDelineationResult;
 
+/// Validate that `lat` is in [-90, 90] and `lon` is in [-180, 180].
+fn validate_coord(lat: f64, lon: f64) -> PyResult<()> {
+    if !(-90.0..=90.0).contains(&lat) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "latitude {lat} is outside [-90, 90]"
+        )));
+    }
+    if !(-180.0..=180.0).contains(&lon) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "longitude {lon} is outside [-180, 180]"
+        )));
+    }
+    Ok(())
+}
+
 /// Watershed delineation engine exposed to Python.
 ///
 /// Construct with a path to an HFX dataset directory. Optional keyword
@@ -77,6 +92,8 @@ impl PyEngine {
     /// DelineationResult
     #[pyo3(signature = (*, lat, lon))]
     fn delineate(&self, py: Python<'_>, lat: f64, lon: f64) -> PyResult<PyDelineationResult> {
+        validate_coord(lat, lon)?;
+
         let engine = self.engine.clone();
         let options = self.config.to_delineation_options()?;
 
@@ -119,6 +136,7 @@ impl PyEngine {
                     .get_item("lon")?
                     .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("missing 'lon'"))?
                     .extract()?;
+                validate_coord(lat, lon)?;
                 Ok((lat, lon))
             })
             .collect::<PyResult<Vec<_>>>()?;
@@ -127,7 +145,7 @@ impl PyEngine {
         let options = self.config.to_delineation_options()?;
 
         // Run the batch without holding the GIL; rayon parallelism is inside the engine.
-        let results: Vec<Result<PyDelineationResult, String>> =
+        let results: Vec<Result<PyDelineationResult, shed_core::EngineError>> =
             py.allow_threads(move || {
                 let coords: Vec<GeoCoord> = parsed
                     .iter()
@@ -137,23 +155,17 @@ impl PyEngine {
                 engine
                     .delineate_batch_uniform(&coords, &options)
                     .into_iter()
-                    .map(|r| {
-                        r.map(PyDelineationResult::from_result)
-                            .map_err(|e| e.to_string())
-                    })
+                    .map(|r| r.map(PyDelineationResult::from_result))
                     .collect()
             });
 
-        // Re-raise the first error in input order.
+        // Re-raise the first error in input order using typed exception mapping.
         let mut py_results = Vec::with_capacity(results.len());
-        for (i, r) in results.into_iter().enumerate() {
+        for r in results {
             match r {
                 Ok(result) => py_results.push(result),
-                Err(msg) => {
-                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "outlet {} failed: {}",
-                        i, msg
-                    )))
+                Err(engine_err) => {
+                    return Err(engine_err_to_py(engine_err));
                 }
             }
         }

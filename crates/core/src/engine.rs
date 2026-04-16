@@ -12,7 +12,7 @@ use crate::algo::{
     collect_upstream, decode_wkb_multi_polygon, encode_wkb_multi_polygon,
     refine_terminal_from_source,
 };
-use crate::assembly::{AssemblyError, AssemblyOptions, assemble_watershed};
+use crate::assembly::{AssemblyOptions, assemble_watershed};
 use crate::error::SessionError;
 use crate::resolver::{
     OutletResolutionError, ResolvedOutlet, ResolverConfig, ResolutionMethod, resolve_outlet,
@@ -170,7 +170,6 @@ impl DelineationOptions {
 // ── EngineError ───────────────────────────────────────────────────────────────
 
 /// Errors that can occur during [`Engine::delineate`].
-#[allow(private_interfaces)]
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
     /// Fired when the outlet coordinate cannot be resolved to an HFX atom.
@@ -219,12 +218,12 @@ pub enum EngineError {
     },
 
     /// Fired when final watershed assembly fails.
-    #[error("watershed assembly failed for atom {atom_id}: {source}")]
+    #[error("watershed assembly failed for atom {atom_id}: {message}")]
     Assembly {
         /// The raw atom ID of the terminal atom being assembled.
         atom_id: i64,
-        /// Underlying assembly error.
-        source: AssemblyError,
+        /// Human-readable description of the assembly failure.
+        message: String,
     },
 }
 
@@ -326,7 +325,7 @@ impl Engine {
             refined_geometry.as_ref(),
             assembly_options,
         )
-        .map_err(|source| EngineError::Assembly { atom_id: terminal.get(), source })?;
+        .map_err(|e| EngineError::Assembly { atom_id: terminal.get(), message: e.to_string() })?;
         let (geometry, area_km2) = result.into_parts();
 
         // Step 5: Compose result
