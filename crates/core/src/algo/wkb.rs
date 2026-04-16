@@ -38,7 +38,9 @@ pub enum WkbDecodeError {
 pub fn decode_wkb(wkb: &WkbGeometry) -> Result<Geometry<f64>, WkbDecodeError> {
     Wkb(wkb.as_bytes().to_vec())
         .to_geo()
-        .map_err(|e| WkbDecodeError::DecodeFailed { reason: e.to_string() })
+        .map_err(|e| WkbDecodeError::DecodeFailed {
+            reason: e.to_string(),
+        })
 }
 
 /// Decode a [`WkbGeometry`] that encodes a `Polygon` or `MultiPolygon`.
@@ -210,7 +212,10 @@ mod tests {
     #[test]
     fn decode_wkb_invalid_bytes_returns_error() {
         let wkb = make_wkb(vec![0xFF, 0xFF, 0xFF]);
-        assert!(matches!(decode_wkb(&wkb), Err(WkbDecodeError::DecodeFailed { .. })));
+        assert!(matches!(
+            decode_wkb(&wkb),
+            Err(WkbDecodeError::DecodeFailed { .. })
+        ));
     }
 
     // ── decode_wkb_multi_polygon ─────────────────────────────────────────────
@@ -226,8 +231,7 @@ mod tests {
     #[test]
     fn decode_wkb_multi_polygon_from_multi_polygon() {
         let wkb = make_wkb(unit_square_multi_polygon_wkb());
-        let mp =
-            decode_wkb_multi_polygon(&wkb).expect("MultiPolygon WKB should decode directly");
+        let mp = decode_wkb_multi_polygon(&wkb).expect("MultiPolygon WKB should decode directly");
         assert_eq!(mp.0.len(), 1);
     }
 
@@ -236,7 +240,13 @@ mod tests {
         let wkb = make_wkb(linestring_wkb());
         let err = decode_wkb_multi_polygon(&wkb).expect_err("LineString should fail");
         assert!(
-            matches!(err, WkbDecodeError::UnexpectedType { expected: "Polygon or MultiPolygon", .. }),
+            matches!(
+                err,
+                WkbDecodeError::UnexpectedType {
+                    expected: "Polygon or MultiPolygon",
+                    ..
+                }
+            ),
             "unexpected error variant: {err:?}"
         );
     }
@@ -256,7 +266,13 @@ mod tests {
         let wkb = make_wkb(linestring_wkb());
         let err = decode_wkb_polygon(&wkb).expect_err("LineString should fail");
         assert!(
-            matches!(err, WkbDecodeError::UnexpectedType { expected: "Polygon", .. }),
+            matches!(
+                err,
+                WkbDecodeError::UnexpectedType {
+                    expected: "Polygon",
+                    ..
+                }
+            ),
             "unexpected error variant: {err:?}"
         );
     }
@@ -267,7 +283,13 @@ mod tests {
         let wkb = make_wkb(unit_square_multi_polygon_wkb());
         let err = decode_wkb_polygon(&wkb).expect_err("MultiPolygon should not decode as Polygon");
         assert!(
-            matches!(err, WkbDecodeError::UnexpectedType { expected: "Polygon", .. }),
+            matches!(
+                err,
+                WkbDecodeError::UnexpectedType {
+                    expected: "Polygon",
+                    ..
+                }
+            ),
             "unexpected error variant: {err:?}"
         );
     }
@@ -277,7 +299,13 @@ mod tests {
     #[test]
     fn encode_decode_round_trip() {
         let polygon = Polygon::new(
-            LineString::from(vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.0, 0.0)]),
+            LineString::from(vec![
+                (0.0, 0.0),
+                (1.0, 0.0),
+                (1.0, 1.0),
+                (0.0, 1.0),
+                (0.0, 0.0),
+            ]),
             vec![],
         );
         let mp = MultiPolygon::new(vec![polygon]);

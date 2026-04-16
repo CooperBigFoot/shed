@@ -135,7 +135,9 @@ pub fn collect_upstream(
     graph: &DrainageGraph,
 ) -> Result<UpstreamAtoms, TraversalError> {
     if graph.get(terminal).is_none() {
-        return Err(TraversalError::TerminalNotFound { atom_id: terminal.get() });
+        return Err(TraversalError::TerminalNotFound {
+            atom_id: terminal.get(),
+        });
     }
 
     let mut visited: HashSet<AtomId> = HashSet::new();
@@ -169,7 +171,10 @@ pub fn collect_upstream(
 
     debug!(atom_count = atoms.len(), "upstream traversal complete");
 
-    Ok(UpstreamAtoms { atoms, index: visited })
+    Ok(UpstreamAtoms {
+        atoms,
+        index: visited,
+    })
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -240,10 +245,18 @@ mod tests {
     #[test]
     fn deep_chain_100() {
         let specs: Vec<(i64, Vec<i64>)> = (1i64..=100)
-            .map(|id| if id == 1 { (id, vec![]) } else { (id, vec![id - 1]) })
+            .map(|id| {
+                if id == 1 {
+                    (id, vec![])
+                } else {
+                    (id, vec![id - 1])
+                }
+            })
             .collect();
-        let spec_refs: Vec<(i64, &[i64])> =
-            specs.iter().map(|(id, ups)| (*id, ups.as_slice())).collect();
+        let spec_refs: Vec<(i64, &[i64])> = specs
+            .iter()
+            .map(|(id, ups)| (*id, ups.as_slice()))
+            .collect();
         let g = graph(&spec_refs);
         let result = collect_upstream(aid(100), &g).unwrap();
         assert_eq!(result.len(), 100);
@@ -252,12 +265,13 @@ mod tests {
 
     #[test]
     fn wide_fan_in() {
-        let mut specs: Vec<(i64, Vec<i64>)> =
-            (1i64..=50).map(|id| (id, vec![])).collect();
+        let mut specs: Vec<(i64, Vec<i64>)> = (1i64..=50).map(|id| (id, vec![])).collect();
         let headwater_ids: Vec<i64> = (1..=50).collect();
         specs.push((51, headwater_ids));
-        let spec_refs: Vec<(i64, &[i64])> =
-            specs.iter().map(|(id, ups)| (*id, ups.as_slice())).collect();
+        let spec_refs: Vec<(i64, &[i64])> = specs
+            .iter()
+            .map(|(id, ups)| (*id, ups.as_slice()))
+            .collect();
         let g = graph(&spec_refs);
         let result = collect_upstream(aid(51), &g).unwrap();
         assert_eq!(result.len(), 51);
@@ -308,16 +322,18 @@ mod tests {
         let result = collect_upstream(aid(4), &g).unwrap();
         let ids = result.atom_ids();
 
-        let pos = |id: i64| {
-            ids.iter()
-                .position(|&atom_id| atom_id == aid(id))
-                .unwrap()
-        };
+        let pos = |id: i64| ids.iter().position(|&atom_id| atom_id == aid(id)).unwrap();
 
         // BFS level order is the contract; sibling order within a level is not.
         assert_eq!(ids[0], aid(4));
-        assert!(pos(2) < pos(1), "depth-1 atom 2 must appear before depth-2 atom 1");
-        assert!(pos(3) < pos(1), "depth-1 atom 3 must appear before depth-2 atom 1");
+        assert!(
+            pos(2) < pos(1),
+            "depth-1 atom 2 must appear before depth-2 atom 1"
+        );
+        assert!(
+            pos(3) < pos(1),
+            "depth-1 atom 3 must appear before depth-2 atom 1"
+        );
     }
 
     // ── Group C: Error paths ──────────────────────────────────────────────────
@@ -326,7 +342,10 @@ mod tests {
     fn terminal_not_found() {
         let g = graph(&[(1, &[])]);
         let err = collect_upstream(aid(999), &g).unwrap_err();
-        assert!(matches!(err, TraversalError::TerminalNotFound { atom_id: 999 }));
+        assert!(matches!(
+            err,
+            TraversalError::TerminalNotFound { atom_id: 999 }
+        ));
     }
 
     #[test]
@@ -344,7 +363,10 @@ mod tests {
         let err = collect_upstream(aid(1), &g).unwrap_err();
         assert!(matches!(
             err,
-            TraversalError::DanglingUpstreamRef { source_id: 1, target_id: 99 }
+            TraversalError::DanglingUpstreamRef {
+                source_id: 1,
+                target_id: 99
+            }
         ));
     }
 
@@ -354,7 +376,10 @@ mod tests {
         let err = collect_upstream(aid(3), &g).unwrap_err();
         assert!(matches!(
             err,
-            TraversalError::DanglingUpstreamRef { source_id: 1, target_id: 99 }
+            TraversalError::DanglingUpstreamRef {
+                source_id: 1,
+                target_id: 99
+            }
         ));
     }
 
@@ -364,7 +389,10 @@ mod tests {
         let err = collect_upstream(aid(3), &g).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("1"), "message should contain source id: {msg}");
-        assert!(msg.contains("99"), "message should contain target id: {msg}");
+        assert!(
+            msg.contains("99"),
+            "message should contain target id: {msg}"
+        );
     }
 
     // ── Group E: Edge behavior ────────────────────────────────────────────────
@@ -442,8 +470,17 @@ mod tests {
         let atoms_a = vec![aid(3), aid(1), aid(2)];
         let atoms_b = vec![aid(3), aid(2), aid(1)];
         let index: HashSet<AtomId> = [aid(1), aid(2), aid(3)].into_iter().collect();
-        let a = UpstreamAtoms { atoms: atoms_a, index: index.clone() };
-        let b = UpstreamAtoms { atoms: atoms_b, index };
-        assert_eq!(a, b, "same set with different non-terminal order must be equal");
+        let a = UpstreamAtoms {
+            atoms: atoms_a,
+            index: index.clone(),
+        };
+        let b = UpstreamAtoms {
+            atoms: atoms_b,
+            index,
+        };
+        assert_eq!(
+            a, b,
+            "same set with different non-terminal order must be equal"
+        );
     }
 }

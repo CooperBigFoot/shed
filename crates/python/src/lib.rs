@@ -17,7 +17,10 @@ fn pyshed(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<result::PyDelineationResult>()?;
     m.add("ShedError", m.py().get_type::<error::ShedError>())?;
     m.add("DatasetError", m.py().get_type::<error::DatasetError>())?;
-    m.add("ResolutionError", m.py().get_type::<error::ResolutionError>())?;
+    m.add(
+        "ResolutionError",
+        m.py().get_type::<error::ResolutionError>(),
+    )?;
     m.add("AssemblyError", m.py().get_type::<error::PyAssemblyError>())?;
     Ok(())
 }

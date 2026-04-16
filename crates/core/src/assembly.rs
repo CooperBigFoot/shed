@@ -3,16 +3,16 @@
 use std::collections::HashMap;
 
 use geo::{MultiPolygon, Polygon};
-use hfx_core::{AtomId, CatchmentAtom};
+use hfx_core::{AtomId, WkbGeometry};
 use tracing::{debug, instrument};
 
 use crate::algo::{
-    AreaKm2, CleanEpsilon, DissolveError, GeometryRepair, GeometryRepairError, HoleFillMode,
-    UpstreamAtoms, WatershedAreaError, WatershedGeometry, WkbDecodeError, decode_wkb_multi_polygon,
-    dissolve,
+    decode_wkb_multi_polygon, dissolve, AreaKm2, CleanEpsilon, DissolveError, GeometryRepair,
+    GeometryRepairError, HoleFillMode, UpstreamAtoms, WatershedAreaError, WatershedGeometry,
+    WkbDecodeError,
 };
 use crate::error::SessionError;
-use crate::reader::catchment_store::CatchmentStore;
+use crate::reader::catchment_store::{CatchmentGeometryRow, CatchmentStore};
 
 /// Result of a successful internal watershed assembly.
 #[derive(Debug, Clone)]
@@ -154,7 +154,7 @@ pub(crate) fn assemble_watershed(
     options: AssemblyOptions<'_>,
 ) -> Result<AssemblyResult, AssemblyError> {
     let fetched = catchments
-        .query_by_ids(upstream.atom_ids())
+        .query_geometries_by_ids(upstream.atom_ids())
         .map_err(|source| AssemblyError::CatchmentQuery { source })?;
 
     let atom_map = index_catchments_by_id(fetched)?;
@@ -182,10 +182,13 @@ pub(crate) fn assemble_watershed(
             }
         }
 
-        let atom = atom_map
-            .get(atom_id)
-            .expect("catchment coverage was validated above");
-        let geometry = decode_wkb_multi_polygon(atom.geometry()).map_err(|source| {
+        let geometry_wkb =
+            atom_map
+                .get(atom_id)
+                .ok_or_else(|| AssemblyError::MissingCatchments {
+                    missing_ids: vec![*atom_id],
+                })?;
+        let geometry = decode_wkb_multi_polygon(geometry_wkb).map_err(|source| {
             AssemblyError::GeometryDecode {
                 atom_id: *atom_id,
                 source,
@@ -205,12 +208,12 @@ pub(crate) fn assemble_watershed(
 }
 
 fn index_catchments_by_id(
-    fetched: Vec<CatchmentAtom>,
-) -> Result<HashMap<AtomId, CatchmentAtom>, AssemblyError> {
+    fetched: Vec<CatchmentGeometryRow>,
+) -> Result<HashMap<AtomId, WkbGeometry>, AssemblyError> {
     let mut atom_map = HashMap::with_capacity(fetched.len());
     for atom in fetched {
         let atom_id = atom.id();
-        if atom_map.insert(atom_id, atom).is_some() {
+        if atom_map.insert(atom_id, atom.geometry().clone()).is_some() {
             return Err(AssemblyError::DuplicateCatchment { atom_id });
         }
     }
@@ -262,7 +265,7 @@ mod tests {
 
     use super::*;
     use crate::algo::{
-        DEFAULT_CLEANING_EPSILON, GeometryRepairError, HoleFillMode, collect_upstream,
+        collect_upstream, GeometryRepairError, HoleFillMode, DEFAULT_CLEANING_EPSILON,
     };
 
     #[derive(Clone)]
@@ -458,33 +461,18 @@ mod tests {
 
     #[test]
     fn duplicate_fetched_id_is_hard_failure() {
-        let tmp = NamedTempFile::new().unwrap();
-        write_catchments_fixture(
-            tmp.path(),
-            &[
-                CatchmentRow {
-                    id: 1,
-                    geometry: polygon_wkb(0.0, 0.0, 1.0, 1.0),
-                    bbox: (0.0, 0.0, 1.0, 1.0),
-                },
-                CatchmentRow {
-                    id: 1,
-                    geometry: polygon_wkb(1.0, 0.0, 2.0, 1.0),
-                    bbox: (1.0, 0.0, 2.0, 1.0),
-                },
-            ],
-        );
+        let fetched = vec![
+            CatchmentGeometryRow::new(
+                aid(1),
+                WkbGeometry::new(polygon_wkb(0.0, 0.0, 1.0, 1.0)).unwrap(),
+            ),
+            CatchmentGeometryRow::new(
+                aid(1),
+                WkbGeometry::new(polygon_wkb(1.0, 0.0, 2.0, 1.0)).unwrap(),
+            ),
+        ];
 
-        let store = CatchmentStore::open(tmp.path()).unwrap();
-        let upstream = linear_upstream(&[1]);
-
-        let err = assemble_watershed(
-            &store,
-            &upstream,
-            None,
-            AssemblyOptions::new(HoleFillMode::RemoveAll, DEFAULT_CLEANING_EPSILON),
-        )
-        .unwrap_err();
+        let err = index_catchments_by_id(fetched).unwrap_err();
 
         assert!(matches!(err, AssemblyError::DuplicateCatchment { atom_id } if atom_id == aid(1)));
     }

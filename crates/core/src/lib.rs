@@ -18,5 +18,5 @@ pub use engine::{
 pub use error::SessionError;
 pub use resolver::{
     OutletResolutionError, PipTieBreak, ResolutionMethod, ResolvedOutlet, ResolverConfig,
-    SearchRadiusMetres, resolve_outlet,
+    SearchRadiusMetres, SnapStrategy, resolve_outlet,
 };

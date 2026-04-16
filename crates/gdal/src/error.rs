@@ -43,7 +43,9 @@ pub enum RasterReadError {
     },
 
     /// Raster has rotation or shear terms that are not supported.
-    #[error("unsupported raster transform: skew_x={skew_x}, skew_y={skew_y} (only axis-aligned north-up rasters are supported)")]
+    #[error(
+        "unsupported raster transform: skew_x={skew_x}, skew_y={skew_y} (only axis-aligned north-up rasters are supported)"
+    )]
     UnsupportedTransform {
         /// Rotation/shear term in the x direction (GDAL array index 2).
         skew_x: f64,
@@ -76,7 +78,8 @@ pub enum GdalRepairError {
 
 impl From<gdal::errors::GdalError> for GdalRepairError {
     fn from(e: gdal::errors::GdalError) -> Self {
-        Self::Gdal { reason: e.to_string() }
+        Self::Gdal {
+            reason: e.to_string(),
+        }
     }
 }
-

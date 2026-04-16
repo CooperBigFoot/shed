@@ -8,7 +8,7 @@ use serde_json::json;
 use tracing::error;
 
 use shed_core::algo::{CleanEpsilon, GeoCoord, SnapThreshold};
-use shed_core::resolver::{ResolverConfig, SearchRadiusMetres};
+use shed_core::resolver::{ResolverConfig, SearchRadiusMetres, SnapStrategy};
 use shed_core::session::DatasetSession;
 use shed_core::{
     DelineationOptions, DelineationResult, Engine, EngineError, RefinementOutcome, ResolutionMethod,
@@ -18,7 +18,11 @@ use shed_gdal::{GdalGeometryRepair, GdalRasterSource};
 // ── CLI structure ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Parser)]
-#[command(name = "shed", version, about = "Watershed delineation engine for HFX datasets")]
+#[command(
+    name = "shed",
+    version,
+    about = "Watershed delineation engine for HFX datasets"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -67,6 +71,9 @@ struct DelineateArgs {
     #[arg(long)]
     clean_epsilon: Option<f64>,
 
+    #[arg(long, value_enum)]
+    snap_strategy: Option<SnapStrategyArg>,
+
     #[arg(long)]
     no_refine: bool,
 }
@@ -74,6 +81,21 @@ struct DelineateArgs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum OutputFormat {
     Geojson,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum SnapStrategyArg {
+    DistanceFirst,
+    WeightFirst,
+}
+
+impl From<SnapStrategyArg> for SnapStrategy {
+    fn from(value: SnapStrategyArg) -> Self {
+        match value {
+            SnapStrategyArg::DistanceFirst => SnapStrategy::DistanceFirst,
+            SnapStrategyArg::WeightFirst => SnapStrategy::WeightFirst,
+        }
+    }
 }
 
 // ── Outlet ────────────────────────────────────────────────────────────────────
@@ -93,7 +115,11 @@ fn main() -> ExitCode {
     match cli.command {
         Command::Delineate(args) => match run_delineate(&args, cli.json) {
             Ok(any_failed) => {
-                if any_failed { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+                if any_failed {
+                    ExitCode::FAILURE
+                } else {
+                    ExitCode::SUCCESS
+                }
             }
             Err(e) => {
                 if cli.json {
@@ -173,12 +199,19 @@ fn run_delineate(args: &DelineateArgs, json_mode: bool) -> Result<bool> {
 
 fn build_options(args: &DelineateArgs) -> Result<DelineationOptions> {
     let mut options = DelineationOptions::default();
+    let mut resolver_config = ResolverConfig::new();
 
     if let Some(radius) = args.snap_radius {
         let sr = SearchRadiusMetres::new(radius)
             .map_err(|e| anyhow::anyhow!("invalid --snap-radius: {e}"))?;
-        options = options.with_resolver_config(ResolverConfig::new().with_search_radius(sr));
+        resolver_config = resolver_config.with_search_radius(sr);
     }
+
+    if let Some(strategy) = args.snap_strategy {
+        resolver_config = resolver_config.with_snap_strategy(strategy.into());
+    }
+
+    options = options.with_resolver_config(resolver_config);
 
     if let Some(threshold) = args.snap_threshold {
         options = options.with_snap_threshold(SnapThreshold::new(threshold));
@@ -228,7 +261,10 @@ fn parse_csv_outlets(path: &PathBuf) -> Result<Vec<Outlet>> {
     let mut reader = csv::Reader::from_path(path)
         .with_context(|| format!("failed to open outlets CSV: {}", path.display()))?;
 
-    let headers = reader.headers().context("failed to read CSV headers")?.clone();
+    let headers = reader
+        .headers()
+        .context("failed to read CSV headers")?
+        .clone();
     let has_id = headers.iter().any(|h| h == "id");
     let has_name = headers.iter().any(|h| h == "name");
     let has_lat = headers.iter().any(|h| h == "lat");
@@ -279,7 +315,11 @@ fn parse_csv_outlets(path: &PathBuf) -> Result<Vec<Outlet>> {
             None
         };
 
-        outlets.push(Outlet { id, name, coord: GeoCoord::new(lon, lat) });
+        outlets.push(Outlet {
+            id,
+            name,
+            coord: GeoCoord::new(lon, lat),
+        });
     }
 
     if outlets.is_empty() {
@@ -414,17 +454,26 @@ fn result_to_geojson_feature(result: &DelineationResult, outlet: &Outlet) -> ser
         properties.insert("name".into(), json!(name));
     }
     properties.insert("area_km2".into(), json!(result.area_km2().as_f64()));
-    properties.insert("terminal_atom_id".into(), json!(result.terminal_atom_id().get()));
+    properties.insert(
+        "terminal_atom_id".into(),
+        json!(result.terminal_atom_id().get()),
+    );
     properties.insert("input_lat".into(), json!(result.input_outlet().lat));
     properties.insert("input_lon".into(), json!(result.input_outlet().lon));
     properties.insert("resolved_lat".into(), json!(result.resolved_outlet().lat));
     properties.insert("resolved_lon".into(), json!(result.resolved_outlet().lon));
-    properties.insert("upstream_atom_count".into(), json!(result.upstream_atom_ids().len()));
+    properties.insert(
+        "upstream_atom_count".into(),
+        json!(result.upstream_atom_ids().len()),
+    );
     properties.insert(
         "resolution_method".into(),
         json!(format_resolution_method(result.resolution_method())),
     );
-    properties.insert("refinement".into(), json!(format_refinement(result.refinement())));
+    properties.insert(
+        "refinement".into(),
+        json!(format_refinement(result.refinement())),
+    );
 
     json!({
         "type": "Feature",
@@ -434,18 +483,17 @@ fn result_to_geojson_feature(result: &DelineationResult, outlet: &Outlet) -> ser
 }
 
 fn multi_polygon_to_geojson(mp: &geo::MultiPolygon<f64>) -> serde_json::Value {
-    let polygons: Vec<serde_json::Value> = mp
-        .0
-        .iter()
-        .map(|poly| {
-            let mut rings = Vec::new();
-            rings.push(ring_to_coords(poly.exterior()));
-            for hole in poly.interiors() {
-                rings.push(ring_to_coords(hole));
-            }
-            json!(rings)
-        })
-        .collect();
+    let polygons: Vec<serde_json::Value> =
+        mp.0.iter()
+            .map(|poly| {
+                let mut rings = Vec::new();
+                rings.push(ring_to_coords(poly.exterior()));
+                for hole in poly.interiors() {
+                    rings.push(ring_to_coords(hole));
+                }
+                json!(rings)
+            })
+            .collect();
 
     json!({"type": "MultiPolygon", "coordinates": polygons})
 }
@@ -457,16 +505,20 @@ fn ring_to_coords(ls: &geo::LineString<f64>) -> Vec<[f64; 2]> {
 fn format_resolution_method(method: &ResolutionMethod) -> String {
     match method {
         ResolutionMethod::Snap {
+            strategy,
             snap_id,
             distance_m,
             weight,
             mainstem_status,
             candidates_considered,
         } => format!(
-            "snap(id={snap_id:?}, dist={distance_m:.1}m, weight={weight:?}, \
+            "snap(strategy={strategy}, id={snap_id:?}, dist={distance_m:.1}m, weight={weight:?}, \
              mainstem={mainstem_status:?}, candidates={candidates_considered})"
         ),
-        ResolutionMethod::PointInPolygon { candidates_considered, tie_break } => match tie_break {
+        ResolutionMethod::PointInPolygon {
+            candidates_considered,
+            tie_break,
+        } => match tie_break {
             Some(tb) => format!("pip(candidates={candidates_considered}, tie_break={tb:?})"),
             None => format!("pip(candidates={candidates_considered})"),
         },
@@ -476,7 +528,10 @@ fn format_resolution_method(method: &ResolutionMethod) -> String {
 fn format_refinement(r: &RefinementOutcome) -> String {
     match r {
         RefinementOutcome::Applied { refined_outlet } => {
-            format!("applied(lon={:.6}, lat={:.6})", refined_outlet.lon, refined_outlet.lat)
+            format!(
+                "applied(lon={:.6}, lat={:.6})",
+                refined_outlet.lon, refined_outlet.lat
+            )
         }
         RefinementOutcome::NoRastersAvailable => "no_rasters_available".into(),
         RefinementOutcome::NoRasterSourceProvided => "no_raster_source_provided".into(),

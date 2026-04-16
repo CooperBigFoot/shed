@@ -151,7 +151,7 @@ pub fn rasterize_polygon(polygon: &Polygon<f64>, geo: &GeoTransform, dims: GridD
 
 #[cfg(test)]
 mod tests {
-    use geo::{polygon, MultiPolygon, Polygon, LineString};
+    use geo::{LineString, MultiPolygon, Polygon, polygon};
 
     use super::*;
     use crate::algo::coord::{GeoCoord, GridDims};
@@ -355,7 +355,10 @@ mod tests {
         // Hole pixels (rows 1-2, cols 1-2) must be false.
         for r in 1..3usize {
             for c in 1..3usize {
-                assert!(!mask[r * 4 + c], "hole pixel row={r}, col={c} should be false");
+                assert!(
+                    !mask[r * 4 + c],
+                    "hole pixel row={r}, col={c} should be false"
+                );
             }
         }
         // Corner pixels (row 0 / row 3, cols all; rows 1-2 col 0 / col 3) must be true.
@@ -456,6 +459,9 @@ mod tests {
             }
         }
         // Extra component pixel (row=0, col=5) must be true.
-        assert!(mask[0 * 6 + 5], "extra component pixel (0,5) should be true");
+        assert!(
+            mask[0 * 6 + 5],
+            "extra component pixel (0,5) should be true"
+        );
     }
 }

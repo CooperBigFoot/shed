@@ -6,19 +6,19 @@ use hfx_core::AtomId;
 use rayon::prelude::*;
 use tracing::instrument;
 
+use crate::algo::coord::GeoCoord;
 use crate::algo::{
-    AreaKm2, CleanEpsilon, DEFAULT_CLEANING_EPSILON, GeometryRepair, HoleFillMode, RasterSource,
-    RefinementError, SnapThreshold, TraversalError, WkbDecodeError, WkbEncodeError,
     collect_upstream, decode_wkb_multi_polygon, encode_wkb_multi_polygon,
-    refine_terminal_from_source,
+    refine_terminal_from_source, AreaKm2, CleanEpsilon, GeometryRepair, HoleFillMode, RasterSource,
+    RefinementError, SnapThreshold, TraversalError, WkbDecodeError, WkbEncodeError,
+    DEFAULT_CLEANING_EPSILON,
 };
-use crate::assembly::{AssemblyOptions, assemble_watershed};
+use crate::assembly::{assemble_watershed, AssemblyOptions};
 use crate::error::SessionError;
 use crate::resolver::{
-    OutletResolutionError, ResolvedOutlet, ResolverConfig, ResolutionMethod, resolve_outlet,
+    resolve_outlet, OutletResolutionError, ResolutionMethod, ResolvedOutlet, ResolverConfig,
 };
 use crate::session::DatasetSession;
-use crate::algo::coord::GeoCoord;
 
 // ── RefinementOutcome ─────────────────────────────────────────────────────────
 
@@ -241,10 +241,7 @@ pub struct EngineBuilder {
 
 impl EngineBuilder {
     /// Attach a [`RasterSource`] backend for terminal refinement.
-    pub fn with_raster_source(
-        mut self,
-        source: impl RasterSource + Send + Sync + 'static,
-    ) -> Self {
+    pub fn with_raster_source(mut self, source: impl RasterSource + Send + Sync + 'static) -> Self {
         self.raster_source = Some(Box::new(source));
         self
     }
@@ -314,8 +311,12 @@ impl Engine {
         let terminal = resolved.atom_id;
 
         // Step 2: Upstream traversal
-        let upstream = collect_upstream(terminal, self.session.graph())
-            .map_err(|source| EngineError::Traversal { atom_id: terminal.get(), source })?;
+        let upstream = collect_upstream(terminal, self.session.graph()).map_err(|source| {
+            EngineError::Traversal {
+                atom_id: terminal.get(),
+                source,
+            }
+        })?;
 
         // Step 3: Try refinement
         let (refinement, refined_geometry) = self.try_refine(terminal, &resolved, options)?;
@@ -403,7 +404,7 @@ impl Engine {
         let terminal_atoms = self
             .session
             .catchments()
-            .query_by_ids(&[terminal])
+            .query_geometries_by_ids(&[terminal])
             .map_err(|source| EngineError::TerminalCatchmentFetch {
                 atom_id: terminal.get(),
                 source,
@@ -434,12 +435,17 @@ impl Engine {
             resolved.resolved_coord,
             options.snap_threshold,
         )
-        .map_err(|source| EngineError::Refinement { atom_id: terminal.get(), source })?;
+        .map_err(|source| EngineError::Refinement {
+            atom_id: terminal.get(),
+            source,
+        })?;
 
         let refined_coord = refinement_result.snapped_coord();
         let refined_polygon = refinement_result.into_polygon();
         Ok((
-            RefinementOutcome::Applied { refined_outlet: refined_coord },
+            RefinementOutcome::Applied {
+                refined_outlet: refined_coord,
+            },
             Some(refined_polygon),
         ))
     }
@@ -540,10 +546,8 @@ mod tests {
         let engine = Engine::builder(session).build();
 
         let opts = DelineationOptions::default();
-        let results = engine.delineate_batch(&[
-            (coord_in_atom3(), opts.clone()),
-            (coord_outside(), opts),
-        ]);
+        let results =
+            engine.delineate_batch(&[(coord_in_atom3(), opts.clone()), (coord_outside(), opts)]);
 
         assert_eq!(results.len(), 2);
         assert!(results[0].is_ok(), "first outlet should succeed");
@@ -565,7 +569,10 @@ mod tests {
             .delineate(coord_in_atom1, &DelineationOptions::default())
             .expect("headwater delineation should succeed");
 
-        assert!(result.upstream_atom_ids().len() == 1, "headwater has exactly 1 atom");
+        assert!(
+            result.upstream_atom_ids().len() == 1,
+            "headwater has exactly 1 atom"
+        );
         assert!(result.geometry().0.len() >= 1, "geometry is non-empty");
         assert!(result.area_km2().as_f64() > 0.0, "area is positive");
     }

@@ -60,42 +60,64 @@ pub fn read_manifest(path: &Path) -> Result<Manifest, SessionError> {
 fn build_manifest(raw: RawManifest) -> Result<Manifest, SessionError> {
     // --- Required fields ---
 
-    let format_version_str =
-        raw.format_version.ok_or(SessionError::ManifestFieldMissing { field: "format_version" })?;
-    let format_version = FormatVersion::from_str(&format_version_str)
-        .map_err(|_| SessionError::manifest_field_invalid(
+    let format_version_str = raw
+        .format_version
+        .ok_or(SessionError::ManifestFieldMissing {
+            field: "format_version",
+        })?;
+    let format_version = FormatVersion::from_str(&format_version_str).map_err(|_| {
+        SessionError::manifest_field_invalid(
             "format_version",
-            format!("unsupported version {:?}, expected \"0.1\"", format_version_str),
-        ))?;
+            format!(
+                "unsupported version {:?}, expected \"0.1\"",
+                format_version_str
+            ),
+        )
+    })?;
 
-    let fabric_name =
-        raw.fabric_name.ok_or(SessionError::ManifestFieldMissing { field: "fabric_name" })?;
+    let fabric_name = raw.fabric_name.ok_or(SessionError::ManifestFieldMissing {
+        field: "fabric_name",
+    })?;
 
-    let crs_str = raw.crs.ok_or(SessionError::ManifestFieldMissing { field: "crs" })?;
-    let crs = Crs::from_str(&crs_str).map_err(|_| SessionError::manifest_field_invalid(
-        "crs",
-        format!("unsupported CRS {:?}, expected \"EPSG:4326\"", crs_str),
-    ))?;
+    let crs_str = raw
+        .crs
+        .ok_or(SessionError::ManifestFieldMissing { field: "crs" })?;
+    let crs = Crs::from_str(&crs_str).map_err(|_| {
+        SessionError::manifest_field_invalid(
+            "crs",
+            format!("unsupported CRS {:?}, expected \"EPSG:4326\"", crs_str),
+        )
+    })?;
 
-    let topology_str =
-        raw.topology.ok_or(SessionError::ManifestFieldMissing { field: "topology" })?;
+    let topology_str = raw
+        .topology
+        .ok_or(SessionError::ManifestFieldMissing { field: "topology" })?;
     let topology = Topology::from_str(&topology_str).map_err(|_| {
         SessionError::manifest_field_invalid(
             "topology",
-            format!("unsupported topology {:?}, expected \"tree\" or \"dag\"", topology_str),
+            format!(
+                "unsupported topology {:?}, expected \"tree\" or \"dag\"",
+                topology_str
+            ),
         )
     })?;
 
     let terminal_sink_id = raw
         .terminal_sink_id
-        .ok_or(SessionError::ManifestFieldMissing { field: "terminal_sink_id" })?;
+        .ok_or(SessionError::ManifestFieldMissing {
+            field: "terminal_sink_id",
+        })?;
 
-    let bbox_raw =
-        raw.bbox.ok_or(SessionError::ManifestFieldMissing { field: "bbox" })?;
+    let bbox_raw = raw
+        .bbox
+        .ok_or(SessionError::ManifestFieldMissing { field: "bbox" })?;
     if bbox_raw.len() != 4 {
         return Err(SessionError::manifest_field_invalid(
             "bbox",
-            format!("expected 4 elements [minx, miny, maxx, maxy], got {}", bbox_raw.len()),
+            format!(
+                "expected 4 elements [minx, miny, maxx, maxy], got {}",
+                bbox_raw.len()
+            ),
         ));
     }
     let bbox = BoundingBox::new(
@@ -106,16 +128,21 @@ fn build_manifest(raw: RawManifest) -> Result<Manifest, SessionError> {
     )
     .map_err(|e| SessionError::manifest_field_invalid("bbox", e.to_string()))?;
 
-    let atom_count_raw =
-        raw.atom_count.ok_or(SessionError::ManifestFieldMissing { field: "atom_count" })?;
+    let atom_count_raw = raw.atom_count.ok_or(SessionError::ManifestFieldMissing {
+        field: "atom_count",
+    })?;
     let atom_count = AtomCount::new(atom_count_raw)
         .map_err(|e| SessionError::manifest_field_invalid("atom_count", e.to_string()))?;
 
-    let created_at =
-        raw.created_at.ok_or(SessionError::ManifestFieldMissing { field: "created_at" })?;
+    let created_at = raw.created_at.ok_or(SessionError::ManifestFieldMissing {
+        field: "created_at",
+    })?;
 
-    let adapter_version =
-        raw.adapter_version.ok_or(SessionError::ManifestFieldMissing { field: "adapter_version" })?;
+    let adapter_version = raw
+        .adapter_version
+        .ok_or(SessionError::ManifestFieldMissing {
+            field: "adapter_version",
+        })?;
 
     // --- Conditional: flow_dir_encoding required when has_rasters is true ---
 
@@ -156,16 +183,36 @@ fn build_manifest(raw: RawManifest) -> Result<Manifest, SessionError> {
     )
     .map_err(|source| SessionError::ManifestDomain { source })?;
 
-    let builder = if raw.has_up_area.unwrap_or(false) { builder.with_up_area() } else { builder };
+    let builder = if raw.has_up_area.unwrap_or(false) {
+        builder.with_up_area()
+    } else {
+        builder
+    };
     let builder = if let Some(encoding) = flow_dir_encoding {
         builder.with_rasters(encoding)
     } else {
         builder
     };
-    let builder = if raw.has_snap.unwrap_or(false) { builder.with_snap() } else { builder };
-    let builder = if let Some(v) = raw.fabric_version { builder.with_fabric_version(v) } else { builder };
-    let builder = if let Some(v) = raw.fabric_level { builder.with_fabric_level(v) } else { builder };
-    let builder = if let Some(v) = raw.region { builder.with_region(v) } else { builder };
+    let builder = if raw.has_snap.unwrap_or(false) {
+        builder.with_snap()
+    } else {
+        builder
+    };
+    let builder = if let Some(v) = raw.fabric_version {
+        builder.with_fabric_version(v)
+    } else {
+        builder
+    };
+    let builder = if let Some(v) = raw.fabric_level {
+        builder.with_fabric_level(v)
+    } else {
+        builder
+    };
+    let builder = if let Some(v) = raw.region {
+        builder.with_region(v)
+    } else {
+        builder
+    };
 
     Ok(builder.build())
 }
@@ -220,7 +267,10 @@ mod tests {
         assert_eq!(manifest.fabric_version(), None);
         assert_eq!(manifest.fabric_level(), None);
         assert_eq!(manifest.region(), None);
-        assert_eq!(manifest.up_area(), hfx_core::UpAreaAvailability::NotAvailable);
+        assert_eq!(
+            manifest.up_area(),
+            hfx_core::UpAreaAvailability::NotAvailable
+        );
         assert_eq!(manifest.rasters(), hfx_core::RasterAvailability::Absent);
         assert_eq!(manifest.snap(), hfx_core::SnapAvailability::Absent);
     }
@@ -241,7 +291,10 @@ mod tests {
 
         let manifest = read_manifest(&path).unwrap();
 
-        assert_eq!(manifest.up_area(), hfx_core::UpAreaAvailability::Precomputed);
+        assert_eq!(
+            manifest.up_area(),
+            hfx_core::UpAreaAvailability::Precomputed
+        );
         assert_eq!(
             manifest.rasters(),
             hfx_core::RasterAvailability::Present(FlowDirEncoding::Esri)
@@ -261,7 +314,12 @@ mod tests {
 
         let err = read_manifest(&path).unwrap_err();
         assert!(
-            matches!(err, SessionError::ManifestFieldMissing { field: "format_version" }),
+            matches!(
+                err,
+                SessionError::ManifestFieldMissing {
+                    field: "format_version"
+                }
+            ),
             "unexpected error: {err}"
         );
     }
@@ -273,7 +331,10 @@ mod tests {
         std::fs::write(&path, b"{broken").unwrap();
 
         let err = read_manifest(&path).unwrap_err();
-        assert!(matches!(err, SessionError::ManifestJsonParse { .. }), "unexpected error: {err}");
+        assert!(
+            matches!(err, SessionError::ManifestJsonParse { .. }),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -285,7 +346,13 @@ mod tests {
 
         let err = read_manifest(&path).unwrap_err();
         assert!(
-            matches!(err, SessionError::ManifestFieldInvalid { field: "topology", .. }),
+            matches!(
+                err,
+                SessionError::ManifestFieldInvalid {
+                    field: "topology",
+                    ..
+                }
+            ),
             "unexpected error: {err}"
         );
     }
@@ -308,13 +375,22 @@ mod tests {
     fn test_has_rasters_requires_flow_dir_encoding() {
         let dir = TempDir::new().unwrap();
         let mut value = minimal_json();
-        value.as_object_mut().unwrap().insert("has_rasters".into(), json!(true));
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("has_rasters".into(), json!(true));
         // Deliberately omit flow_dir_encoding
         let path = write_manifest(&dir, &value);
 
         let err = read_manifest(&path).unwrap_err();
         assert!(
-            matches!(err, SessionError::ManifestFieldInvalid { field: "flow_dir_encoding", .. }),
+            matches!(
+                err,
+                SessionError::ManifestFieldInvalid {
+                    field: "flow_dir_encoding",
+                    ..
+                }
+            ),
             "unexpected error: {err}"
         );
     }
@@ -329,7 +405,10 @@ mod tests {
 
         let err = read_manifest(&path).unwrap_err();
         assert!(
-            matches!(err, SessionError::ManifestFieldInvalid { field: "bbox", .. }),
+            matches!(
+                err,
+                SessionError::ManifestFieldInvalid { field: "bbox", .. }
+            ),
             "unexpected error: {err}"
         );
     }
@@ -338,6 +417,9 @@ mod tests {
     fn test_file_not_found() {
         let path = std::path::Path::new("/nonexistent/path/to/manifest.json");
         let err = read_manifest(path).unwrap_err();
-        assert!(matches!(err, SessionError::Io { .. }), "unexpected error: {err}");
+        assert!(
+            matches!(err, SessionError::Io { .. }),
+            "unexpected error: {err}"
+        );
     }
 }

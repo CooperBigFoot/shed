@@ -50,7 +50,7 @@ fn validate_schema(reader: &FileReader<std::fs::File>) -> Result<(), SessionErro
         Err(_) => {
             return Err(SessionError::graph_schema(
                 "missing required column \"id\" (expected Int64)",
-            ))
+            ));
         }
         Ok(field) => {
             if field.data_type() != &DataType::Int64 {
@@ -67,7 +67,7 @@ fn validate_schema(reader: &FileReader<std::fs::File>) -> Result<(), SessionErro
         Err(_) => {
             return Err(SessionError::graph_schema(
                 "missing required column \"upstream_ids\" (expected List(Int64))",
-            ))
+            ));
         }
         Ok(field) => {
             if !is_list_int64(field.data_type()) {
@@ -95,32 +95,26 @@ fn is_list_int64(dt: &DataType) -> bool {
 }
 
 /// Read all record batches from the reader and convert each row into an [`AdjacencyRow`].
-fn read_rows(
-    reader: FileReader<std::fs::File>,
-) -> Result<Vec<AdjacencyRow>, SessionError> {
+fn read_rows(reader: FileReader<std::fs::File>) -> Result<Vec<AdjacencyRow>, SessionError> {
     let mut rows: Vec<AdjacencyRow> = Vec::new();
     let mut global_row: usize = 0;
 
     for batch_result in reader {
-        let batch =
-            batch_result.map_err(|e| SessionError::GraphArrowParse { source: e })?;
+        let batch = batch_result.map_err(|e| SessionError::GraphArrowParse { source: e })?;
 
         let num_rows = batch.num_rows();
 
-        let id_col = batch.column_by_name("id").ok_or_else(|| {
-            SessionError::graph_schema("column \"id\" missing from record batch")
-        })?;
+        let id_col = batch
+            .column_by_name("id")
+            .ok_or_else(|| SessionError::graph_schema("column \"id\" missing from record batch"))?;
         let id_arr = id_col
             .as_any()
             .downcast_ref::<Int64Array>()
             .ok_or_else(|| SessionError::graph_schema("column \"id\" is not Int64"))?;
 
-        let upstream_col =
-            batch.column_by_name("upstream_ids").ok_or_else(|| {
-                SessionError::graph_schema(
-                    "column \"upstream_ids\" missing from record batch",
-                )
-            })?;
+        let upstream_col = batch.column_by_name("upstream_ids").ok_or_else(|| {
+            SessionError::graph_schema("column \"upstream_ids\" missing from record batch")
+        })?;
 
         for i in 0..num_rows {
             if id_arr.is_null(i) {
@@ -171,9 +165,7 @@ fn extract_upstream(
             .as_any()
             .downcast_ref::<Int64Array>()
             .ok_or_else(|| {
-                SessionError::graph_schema(
-                    "inner values of \"upstream_ids\" are not Int64",
-                )
+                SessionError::graph_schema("inner values of \"upstream_ids\" are not Int64")
             })?;
         convert_upstream_values(int_arr.values(), row_idx)
     } else if let Some(list_arr) = col.as_any().downcast_ref::<LargeListArray>() {
@@ -189,9 +181,7 @@ fn extract_upstream(
             .as_any()
             .downcast_ref::<Int64Array>()
             .ok_or_else(|| {
-                SessionError::graph_schema(
-                    "inner values of \"upstream_ids\" are not Int64",
-                )
+                SessionError::graph_schema("inner values of \"upstream_ids\" are not Int64")
             })?;
         convert_upstream_values(int_arr.values(), row_idx)
     } else {
@@ -361,8 +351,7 @@ mod tests {
         let path = dir.path().join("graph.arrow");
 
         // Only "id", no "upstream_ids".
-        let schema =
-            Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
         write_schema_only_fixture(&path, schema);
 
         let err = load_graph(&path).unwrap_err();

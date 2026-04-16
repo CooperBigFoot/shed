@@ -29,19 +29,14 @@ pub(crate) fn require_column(
         .enumerate()
         .find(|(_, f)| f.name() == name)
         .ok_or_else(|| {
-            SessionError::parquet_schema(
-                artifact,
-                format!("missing required column {name:?}"),
-            )
+            SessionError::parquet_schema(artifact, format!("missing required column {name:?}"))
         })?;
 
     let actual = field.data_type();
     if actual != expected_type && !is_accepted_large_variant(actual, expected_type) {
         return Err(SessionError::parquet_schema(
             artifact,
-            format!(
-                "column {name:?} has type {actual:?}, expected {expected_type:?}"
-            ),
+            format!("column {name:?} has type {actual:?}, expected {expected_type:?}"),
         ));
     }
 

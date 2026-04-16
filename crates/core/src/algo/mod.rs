@@ -19,9 +19,9 @@ pub mod raster_tile;
 // ── Raster algorithms ────────────────────────────────────────────────────────
 pub mod polygonize;
 pub mod rasterize;
+pub mod refine;
 pub mod snap;
 pub mod trace;
-pub mod refine;
 
 // ── Graph traversal ──────────────────────────────────────────────────────────
 pub mod upstream;
@@ -60,9 +60,9 @@ pub use raster_tile::{RasterTile, RasterTileError};
 // ── Re-exports: raster algorithms ────────────────────────────────────────────
 pub use polygonize::polygonize;
 pub use rasterize::{rasterize_multi_polygon, rasterize_polygon};
+pub use refine::{RefinementError, RefinementResult, refine_terminal, refine_terminal_from_source};
 pub use snap::{SnapError, SnappedPoint, snap_pour_point};
 pub use trace::trace_upstream;
-pub use refine::{RefinementError, RefinementResult, refine_terminal, refine_terminal_from_source};
 
 // ── Re-exports: graph traversal ──────────────────────────────────────────────
 pub use upstream::{TraversalError, UpstreamAtoms, collect_upstream};
@@ -70,7 +70,7 @@ pub use upstream::{TraversalError, UpstreamAtoms, collect_upstream};
 // ── Re-exports: geometry processing ──────────────────────────────────────────
 pub use clean_topology::clean_topology;
 pub use dissolve::{DissolveError, dissolve};
-pub use hole_fill::{HoleFillMode, DEFAULT_FILL_THRESHOLD_PX, fill_holes};
+pub use hole_fill::{DEFAULT_FILL_THRESHOLD_PX, HoleFillMode, fill_holes};
 pub use largest_polygon::largest_polygon;
 pub use watershed_area::{WatershedAreaError, geodesic_area, geodesic_area_multi};
 
@@ -80,4 +80,7 @@ pub use traits::{GeometryRepair, GeometryRepairError, RasterSource, RasterSource
 pub use watershed_geometry::{Dissolved, HolesFilled, TopologyCleaned, WatershedGeometry};
 
 // ── Re-exports: WKB decoding ──────────────────────────────────────────────────
-pub use wkb::{WkbDecodeError, WkbEncodeError, decode_wkb, decode_wkb_multi_polygon, decode_wkb_polygon, encode_wkb_multi_polygon};
+pub use wkb::{
+    WkbDecodeError, WkbEncodeError, decode_wkb, decode_wkb_multi_polygon, decode_wkb_polygon,
+    encode_wkb_multi_polygon,
+};

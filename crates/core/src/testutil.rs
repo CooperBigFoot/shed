@@ -3,7 +3,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{BinaryBuilder, BooleanBuilder, Float32Builder, Int64Array, Int64Builder, ListBuilder, RecordBatch};
+use arrow::array::{
+    BinaryBuilder, BooleanBuilder, Float32Builder, Int64Array, Int64Builder, ListBuilder,
+    RecordBatch,
+};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::FileWriter;
 use parquet::arrow::ArrowWriter;
@@ -254,12 +257,7 @@ impl DatasetBuilder {
                 maxx_b.append_value(maxx);
                 maxy_b.append_value(maxy);
 
-                let wkb = minimal_wkb_polygon(
-                    minx as f64,
-                    miny as f64,
-                    maxx as f64,
-                    maxy as f64,
-                );
+                let wkb = minimal_wkb_polygon(minx as f64, miny as f64, maxx as f64, maxy as f64);
                 geom_b.append_value(&wkb);
             }
         }
@@ -476,7 +474,13 @@ fn minimal_wkb_polygon(minx: f64, miny: f64, maxx: f64, maxy: f64) -> Vec<u8> {
     wkb.extend_from_slice(&3u32.to_le_bytes()); // polygon type
     wkb.extend_from_slice(&1u32.to_le_bytes()); // 1 ring
     wkb.extend_from_slice(&5u32.to_le_bytes()); // 5 points (closed)
-    for (x, y) in [(minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy), (minx, miny)] {
+    for (x, y) in [
+        (minx, miny),
+        (maxx, miny),
+        (maxx, maxy),
+        (minx, maxy),
+        (minx, miny),
+    ] {
         wkb.extend_from_slice(&x.to_le_bytes());
         wkb.extend_from_slice(&y.to_le_bytes());
     }
@@ -576,8 +580,18 @@ mod tests {
     #[test]
     fn test_custom_catchments_dataset_opens() {
         let catchments = vec![
-            TestCatchment { id: 10, area_km2: 5.0, up_area_km2: Some(100.0), polygon: (1.0, 0.0, 1.4, 0.4) },
-            TestCatchment { id: 20, area_km2: 8.0, up_area_km2: None, polygon: (1.5, 0.0, 1.9, 0.4) },
+            TestCatchment {
+                id: 10,
+                area_km2: 5.0,
+                up_area_km2: Some(100.0),
+                polygon: (1.0, 0.0, 1.4, 0.4),
+            },
+            TestCatchment {
+                id: 20,
+                area_km2: 8.0,
+                up_area_km2: None,
+                polygon: (1.5, 0.0, 1.9, 0.4),
+            },
         ];
         let (_dir, root) = DatasetBuilder::new(2)
             .with_custom_catchments(catchments)
@@ -589,12 +603,34 @@ mod tests {
     #[test]
     fn test_custom_snap_targets_dataset_opens() {
         let catchments = vec![
-            TestCatchment { id: 1, area_km2: 10.0, up_area_km2: None, polygon: (0.5, 0.0, 0.9, 0.4) },
-            TestCatchment { id: 2, area_km2: 10.0, up_area_km2: None, polygon: (1.0, 0.0, 1.4, 0.4) },
+            TestCatchment {
+                id: 1,
+                area_km2: 10.0,
+                up_area_km2: None,
+                polygon: (0.5, 0.0, 0.9, 0.4),
+            },
+            TestCatchment {
+                id: 2,
+                area_km2: 10.0,
+                up_area_km2: None,
+                polygon: (1.0, 0.0, 1.4, 0.4),
+            },
         ];
         let targets = vec![
-            TestSnapTarget { id: 1, catchment_id: 1, weight: 50.0, is_mainstem: true, geometry: TestSnapGeometry::Point(0.7, 0.2) },
-            TestSnapTarget { id: 2, catchment_id: 2, weight: 100.0, is_mainstem: false, geometry: TestSnapGeometry::LineString(1.1, 0.2, 1.3, 0.2) },
+            TestSnapTarget {
+                id: 1,
+                catchment_id: 1,
+                weight: 50.0,
+                is_mainstem: true,
+                geometry: TestSnapGeometry::Point(0.7, 0.2),
+            },
+            TestSnapTarget {
+                id: 2,
+                catchment_id: 2,
+                weight: 100.0,
+                is_mainstem: false,
+                geometry: TestSnapGeometry::LineString(1.1, 0.2, 1.3, 0.2),
+            },
         ];
         let (_dir, root) = DatasetBuilder::new(2)
             .with_custom_catchments(catchments)

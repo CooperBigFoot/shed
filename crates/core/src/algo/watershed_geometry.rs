@@ -139,7 +139,13 @@ impl WatershedGeometry<HolesFilled> {
 
     #[allow(dead_code)]
     pub(crate) fn into_canonical_multi_polygon(self) -> MultiPolygon<f64> {
-        MultiPolygon::new(self.inner.0.into_iter().map(normalize_polygon_winding).collect())
+        MultiPolygon::new(
+            self.inner
+                .0
+                .into_iter()
+                .map(normalize_polygon_winding)
+                .collect(),
+        )
     }
 
     /// Access the inner geometry.

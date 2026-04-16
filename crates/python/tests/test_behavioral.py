@@ -23,6 +23,15 @@ import pyshed
 class TestSingleDelineation:
     """Tests for engine.delineate()."""
 
+    def test_delineate_accepts_weight_first_snap_strategy(self, hfx_dataset):
+        engine = pyshed.Engine(hfx_dataset, snap_strategy="weight-first")
+        result = engine.delineate(lat=0.20, lon=1.70)
+        assert result.area_km2 > 0
+
+    def test_invalid_snap_strategy_raises_value_error(self, hfx_dataset):
+        with pytest.raises(ValueError, match="invalid snap_strategy"):
+            pyshed.Engine(hfx_dataset, snap_strategy="bogus")
+
     def test_delineate_returns_result(self, hfx_dataset):
         engine = pyshed.Engine(hfx_dataset)
         # Coordinate inside atom 3's bbox

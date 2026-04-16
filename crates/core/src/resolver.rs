@@ -51,6 +51,26 @@ impl fmt::Display for SearchRadiusMetres {
     }
 }
 
+/// Snap-target ranking strategy for outlet resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapStrategy {
+    /// Prefer the nearest candidate, using weight/mainstem only as tie-breakers.
+    DistanceFirst,
+    /// Prefer the highest-weight candidate inside the search radius, using
+    /// mainstem preference, distance, then snap ID as tie-breakers.
+    WeightFirst,
+}
+
+impl fmt::Display for SnapStrategy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::DistanceFirst => "distance-first",
+            Self::WeightFirst => "weight-first",
+        };
+        f.write_str(value)
+    }
+}
+
 // ── ResolverConfig ────────────────────────────────────────────────────────────
 
 /// Configuration for [`resolve_outlet`].
@@ -58,12 +78,17 @@ impl fmt::Display for SearchRadiusMetres {
 pub struct ResolverConfig {
     search_radius: SearchRadiusMetres,
     distance_tolerance_m: f64,
+    snap_strategy: SnapStrategy,
 }
 
 impl ResolverConfig {
     /// Create a config with default values.
     pub fn new() -> Self {
-        Self { search_radius: SearchRadiusMetres::DEFAULT, distance_tolerance_m: 1.0 }
+        Self {
+            search_radius: SearchRadiusMetres::DEFAULT,
+            distance_tolerance_m: 1.0,
+            snap_strategy: SnapStrategy::DistanceFirst,
+        }
     }
 
     /// Override the snap-path search radius.
@@ -80,15 +105,20 @@ impl ResolverConfig {
     ///
     /// Must be finite and non-negative (zero disables tolerance).
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `tolerance_m` is negative, NaN, or infinite.
-    pub fn with_distance_tolerance(mut self, tolerance_m: f64) -> Self {
-        assert!(
-            tolerance_m.is_finite() && tolerance_m >= 0.0,
-            "distance tolerance must be finite and non-negative, got {tolerance_m}"
-        );
+    /// Returns an error string if `tolerance_m` is negative, NaN, or infinite.
+    pub fn with_distance_tolerance(mut self, tolerance_m: f64) -> Result<Self, &'static str> {
+        if !tolerance_m.is_finite() || tolerance_m < 0.0 {
+            return Err("distance tolerance must be finite and non-negative");
+        }
         self.distance_tolerance_m = tolerance_m;
+        Ok(self)
+    }
+
+    /// Override the snap-target ranking strategy.
+    pub fn with_snap_strategy(mut self, strategy: SnapStrategy) -> Self {
+        self.snap_strategy = strategy;
         self
     }
 
@@ -100,6 +130,11 @@ impl ResolverConfig {
     /// Return the configured distance tolerance in metres.
     pub fn distance_tolerance_m(&self) -> f64 {
         self.distance_tolerance_m
+    }
+
+    /// Return the configured snap-target ranking strategy.
+    pub fn snap_strategy(&self) -> SnapStrategy {
+        self.snap_strategy
     }
 }
 
@@ -130,6 +165,8 @@ pub enum PipTieBreak {
 pub enum ResolutionMethod {
     /// The outlet was resolved via the snap-file nearest-geometry search.
     Snap {
+        /// Ranking strategy used to choose the winning snap candidate.
+        strategy: SnapStrategy,
         /// ID of the snap target that was selected.
         snap_id: SnapId,
         /// Planar distance in metres from the input outlet to the snapped point.
@@ -267,6 +304,12 @@ struct ScoredCandidate {
     nearest_coord: GeoCoord,
 }
 
+fn internal_resolver_inconsistency(detail: impl Into<String>) -> OutletResolutionError {
+    OutletResolutionError::DatasetRead {
+        source: SessionError::integrity(detail),
+    }
+}
+
 /// Resolve via snap-file nearest-geometry search.
 ///
 /// # Errors
@@ -283,8 +326,13 @@ fn resolve_via_snap(
     // 1. Build search bbox.
     let bbox = search_bbox(outlet, config.search_radius().as_f64())?;
 
-    // 2. Query snap store (caller guarantees snap is Some).
-    let candidates = session.snap().unwrap().query_by_bbox(&bbox)?;
+    // 2. Query snap store.
+    let candidates = session
+        .snap()
+        .ok_or_else(|| {
+            internal_resolver_inconsistency("resolve_via_snap called without snap store")
+        })?
+        .query_by_bbox(&bbox)?;
     let total_candidates = candidates.len();
     debug!(
         candidate_count = total_candidates,
@@ -334,7 +382,11 @@ fn resolve_via_snap(
             continue;
         }
 
-        scored.push(ScoredCandidate { target, distance_m, nearest_coord });
+        scored.push(ScoredCandidate {
+            target,
+            distance_m,
+            nearest_coord,
+        });
     }
 
     // 5. No scored candidates after filtering → error.
@@ -358,35 +410,71 @@ fn resolve_via_snap(
     //    a) Find the minimum distance among all scored candidates.
     //    b) Restrict to candidates within min_distance + tolerance.
     //    c) Among those, rank by weight DESC → mainstem DESC → snap_id ASC.
-    let tolerance = config.distance_tolerance_m();
-    let min_distance = scored
-        .iter()
-        .map(|c| c.distance_m)
-        .min_by(f64::total_cmp)
-        .expect("scored is non-empty");
-    let threshold = min_distance + tolerance;
+    let winner = match config.snap_strategy() {
+        SnapStrategy::DistanceFirst => {
+            let tolerance = config.distance_tolerance_m();
+            let min_distance = scored
+                .iter()
+                .map(|c| c.distance_m)
+                .min_by(f64::total_cmp)
+                .ok_or_else(|| {
+                    internal_resolver_inconsistency(
+                        "distance-first snap selection called with no scored candidates",
+                    )
+                })?;
+            let threshold = min_distance + tolerance;
 
-    let winner = scored
-        .into_iter()
-        .filter(|c| c.distance_m <= threshold)
-        .min_by(|a, b| {
-            // Within the tolerance band: rank by weight, mainstem, then id.
-            // Distance is NOT used here — all candidates in the band are
-            // treated as equidistant.
-            b.target.weight().get().total_cmp(&a.target.weight().get())
-                .then_with(|| {
-                    let mainstem_rank = |s: MainstemStatus| match s {
-                        MainstemStatus::Mainstem => 1u8,
-                        MainstemStatus::Tributary => 0u8,
-                    };
-                    mainstem_rank(b.target.mainstem_status())
-                        .cmp(&mainstem_rank(a.target.mainstem_status()))
+            scored
+                .into_iter()
+                .filter(|c| c.distance_m <= threshold)
+                .min_by(|a, b| {
+                    // Within the tolerance band: rank by weight, mainstem, then id.
+                    // Distance is NOT used here — all candidates in the band are
+                    // treated as equidistant.
+                    b.target
+                        .weight()
+                        .get()
+                        .total_cmp(&a.target.weight().get())
+                        .then_with(|| {
+                            let mainstem_rank = |s: MainstemStatus| match s {
+                                MainstemStatus::Mainstem => 1u8,
+                                MainstemStatus::Tributary => 0u8,
+                            };
+                            mainstem_rank(b.target.mainstem_status())
+                                .cmp(&mainstem_rank(a.target.mainstem_status()))
+                        })
+                        .then_with(|| a.target.id().get().cmp(&b.target.id().get()))
                 })
-                .then_with(|| {
-                    a.target.id().get().cmp(&b.target.id().get())
-                })
-        })
-        .expect("at least one candidate is within threshold");
+                .ok_or_else(|| {
+                    internal_resolver_inconsistency(
+                        "distance-first tolerance band produced no snap winner",
+                    )
+                })?
+        }
+        SnapStrategy::WeightFirst => scored
+            .into_iter()
+            .min_by(|a, b| {
+                b.target
+                    .weight()
+                    .get()
+                    .total_cmp(&a.target.weight().get())
+                    .then_with(|| {
+                        let mainstem_rank = |s: MainstemStatus| match s {
+                            MainstemStatus::Mainstem => 1u8,
+                            MainstemStatus::Tributary => 0u8,
+                        };
+                        mainstem_rank(b.target.mainstem_status())
+                            .cmp(&mainstem_rank(a.target.mainstem_status()))
+                    })
+                    .then_with(|| a.distance_m.total_cmp(&b.distance_m))
+                    .then_with(|| a.target.id().get().cmp(&b.target.id().get()))
+            })
+            .ok_or_else(|| {
+                internal_resolver_inconsistency(
+                    "weight-first snap selection called with no scored candidates",
+                )
+            })?,
+    };
 
     // 7. Build result.
     info!(
@@ -401,6 +489,7 @@ fn resolve_via_snap(
         input_coord: outlet,
         resolved_coord: winner.nearest_coord,
         method: ResolutionMethod::Snap {
+            strategy: config.snap_strategy(),
             snap_id: winner.target.id(),
             distance_m: winner.distance_m,
             weight: winner.target.weight(),
@@ -441,18 +530,16 @@ fn resolve_via_pip(
     let mut decode_failures: usize = 0;
     let decoded: Vec<(&CatchmentAtom, geo::MultiPolygon<f64>)> = candidates
         .iter()
-        .filter_map(|atom| {
-            match decode_wkb_multi_polygon(atom.geometry()) {
-                Ok(mp) => Some((atom, mp)),
-                Err(e) => {
-                    warn!(
-                        atom_id = atom.id().get(),
-                        error = %e,
-                        "failed to decode WKB geometry, skipping candidate"
-                    );
-                    decode_failures += 1;
-                    None
-                }
+        .filter_map(|atom| match decode_wkb_multi_polygon(atom.geometry()) {
+            Ok(mp) => Some((atom, mp)),
+            Err(e) => {
+                warn!(
+                    atom_id = atom.id().get(),
+                    error = %e,
+                    "failed to decode WKB geometry, skipping candidate"
+                );
+                decode_failures += 1;
+                None
             }
         })
         .collect();
@@ -475,7 +562,10 @@ fn resolve_via_pip(
             .filter(|(_, mp)| mp.intersects(&point))
             .map(|(atom, _)| *atom)
             .collect();
-        debug!(phase2_hits = hits.len(), "PiP phase 2 (intersects) complete");
+        debug!(
+            phase2_hits = hits.len(),
+            "PiP phase 2 (intersects) complete"
+        );
     }
 
     // 8. No hits at all → outside all catchments (or all geometries corrupt).
@@ -517,7 +607,7 @@ fn resolve_via_pip(
         let ua_a = a.upstream_area().map(|u| u.get());
         let ua_b = b.upstream_area().map(|u| u.get());
         let ua_ord = match (ua_a, ua_b) {
-            (Some(x), Some(y)) => y.total_cmp(&x), // DESC
+            (Some(x), Some(y)) => y.total_cmp(&x),       // DESC
             (Some(_), None) => std::cmp::Ordering::Less, // Some before None
             (None, Some(_)) => std::cmp::Ordering::Greater,
             (None, None) => std::cmp::Ordering::Equal,
@@ -599,6 +689,8 @@ pub fn resolve_outlet(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::DatasetSession;
+    use crate::testutil::{DatasetBuilder, TestCatchment, TestSnapGeometry, TestSnapTarget};
 
     // ── Group A: SearchRadiusMetres ───────────────────────────────────────────
 
@@ -609,7 +701,10 @@ mod tests {
 
     #[test]
     fn search_radius_display() {
-        assert_eq!(format!("{}", SearchRadiusMetres::new(1500.0).unwrap()), "1500 m");
+        assert_eq!(
+            format!("{}", SearchRadiusMetres::new(1500.0).unwrap()),
+            "1500 m"
+        );
     }
 
     #[test]
@@ -649,33 +744,52 @@ mod tests {
     }
 
     #[test]
+    fn config_default_snap_strategy() {
+        let config = ResolverConfig::new();
+        assert_eq!(config.snap_strategy(), SnapStrategy::DistanceFirst);
+    }
+
+    #[test]
+    fn snap_strategy_display_uses_kebab_case() {
+        assert_eq!(SnapStrategy::DistanceFirst.to_string(), "distance-first");
+        assert_eq!(SnapStrategy::WeightFirst.to_string(), "weight-first");
+    }
+
+    #[test]
     fn config_with_custom_tolerance() {
-        let config = ResolverConfig::new().with_distance_tolerance(5.0);
+        let config = ResolverConfig::new().with_distance_tolerance(5.0).unwrap();
         assert_eq!(config.distance_tolerance_m(), 5.0);
     }
 
     #[test]
     fn config_tolerance_zero_is_valid() {
-        let config = ResolverConfig::new().with_distance_tolerance(0.0);
+        let config = ResolverConfig::new().with_distance_tolerance(0.0).unwrap();
         assert_eq!(config.distance_tolerance_m(), 0.0);
     }
 
     #[test]
-    #[should_panic(expected = "finite and non-negative")]
+    fn config_with_custom_snap_strategy() {
+        let config = ResolverConfig::new().with_snap_strategy(SnapStrategy::WeightFirst);
+        assert_eq!(config.snap_strategy(), SnapStrategy::WeightFirst);
+    }
+
+    #[test]
     fn config_tolerance_rejects_negative() {
-        ResolverConfig::new().with_distance_tolerance(-1.0);
+        assert!(ResolverConfig::new().with_distance_tolerance(-1.0).is_err());
     }
 
     #[test]
-    #[should_panic(expected = "finite and non-negative")]
     fn config_tolerance_rejects_nan() {
-        ResolverConfig::new().with_distance_tolerance(f64::NAN);
+        assert!(ResolverConfig::new()
+            .with_distance_tolerance(f64::NAN)
+            .is_err());
     }
 
     #[test]
-    #[should_panic(expected = "finite and non-negative")]
     fn config_tolerance_rejects_infinity() {
-        ResolverConfig::new().with_distance_tolerance(f64::INFINITY);
+        assert!(ResolverConfig::new()
+            .with_distance_tolerance(f64::INFINITY)
+            .is_err());
     }
 
     // ── Group C: search_bbox ──────────────────────────────────────────────────
@@ -760,8 +874,10 @@ mod tests {
         use geo::{Geometry, LineString};
         // Perpendicular drop from (1.0, 0.001) onto horizontal line at y=0
         let outlet = GeoCoord::new(1.0, 0.001);
-        let geom =
-            Geometry::LineString(LineString::from(vec![(0.5_f64, 0.0_f64), (1.5_f64, 0.0_f64)]));
+        let geom = Geometry::LineString(LineString::from(vec![
+            (0.5_f64, 0.0_f64),
+            (1.5_f64, 0.0_f64),
+        ]));
         let (dist, nearest) = snap_nearest_point(outlet, &geom).unwrap();
         assert!(dist > 100.0 && dist < 120.0, "expected ~111m, got {dist}");
         // Nearest point should be at approximately (1.0, 0.0)
@@ -782,7 +898,206 @@ mod tests {
 
     #[test]
     fn pip_tie_break_variants_distinct() {
-        assert_ne!(PipTieBreak::HighestUpstreamArea, PipTieBreak::HighestLocalArea);
+        assert_ne!(
+            PipTieBreak::HighestUpstreamArea,
+            PipTieBreak::HighestLocalArea
+        );
         assert_ne!(PipTieBreak::HighestLocalArea, PipTieBreak::LowestAtomId);
+    }
+
+    #[test]
+    fn distance_first_snap_prefers_exact_match() {
+        let catchments = vec![
+            TestCatchment {
+                id: 1,
+                area_km2: 1.0,
+                up_area_km2: None,
+                polygon: (0.0, 0.0, 0.4, 0.4),
+            },
+            TestCatchment {
+                id: 2,
+                area_km2: 1000.0,
+                up_area_km2: None,
+                polygon: (0.5, 0.0, 0.9, 0.4),
+            },
+        ];
+        let targets = vec![
+            TestSnapTarget {
+                id: 11,
+                catchment_id: 1,
+                weight: 1.0,
+                is_mainstem: true,
+                geometry: TestSnapGeometry::Point(0.2, 0.2),
+            },
+            TestSnapTarget {
+                id: 22,
+                catchment_id: 2,
+                weight: 1000.0,
+                is_mainstem: true,
+                geometry: TestSnapGeometry::Point(0.205, 0.2),
+            },
+        ];
+        let (_dir, root) = DatasetBuilder::new(2)
+            .with_custom_catchments(catchments)
+            .with_custom_snap_targets(targets)
+            .build();
+        let session = DatasetSession::open(&root).unwrap();
+
+        let result =
+            resolve_outlet(&session, GeoCoord::new(0.2, 0.2), &ResolverConfig::new()).unwrap();
+        assert_eq!(result.atom_id, AtomId::new(1).unwrap());
+        assert!(matches!(
+            result.method,
+            ResolutionMethod::Snap {
+                strategy: SnapStrategy::DistanceFirst,
+                snap_id,
+                ..
+            } if snap_id == hfx_core::SnapId::new(11).unwrap()
+        ));
+    }
+
+    #[test]
+    fn weight_first_snap_prefers_heavier_candidate() {
+        let catchments = vec![
+            TestCatchment {
+                id: 1,
+                area_km2: 1.0,
+                up_area_km2: None,
+                polygon: (0.0, 0.0, 0.4, 0.4),
+            },
+            TestCatchment {
+                id: 2,
+                area_km2: 1000.0,
+                up_area_km2: None,
+                polygon: (0.5, 0.0, 0.9, 0.4),
+            },
+        ];
+        let targets = vec![
+            TestSnapTarget {
+                id: 11,
+                catchment_id: 1,
+                weight: 1.0,
+                is_mainstem: true,
+                geometry: TestSnapGeometry::Point(0.2, 0.2),
+            },
+            TestSnapTarget {
+                id: 22,
+                catchment_id: 2,
+                weight: 1000.0,
+                is_mainstem: true,
+                geometry: TestSnapGeometry::Point(0.205, 0.2),
+            },
+        ];
+        let (_dir, root) = DatasetBuilder::new(2)
+            .with_custom_catchments(catchments)
+            .with_custom_snap_targets(targets)
+            .build();
+        let session = DatasetSession::open(&root).unwrap();
+        let config = ResolverConfig::new().with_snap_strategy(SnapStrategy::WeightFirst);
+
+        let result = resolve_outlet(&session, GeoCoord::new(0.2, 0.2), &config).unwrap();
+        assert_eq!(result.atom_id, AtomId::new(2).unwrap());
+        assert!(matches!(
+            result.method,
+            ResolutionMethod::Snap {
+                strategy: SnapStrategy::WeightFirst,
+                snap_id,
+                ..
+            } if snap_id == hfx_core::SnapId::new(22).unwrap()
+        ));
+    }
+
+    #[test]
+    fn weight_first_snap_still_prefers_mainstem_on_weight_tie() {
+        let catchments = vec![
+            TestCatchment {
+                id: 1,
+                area_km2: 10.0,
+                up_area_km2: None,
+                polygon: (0.0, 0.0, 0.4, 0.4),
+            },
+            TestCatchment {
+                id: 2,
+                area_km2: 10.0,
+                up_area_km2: None,
+                polygon: (0.5, 0.0, 0.9, 0.4),
+            },
+        ];
+        let targets = vec![
+            TestSnapTarget {
+                id: 11,
+                catchment_id: 1,
+                weight: 50.0,
+                is_mainstem: false,
+                geometry: TestSnapGeometry::Point(0.22, 0.2),
+            },
+            TestSnapTarget {
+                id: 22,
+                catchment_id: 2,
+                weight: 50.0,
+                is_mainstem: true,
+                geometry: TestSnapGeometry::Point(0.205, 0.2),
+            },
+        ];
+        let (_dir, root) = DatasetBuilder::new(2)
+            .with_custom_catchments(catchments)
+            .with_custom_snap_targets(targets)
+            .build();
+        let session = DatasetSession::open(&root).unwrap();
+        let config = ResolverConfig::new().with_snap_strategy(SnapStrategy::WeightFirst);
+
+        let result = resolve_outlet(&session, GeoCoord::new(0.2, 0.2), &config).unwrap();
+        assert_eq!(result.atom_id, AtomId::new(2).unwrap());
+    }
+
+    #[test]
+    fn distance_first_zero_tolerance_prefers_strict_nearest() {
+        let catchments = vec![
+            TestCatchment {
+                id: 1,
+                area_km2: 1.0,
+                up_area_km2: None,
+                polygon: (0.0, 0.0, 0.4, 0.4),
+            },
+            TestCatchment {
+                id: 2,
+                area_km2: 1000.0,
+                up_area_km2: None,
+                polygon: (0.5, 0.0, 0.9, 0.4),
+            },
+        ];
+        let targets = vec![
+            TestSnapTarget {
+                id: 11,
+                catchment_id: 1,
+                weight: 1.0,
+                is_mainstem: true,
+                geometry: TestSnapGeometry::Point(0.2, 0.2),
+            },
+            TestSnapTarget {
+                id: 22,
+                catchment_id: 2,
+                weight: 1000.0,
+                is_mainstem: true,
+                geometry: TestSnapGeometry::Point(0.200005, 0.2),
+            },
+        ];
+        let (_dir, root) = DatasetBuilder::new(2)
+            .with_custom_catchments(catchments)
+            .with_custom_snap_targets(targets)
+            .build();
+        let session = DatasetSession::open(&root).unwrap();
+        let config = ResolverConfig::new().with_distance_tolerance(0.0).unwrap();
+
+        let result = resolve_outlet(&session, GeoCoord::new(0.2, 0.2), &config).unwrap();
+        assert_eq!(result.atom_id, AtomId::new(1).unwrap());
+        assert!(matches!(
+            result.method,
+            ResolutionMethod::Snap {
+                strategy: SnapStrategy::DistanceFirst,
+                snap_id,
+                ..
+            } if snap_id == hfx_core::SnapId::new(11).unwrap()
+        ));
     }
 }

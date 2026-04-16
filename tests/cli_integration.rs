@@ -26,7 +26,10 @@ fn cli_help_succeeds() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("shed"), "stdout should mention 'shed': {stdout}");
+    assert!(
+        stdout.contains("shed"),
+        "stdout should mention 'shed': {stdout}"
+    );
 }
 
 #[test]
@@ -42,7 +45,10 @@ fn cli_delineate_help_succeeds() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("dataset"), "stdout should mention 'dataset': {stdout}");
+    assert!(
+        stdout.contains("dataset"),
+        "stdout should mention 'dataset': {stdout}"
+    );
 }
 
 // ── single-outlet GeoJSON ─────────────────────────────────────────────────────
@@ -73,8 +79,15 @@ fn cli_single_outlet_geojson() {
     let json: Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|e| panic!("stdout should be valid JSON: {e}\nstdout={stdout}"));
     assert_eq!(json["type"], "FeatureCollection");
-    let features = json["features"].as_array().expect("features should be an array");
-    assert_eq!(features.len(), 1, "expected 1 feature, got {}", features.len());
+    let features = json["features"]
+        .as_array()
+        .expect("features should be an array");
+    assert_eq!(
+        features.len(),
+        1,
+        "expected 1 feature, got {}",
+        features.len()
+    );
     assert_eq!(features[0]["geometry"]["type"], "MultiPolygon");
     assert!(
         features[0]["properties"]["area_km2"].as_f64().unwrap() > 0.0,
@@ -139,8 +152,15 @@ fn cli_batch_csv() {
     let json: Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|e| panic!("stdout should be valid JSON: {e}\nstdout={stdout}"));
     assert_eq!(json["type"], "FeatureCollection");
-    let features = json["features"].as_array().expect("features should be an array");
-    assert_eq!(features.len(), 2, "expected 2 features, got {}", features.len());
+    let features = json["features"]
+        .as_array()
+        .expect("features should be an array");
+    assert_eq!(
+        features.len(),
+        2,
+        "expected 2 features, got {}",
+        features.len()
+    );
 }
 
 // ── missing dataset path ──────────────────────────────────────────────────────
@@ -194,8 +214,15 @@ fn cli_json_envelope() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let json: Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|e| panic!("stdout should be valid JSON: {e}\nstdout={stdout}"));
-    let successes = json["successes"].as_array().expect("successes should be an array");
-    assert_eq!(successes.len(), 1, "expected 1 success, got {}", successes.len());
+    let successes = json["successes"]
+        .as_array()
+        .expect("successes should be an array");
+    assert_eq!(
+        successes.len(),
+        1,
+        "expected 1 success, got {}",
+        successes.len()
+    );
     assert_eq!(json["failed"].as_u64().unwrap(), 0, "failed should be 0");
 }
 
@@ -233,8 +260,9 @@ fn cli_json_batch_with_failure() {
 
     // stdout must be exactly one valid JSON document.
     let stdout = String::from_utf8(output.stdout).unwrap();
-    let json: Value = serde_json::from_str(&stdout)
-        .unwrap_or_else(|e| panic!("stdout must be a single valid JSON document: {e}\nstdout={stdout}"));
+    let json: Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!("stdout must be a single valid JSON document: {e}\nstdout={stdout}")
+    });
 
     assert_eq!(
         json["succeeded"].as_u64().unwrap(),
@@ -256,9 +284,13 @@ fn cli_json_batch_with_failure() {
     );
 
     // Verify the successes and failures arrays are present and correctly sized.
-    let successes = json["successes"].as_array().expect("successes must be an array");
+    let successes = json["successes"]
+        .as_array()
+        .expect("successes must be an array");
     assert_eq!(successes.len(), 1, "successes array must have 1 entry");
-    let failures = json["failures"].as_array().expect("failures must be an array");
+    let failures = json["failures"]
+        .as_array()
+        .expect("failures must be an array");
     assert_eq!(failures.len(), 1, "failures array must have 1 entry");
 
     // The failure entry must contain an error message.
@@ -296,7 +328,12 @@ fn cli_no_refine_flag() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let json: Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|e| panic!("stdout should be valid JSON: {e}\nstdout={stdout}"));
-    assert_eq!(json["type"], "FeatureCollection", "should emit a FeatureCollection");
-    let features = json["features"].as_array().expect("features should be an array");
+    assert_eq!(
+        json["type"], "FeatureCollection",
+        "should emit a FeatureCollection"
+    );
+    let features = json["features"]
+        .as_array()
+        .expect("features should be an array");
     assert!(!features.is_empty(), "expected at least one feature");
 }

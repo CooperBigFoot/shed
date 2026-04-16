@@ -18,11 +18,11 @@ use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use tempfile::TempDir;
 
 use shed_core::algo::coord::GeoCoord;
+use shed_core::resolve_outlet;
 use shed_core::resolver::{
     OutletResolutionError, ResolutionMethod, ResolverConfig, SearchRadiusMetres,
 };
 use shed_core::session::DatasetSession;
-use shed_core::resolve_outlet;
 
 // ---------------------------------------------------------------------------
 // WKB helpers
@@ -43,7 +43,13 @@ fn wkb_polygon(minx: f64, miny: f64, maxx: f64, maxy: f64) -> Vec<u8> {
     w.extend_from_slice(&3u32.to_le_bytes()); // polygon type
     w.extend_from_slice(&1u32.to_le_bytes()); // 1 ring
     w.extend_from_slice(&5u32.to_le_bytes()); // 5 points (closed)
-    for (x, y) in [(minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy), (minx, miny)] {
+    for (x, y) in [
+        (minx, miny),
+        (maxx, miny),
+        (maxx, maxy),
+        (minx, maxy),
+        (minx, miny),
+    ] {
         w.extend_from_slice(&x.to_le_bytes());
         w.extend_from_slice(&y.to_le_bytes());
     }
@@ -402,19 +408,21 @@ fn snap_weight_tie_break() {
     // Outlet at (0.25, 0.2) → equidistant from both.
     let g1 = SnapGeom::Point(0.249, 0.2);
     let g2 = SnapGeom::Point(0.251, 0.2);
-    let snaps: &[SnapSpec<'_>] = &[
-        (1, 1, 50.0, true, &g1),
-        (2, 2, 100.0, true, &g2),
-    ];
+    let snaps: &[SnapSpec<'_>] = &[(1, 1, 50.0, true, &g1), (2, 2, 100.0, true, &g2)];
     write_snap(&root, snaps);
 
     let session = DatasetSession::open(&root).unwrap();
     let outlet = GeoCoord::new(0.25, 0.2);
-    let config = ResolverConfig::new().with_search_radius(SearchRadiusMetres::new(5_000.0).unwrap());
+    let config =
+        ResolverConfig::new().with_search_radius(SearchRadiusMetres::new(5_000.0).unwrap());
 
     let result = resolve_outlet(&session, outlet, &config).unwrap();
 
-    assert_eq!(result.atom_id.get(), 2, "higher weight should win tie-break");
+    assert_eq!(
+        result.atom_id.get(),
+        2,
+        "higher weight should win tie-break"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -448,11 +456,16 @@ fn snap_mainstem_tie_break() {
 
     let session = DatasetSession::open(&root).unwrap();
     let outlet = GeoCoord::new(0.25, 0.2);
-    let config = ResolverConfig::new().with_search_radius(SearchRadiusMetres::new(5_000.0).unwrap());
+    let config =
+        ResolverConfig::new().with_search_radius(SearchRadiusMetres::new(5_000.0).unwrap());
 
     let result = resolve_outlet(&session, outlet, &config).unwrap();
 
-    assert_eq!(result.atom_id.get(), 2, "mainstem should win tie-break over tributary");
+    assert_eq!(
+        result.atom_id.get(),
+        2,
+        "mainstem should win tie-break over tributary"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -513,7 +526,7 @@ fn pip_upstream_area_tie_break() {
     // Outlet at exactly (1.0, 0.2) sits on the shared boundary — both
     // catchments intersect it, so the upstream-area tie-break fires.
     let catchments: &[CatchmentSpec] = &[
-        (1, 10.0, Some(500.0), 0.5, 0.0, 1.0, 0.4),  // up_area = 500
+        (1, 10.0, Some(500.0), 0.5, 0.0, 1.0, 0.4), // up_area = 500
         (2, 10.0, Some(1000.0), 1.0, 0.0, 1.5, 0.4), // up_area = 1000
     ];
     let ids: Vec<i64> = catchments.iter().map(|c| c.0).collect();
@@ -533,7 +546,10 @@ fn pip_upstream_area_tie_break() {
     assert!(
         matches!(
             result.method,
-            ResolutionMethod::PointInPolygon { tie_break: Some(shed_core::resolver::PipTieBreak::HighestUpstreamArea), .. }
+            ResolutionMethod::PointInPolygon {
+                tie_break: Some(shed_core::resolver::PipTieBreak::HighestUpstreamArea),
+                ..
+            }
         ),
         "expected HighestUpstreamArea tie-break, got {:?}",
         result.method
@@ -596,7 +612,11 @@ fn dispatch_snap_over_pip() {
 
     let result = resolve_outlet(&session, outlet, &config).unwrap();
 
-    assert_eq!(result.atom_id.get(), 1, "snap path should return atom 1, not PiP's atom 2");
+    assert_eq!(
+        result.atom_id.get(),
+        1,
+        "snap path should return atom 1, not PiP's atom 2"
+    );
     assert!(
         matches!(result.method, ResolutionMethod::Snap { .. }),
         "expected Snap method"
@@ -650,21 +670,22 @@ fn snap_linestring_target() {
     // Both targets use LineString geometry
     let g1 = SnapGeom::Line(0.6, 0.2, 0.8, 0.2);
     let g2 = SnapGeom::Line(1.1, 0.2, 1.3, 0.2);
-    let snaps: &[SnapSpec<'_>] = &[
-        (1, 1, 100.0, true, &g1),
-        (2, 2, 100.0, true, &g2),
-    ];
+    let snaps: &[SnapSpec<'_>] = &[(1, 1, 100.0, true, &g1), (2, 2, 100.0, true, &g2)];
     write_snap(&root, snaps);
 
     let session = DatasetSession::open(&root).unwrap();
     // Outlet above target 2's line — perpendicular projection should snap to the line
     let outlet = GeoCoord::new(1.15, 0.25);
-    let config = ResolverConfig::new()
-        .with_search_radius(SearchRadiusMetres::new(100_000.0).unwrap());
+    let config =
+        ResolverConfig::new().with_search_radius(SearchRadiusMetres::new(100_000.0).unwrap());
 
     let result = resolve_outlet(&session, outlet, &config).unwrap();
 
-    assert_eq!(result.atom_id.get(), 2, "should snap to nearest LineString (target 2)");
+    assert_eq!(
+        result.atom_id.get(),
+        2,
+        "should snap to nearest LineString (target 2)"
+    );
     assert!(
         matches!(result.method, ResolutionMethod::Snap { .. }),
         "expected Snap method, got {:?}",

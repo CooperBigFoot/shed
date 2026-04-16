@@ -173,30 +173,41 @@ impl SessionError {
 
     /// Construct a [`SessionError::RequiredArtifactMissing`] variant.
     pub(crate) fn required_missing(artifact: &'static str, path: impl Into<String>) -> Self {
-        Self::RequiredArtifactMissing { artifact, path: path.into() }
+        Self::RequiredArtifactMissing {
+            artifact,
+            path: path.into(),
+        }
     }
 
     /// Construct a [`SessionError::OptionalArtifactMissing`] variant.
     pub(crate) fn optional_missing(artifact: &'static str, path: impl Into<String>) -> Self {
-        Self::OptionalArtifactMissing { artifact, path: path.into() }
+        Self::OptionalArtifactMissing {
+            artifact,
+            path: path.into(),
+        }
     }
 
     /// Construct a [`SessionError::ManifestFieldInvalid`] variant.
-    pub(crate) fn manifest_field_invalid(
-        field: &'static str,
-        reason: impl Into<String>,
-    ) -> Self {
-        Self::ManifestFieldInvalid { field, reason: reason.into() }
+    pub(crate) fn manifest_field_invalid(field: &'static str, reason: impl Into<String>) -> Self {
+        Self::ManifestFieldInvalid {
+            field,
+            reason: reason.into(),
+        }
     }
 
     /// Construct a [`SessionError::ParquetSchema`] variant.
     pub(crate) fn parquet_schema(artifact: &'static str, reason: impl Into<String>) -> Self {
-        Self::ParquetSchema { artifact, reason: reason.into() }
+        Self::ParquetSchema {
+            artifact,
+            reason: reason.into(),
+        }
     }
 
     /// Construct a [`SessionError::GraphSchema`] variant.
     pub(crate) fn graph_schema(reason: impl Into<String>) -> Self {
-        Self::GraphSchema { reason: reason.into() }
+        Self::GraphSchema {
+            reason: reason.into(),
+        }
     }
 
     /// Construct a [`SessionError::InvalidRow`] variant.
@@ -205,11 +216,17 @@ impl SessionError {
         row: usize,
         detail: impl Into<String>,
     ) -> Self {
-        Self::InvalidRow { artifact, row, detail: detail.into() }
+        Self::InvalidRow {
+            artifact,
+            row,
+            detail: detail.into(),
+        }
     }
 
     /// Construct a [`SessionError::IntegrityViolation`] variant.
     pub(crate) fn integrity(detail: impl Into<String>) -> Self {
-        Self::IntegrityViolation { detail: detail.into() }
+        Self::IntegrityViolation {
+            detail: detail.into(),
+        }
     }
 }

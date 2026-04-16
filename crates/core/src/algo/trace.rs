@@ -78,8 +78,7 @@ mod tests {
     /// Build a FlowDirectionTile from a flat slice of ESRI D8 codes.
     fn make_tile(rows: usize, cols: usize, values: &[u8]) -> FlowDirectionTile {
         let dims = GridDims::new(rows, cols);
-        let mut tile =
-            FlowDirectionTile::new(dims, simple_geo(), FlowDirEncoding::Esri).unwrap();
+        let mut tile = FlowDirectionTile::new(dims, simple_geo(), FlowDirEncoding::Esri).unwrap();
         for r in 0..rows {
             for c in 0..cols {
                 tile.set_raw(GridCoord::new(r, c), values[r * cols + c]);
@@ -289,5 +288,4 @@ mod tests {
         assert!(!mask.contains(GridCoord::new(2, 0)));
         assert!(!mask.contains(GridCoord::new(2, 4)));
     }
-
 }

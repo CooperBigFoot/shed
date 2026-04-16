@@ -3,4 +3,6 @@
 //! This module re-exports WKB decoding from `shed_core::algo::wkb` for
 //! convenience. The implementation is pure Rust with no GDAL dependency.
 
-pub use shed_core::algo::wkb::{WkbDecodeError, decode_wkb, decode_wkb_multi_polygon, decode_wkb_polygon};
+pub use shed_core::algo::wkb::{
+    WkbDecodeError, decode_wkb, decode_wkb_multi_polygon, decode_wkb_polygon,
+};

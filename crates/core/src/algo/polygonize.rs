@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use geo::{Coord, Contains, LineString, MultiPolygon, Point, Polygon};
+use geo::{Contains, Coord, LineString, MultiPolygon, Point, Polygon};
 use tracing::{debug, instrument};
 
 use crate::algo::catchment_mask::CatchmentMask;

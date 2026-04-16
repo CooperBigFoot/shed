@@ -49,6 +49,9 @@ impl PyEngine {
     /// snap_radius:
     ///     Optional snap-path search radius in metres (must be finite and
     ///     positive). Defaults to 1 000 m.
+    /// snap_strategy:
+    ///     Optional snap ranking strategy: `"distance-first"` (default) or
+    ///     `"weight-first"`.
     /// snap_threshold:
     ///     Minimum upstream-pixel count for stream-network snapping. Defaults
     ///     to 1 000 cells.
@@ -58,10 +61,11 @@ impl PyEngine {
     ///     Whether to run the raster-based terminal refinement step. Default
     ///     is `True`.
     #[new]
-    #[pyo3(signature = (dataset_path, *, snap_radius=None, snap_threshold=None, clean_epsilon=None, refine=true))]
+    #[pyo3(signature = (dataset_path, *, snap_radius=None, snap_strategy=None, snap_threshold=None, clean_epsilon=None, refine=true))]
     fn new(
         dataset_path: &str,
         snap_radius: Option<f64>,
+        snap_strategy: Option<String>,
         snap_threshold: Option<u32>,
         clean_epsilon: Option<f64>,
         refine: bool,
@@ -73,9 +77,18 @@ impl PyEngine {
             .with_geometry_repair(GdalGeometryRepair::new())
             .build();
 
-        let config = EngineConfig::new(snap_radius, snap_threshold, clean_epsilon, refine)?;
+        let config = EngineConfig::new(
+            snap_radius,
+            snap_strategy.as_deref(),
+            snap_threshold,
+            clean_epsilon,
+            refine,
+        )?;
 
-        Ok(Self { engine: Arc::new(engine), config })
+        Ok(Self {
+            engine: Arc::new(engine),
+            config,
+        })
     }
 
     /// Delineate the watershed upstream of a single outlet.

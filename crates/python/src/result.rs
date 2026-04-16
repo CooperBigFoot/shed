@@ -63,7 +63,11 @@ impl PyDelineationResult {
     /// All upstream atom IDs (including the terminal atom).
     #[getter]
     fn upstream_atom_ids(&self) -> Vec<i64> {
-        self.inner.upstream_atom_ids().iter().map(|id| id.get()).collect()
+        self.inner
+            .upstream_atom_ids()
+            .iter()
+            .map(|id| id.get())
+            .collect()
     }
 
     /// Geodesic watershed area in km².

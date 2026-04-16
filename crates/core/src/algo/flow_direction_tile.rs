@@ -204,9 +204,8 @@ mod tests {
 
     #[test]
     fn new_creates_nodata_tile() {
-        let tile =
-            FlowDirectionTile::new(GridDims::new(3, 3), simple_geo(), FlowDirEncoding::Esri)
-                .unwrap();
+        let tile = FlowDirectionTile::new(GridDims::new(3, 3), simple_geo(), FlowDirEncoding::Esri)
+            .unwrap();
         for row in 0..3 {
             for col in 0..3 {
                 assert_eq!(
@@ -258,9 +257,8 @@ mod tests {
 
     #[test]
     fn get_checked_oob_returns_none() {
-        let tile =
-            FlowDirectionTile::new(GridDims::new(2, 2), simple_geo(), FlowDirEncoding::Esri)
-                .unwrap();
+        let tile = FlowDirectionTile::new(GridDims::new(2, 2), simple_geo(), FlowDirEncoding::Esri)
+            .unwrap();
         assert_eq!(tile.get_checked(-1, 0), None);
         assert_eq!(tile.get_checked(0, -1), None);
         assert_eq!(tile.get_checked(10, 0), None);
@@ -356,9 +354,8 @@ mod tests {
 
     #[test]
     fn apply_mask_dimension_mismatch() {
-        let tile =
-            FlowDirectionTile::new(GridDims::new(2, 2), simple_geo(), FlowDirEncoding::Esri)
-                .unwrap();
+        let tile = FlowDirectionTile::new(GridDims::new(2, 2), simple_geo(), FlowDirEncoding::Esri)
+            .unwrap();
         let mask = CatchmentMask::new(vec![true; 6], GridDims::new(2, 3));
         let err = tile.apply_mask(&mask).unwrap_err();
         assert!(matches!(err, RasterTileError::DimensionMismatch { .. }));
@@ -445,9 +442,8 @@ mod tests {
 
     #[test]
     fn encoding_accessor_esri() {
-        let tile =
-            FlowDirectionTile::new(GridDims::new(1, 1), simple_geo(), FlowDirEncoding::Esri)
-                .unwrap();
+        let tile = FlowDirectionTile::new(GridDims::new(1, 1), simple_geo(), FlowDirEncoding::Esri)
+            .unwrap();
         assert_eq!(tile.encoding(), FlowDirEncoding::Esri);
     }
 

@@ -6,9 +6,9 @@ use hfx_core::{Manifest, RasterAvailability, SnapAvailability, Topology};
 use tracing::{debug, info, instrument};
 
 use crate::error::SessionError;
+use crate::reader;
 use crate::reader::catchment_store::CatchmentStore;
 use crate::reader::snap_store::SnapStore;
-use crate::reader;
 
 /// Validated paths to the optional raster pair.
 ///
@@ -66,13 +66,18 @@ impl DatasetSession {
         let root = root.as_ref();
 
         if !root.is_dir() {
-            return Err(SessionError::RootNotFound { path: root.display().to_string() });
+            return Err(SessionError::RootNotFound {
+                path: root.display().to_string(),
+            });
         }
 
         for artifact in ["manifest.json", "graph.arrow", "catchments.parquet"] {
             let p = root.join(artifact);
             if !p.exists() {
-                return Err(SessionError::required_missing(artifact, p.display().to_string()));
+                return Err(SessionError::required_missing(
+                    artifact,
+                    p.display().to_string(),
+                ));
             }
         }
 
@@ -81,7 +86,10 @@ impl DatasetSession {
         if manifest.snap() == SnapAvailability::Present {
             let p = root.join("snap.parquet");
             if !p.exists() {
-                return Err(SessionError::optional_missing("snap.parquet", p.display().to_string()));
+                return Err(SessionError::optional_missing(
+                    "snap.parquet",
+                    p.display().to_string(),
+                ));
             }
         }
 
@@ -174,7 +182,10 @@ impl DatasetSession {
                     )));
                 }
             }
-            debug!(snap_refs = snap_catchment_ids.len(), "snap catchment_id integrity verified");
+            debug!(
+                snap_refs = snap_catchment_ids.len(),
+                "snap catchment_id integrity verified"
+            );
         }
 
         let raster_paths = if matches!(manifest.rasters(), RasterAvailability::Present(_)) {

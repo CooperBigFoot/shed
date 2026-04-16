@@ -34,7 +34,9 @@ pub struct GdalRasterSource {
 impl GdalRasterSource {
     /// Create a new `GdalRasterSource` with the default ESRI flow direction encoding.
     pub fn new() -> Self {
-        Self { encoding: FlowDirEncoding::Esri }
+        Self {
+            encoding: FlowDirEncoding::Esri,
+        }
     }
 
     /// Set the flow direction encoding for this source (builder method).
@@ -66,8 +68,7 @@ impl RasterSource for GdalRasterSource {
                 path: path_str.clone(),
                 reason: e.to_string(),
             })?;
-        let gt = gdal_to_geo_transform(&raw_gt)
-            .map_err(|e| map_raster_read_error(e, &path_str))?;
+        let gt = gdal_to_geo_transform(&raw_gt).map_err(|e| map_raster_read_error(e, &path_str))?;
 
         let (raster_width, raster_height) = ds.raster_size();
         let (x_off, y_off, x_size, y_size) =
@@ -77,10 +78,12 @@ impl RasterSource for GdalRasterSource {
             return Err(RasterSourceError::EmptyWindow { path: path_str });
         }
 
-        let band = ds.rasterband(1).map_err(|e| RasterSourceError::ReadFailed {
-            path: path_str.clone(),
-            reason: e.to_string(),
-        })?;
+        let band = ds
+            .rasterband(1)
+            .map_err(|e| RasterSourceError::ReadFailed {
+                path: path_str.clone(),
+                reason: e.to_string(),
+            })?;
 
         let buf = band
             .read_as::<u8>((x_off, y_off), (x_size, y_size), (x_size, y_size), None)
@@ -94,9 +97,12 @@ impl RasterSource for GdalRasterSource {
 
         debug!(x_off, y_off, x_size, y_size, "read windowed u8 band");
 
-        let tile = RasterTile::from_vec(buf.data().to_vec(), dims, 255u8, window_gt).map_err(
-            |e| RasterSourceError::TileConstruction { reason: e.to_string() },
-        )?;
+        let tile =
+            RasterTile::from_vec(buf.data().to_vec(), dims, 255u8, window_gt).map_err(|e| {
+                RasterSourceError::TileConstruction {
+                    reason: e.to_string(),
+                }
+            })?;
 
         Ok(FlowDirectionTile::from_raw(tile, self.encoding))
     }
@@ -117,8 +123,7 @@ impl RasterSource for GdalRasterSource {
                 path: path_str.clone(),
                 reason: e.to_string(),
             })?;
-        let gt = gdal_to_geo_transform(&raw_gt)
-            .map_err(|e| map_raster_read_error(e, &path_str))?;
+        let gt = gdal_to_geo_transform(&raw_gt).map_err(|e| map_raster_read_error(e, &path_str))?;
 
         let (raster_width, raster_height) = ds.raster_size();
         let (x_off, y_off, x_size, y_size) =
@@ -128,10 +133,12 @@ impl RasterSource for GdalRasterSource {
             return Err(RasterSourceError::EmptyWindow { path: path_str });
         }
 
-        let band = ds.rasterband(1).map_err(|e| RasterSourceError::ReadFailed {
-            path: path_str.clone(),
-            reason: e.to_string(),
-        })?;
+        let band = ds
+            .rasterband(1)
+            .map_err(|e| RasterSourceError::ReadFailed {
+                path: path_str.clone(),
+                reason: e.to_string(),
+            })?;
 
         let gdal_nodata = band.no_data_value();
 
@@ -148,10 +155,11 @@ impl RasterSource for GdalRasterSource {
 
         debug!(x_off, y_off, x_size, y_size, "read windowed f32 band");
 
-        let tile =
-            RasterTile::from_vec(data, dims, f32::NAN, window_gt).map_err(|e| {
-                RasterSourceError::TileConstruction { reason: e.to_string() }
-            })?;
+        let tile = RasterTile::from_vec(data, dims, f32::NAN, window_gt).map_err(|e| {
+            RasterSourceError::TileConstruction {
+                reason: e.to_string(),
+            }
+        })?;
 
         Ok(AccumulationTile::from_raw(tile))
     }
@@ -274,14 +282,12 @@ fn map_raster_read_error(e: RasterReadError, path: &str) -> RasterSourceError {
         RasterReadError::TileConstruction { reason } => {
             RasterSourceError::TileConstruction { reason }
         }
-        RasterReadError::UnsupportedTransform { skew_x, skew_y } => {
-            RasterSourceError::ReadFailed {
-                path: path.to_owned(),
-                reason: format!(
-                    "unsupported raster transform: skew_x={skew_x}, skew_y={skew_y} (only axis-aligned north-up rasters are supported)"
-                ),
-            }
-        }
+        RasterReadError::UnsupportedTransform { skew_x, skew_y } => RasterSourceError::ReadFailed {
+            path: path.to_owned(),
+            reason: format!(
+                "unsupported raster transform: skew_x={skew_x}, skew_y={skew_y} (only axis-aligned north-up rasters are supported)"
+            ),
+        },
     }
 }
 
@@ -295,7 +301,8 @@ mod tests {
 
     fn standard_gt() -> GeoTransform {
         // origin (10.0, 50.0), pixel_width 0.5, pixel_height -0.5
-        gdal_to_geo_transform(&[10.0, 0.5, 0.0, 50.0, 0.0, -0.5]).expect("standard gt must not fail")
+        gdal_to_geo_transform(&[10.0, 0.5, 0.0, 50.0, 0.0, -0.5])
+            .expect("standard gt must not fail")
     }
 
     // ── gdal_to_geo_transform ────────────────────────────────────────────────
@@ -347,10 +354,7 @@ mod tests {
         // Raster: origin (10, 50), pixel 0.5 × -0.5, 20 × 10 pixels.
         // Geographic extent: x [10, 20], y [45, 50].
         let gt = standard_gt();
-        let bbox = Rect::new(
-            coord! { x: 10.0, y: 45.0 },
-            coord! { x: 20.0, y: 50.0 },
-        );
+        let bbox = Rect::new(coord! { x: 10.0, y: 45.0 }, coord! { x: 20.0, y: 50.0 });
         let (x_off, y_off, x_size, y_size) = bbox_to_pixel_window(&gt, &bbox, 20, 10);
         assert_eq!(x_off, 0);
         assert_eq!(y_off, 0);
@@ -364,10 +368,7 @@ mod tests {
         let gt = standard_gt(); // origin (10, 50), pixel (0.5, -0.5)
         // x: col 2 → x=11, col 6 → x=13   => bbox x [11.0, 13.0]
         // y: row 2 → y=49, row 5 → y=47.5  => bbox y [47.5, 49.0]
-        let bbox = Rect::new(
-            coord! { x: 11.0, y: 47.5 },
-            coord! { x: 13.0, y: 49.0 },
-        );
+        let bbox = Rect::new(coord! { x: 11.0, y: 47.5 }, coord! { x: 13.0, y: 49.0 });
         let (x_off, y_off, x_size, y_size) = bbox_to_pixel_window(&gt, &bbox, 20, 10);
         assert_eq!(x_off, 2);
         assert_eq!(y_off, 2);
@@ -379,10 +380,7 @@ mod tests {
     fn bbox_to_pixel_window_clamps_to_bounds() {
         // Bbox extending beyond the raster in all directions should clamp.
         let gt = standard_gt();
-        let bbox = Rect::new(
-            coord! { x: 5.0, y: 40.0 },
-            coord! { x: 30.0, y: 60.0 },
-        );
+        let bbox = Rect::new(coord! { x: 5.0, y: 40.0 }, coord! { x: 30.0, y: 60.0 });
         let (x_off, y_off, x_size, y_size) = bbox_to_pixel_window(&gt, &bbox, 20, 10);
         assert_eq!(x_off, 0);
         assert_eq!(y_off, 0);
@@ -394,10 +392,7 @@ mod tests {
     fn bbox_to_pixel_window_zero_size_when_outside() {
         // Bbox entirely to the left of the raster: x_size should be 0.
         let gt = standard_gt(); // origin x = 10
-        let bbox = Rect::new(
-            coord! { x: 0.0, y: 45.0 },
-            coord! { x: 5.0, y: 50.0 },
-        );
+        let bbox = Rect::new(coord! { x: 0.0, y: 45.0 }, coord! { x: 5.0, y: 50.0 });
         let (_, _, x_size, _) = bbox_to_pixel_window(&gt, &bbox, 20, 10);
         assert_eq!(x_size, 0);
     }

@@ -3,16 +3,14 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use arrow::array::{
-    Array, BinaryArray, BooleanArray, Float32Array, Int64Array, LargeBinaryArray,
-};
+use arrow::array::{Array, BinaryArray, BooleanArray, Float32Array, Int64Array, LargeBinaryArray};
 use arrow::datatypes::DataType;
 use hfx_core::{AtomId, BoundingBox, MainstemStatus, SnapId, SnapTarget, Weight, WkbGeometry};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use tracing::{debug, instrument};
 
 use crate::error::SessionError;
-use crate::reader::{extract_row_group_bbox, require_column, BboxColIndices};
+use crate::reader::{BboxColIndices, extract_row_group_bbox, require_column};
 
 /// Advance a `f32` value to the next representable float strictly greater than `v`.
 ///
@@ -46,8 +44,16 @@ fn snap_bbox(
     // Spec allows degenerate bboxes for snap targets (Points, axis-aligned LineStrings).
     // Bump the max by one ULP on each degenerate axis so that BoundingBox::new()'s
     // strict-inequality requirement is satisfied.
-    let padded_maxx = if maxx == minx { next_up_f32(minx) } else { maxx };
-    let padded_maxy = if maxy == miny { next_up_f32(miny) } else { maxy };
+    let padded_maxx = if maxx == minx {
+        next_up_f32(minx)
+    } else {
+        maxx
+    };
+    let padded_maxy = if maxy == miny {
+        next_up_f32(miny)
+    } else {
+        maxy
+    };
     BoundingBox::new(minx, miny, padded_maxx, padded_maxy).map_err(|e| {
         SessionError::invalid_row(
             ARTIFACT,
@@ -94,8 +100,12 @@ impl SnapStore {
     pub fn open(path: &Path) -> Result<Self, SessionError> {
         let file = File::open(path).map_err(|e| SessionError::io(ARTIFACT, e))?;
 
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-            .map_err(|e| SessionError::ParquetParse { artifact: ARTIFACT, source: e })?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
+            SessionError::ParquetParse {
+                artifact: ARTIFACT,
+                source: e,
+            }
+        })?;
 
         let metadata = builder.metadata().clone();
         let schema = builder.schema();
@@ -127,7 +137,11 @@ impl SnapStore {
             total_rows += rg.num_rows() as u64;
 
             match extract_row_group_bbox(rg, &bbox_col_indices) {
-                Some(bbox) => row_groups.push(RowGroupBbox { index: i, bbox, row_count }),
+                Some(bbox) => row_groups.push(RowGroupBbox {
+                    index: i,
+                    bbox,
+                    row_count,
+                }),
                 None => groups_without_stats.push(i),
             }
         }
@@ -161,10 +175,7 @@ impl SnapStore {
     /// | Row group read fails | [`SessionError::RowGroupReadError`] |
     /// | Row fails domain validation | [`SessionError::InvalidRow`] |
     #[instrument(skip_all, fields(path = %self.path.display()))]
-    pub fn query_by_bbox(
-        &self,
-        query_bbox: &BoundingBox,
-    ) -> Result<Vec<SnapTarget>, SessionError> {
+    pub fn query_by_bbox(&self, query_bbox: &BoundingBox) -> Result<Vec<SnapTarget>, SessionError> {
         // Collect row group indices that might contain matching rows.
         let mut candidate_indices: Vec<usize> = self
             .row_groups
@@ -186,11 +197,14 @@ impl SnapStore {
             "reading candidate row groups"
         );
 
-        let file =
-            File::open(&self.path).map_err(|e| SessionError::io(ARTIFACT, e))?;
+        let file = File::open(&self.path).map_err(|e| SessionError::io(ARTIFACT, e))?;
 
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-            .map_err(|e| SessionError::ParquetParse { artifact: ARTIFACT, source: e })?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
+            SessionError::ParquetParse {
+                artifact: ARTIFACT,
+                source: e,
+            }
+        })?;
 
         // Pre-compute the absolute start row of each selected row group so that
         // error messages report the correct row index in the file, even after
@@ -212,7 +226,10 @@ impl SnapStore {
         let reader = builder
             .with_row_groups(candidate_indices.clone())
             .build()
-            .map_err(|e| SessionError::ParquetParse { artifact: ARTIFACT, source: e })?;
+            .map_err(|e| SessionError::ParquetParse {
+                artifact: ARTIFACT,
+                source: e,
+            })?;
 
         let mut results = Vec::new();
         // `sel_idx` is the index into `candidate_indices` of the row group
@@ -221,12 +238,11 @@ impl SnapStore {
         let mut offset_in_group = 0usize;
 
         for batch_result in reader {
-            let batch =
-                batch_result.map_err(|e| SessionError::RowGroupReadError {
-                    artifact: ARTIFACT,
-                    row_group: candidate_indices[sel_idx],
-                    source: e.into(),
-                })?;
+            let batch = batch_result.map_err(|e| SessionError::RowGroupReadError {
+                artifact: ARTIFACT,
+                row_group: candidate_indices[sel_idx],
+                source: e.into(),
+            })?;
 
             let num_rows = batch.num_rows();
 
@@ -304,11 +320,9 @@ impl SnapStore {
                     )
                 })?;
 
-            let geometry_col_array = batch
-                .column_by_name("geometry")
-                .ok_or_else(|| {
-                    SessionError::parquet_schema(ARTIFACT, "column 'geometry' missing")
-                })?;
+            let geometry_col_array = batch.column_by_name("geometry").ok_or_else(|| {
+                SessionError::parquet_schema(ARTIFACT, "column 'geometry' missing")
+            })?;
 
             for i in 0..num_rows {
                 let absolute_row = rg_absolute_starts[sel_idx] + offset_in_group;
@@ -354,14 +368,13 @@ impl SnapStore {
                     SessionError::invalid_row(ARTIFACT, absolute_row, format!("id error: {e}"))
                 })?;
 
-                let catchment_id =
-                    AtomId::new(catchment_id_col.value(i)).map_err(|e| {
-                        SessionError::invalid_row(
-                            ARTIFACT,
-                            absolute_row,
-                            format!("catchment_id error: {e}"),
-                        )
-                    })?;
+                let catchment_id = AtomId::new(catchment_id_col.value(i)).map_err(|e| {
+                    SessionError::invalid_row(
+                        ARTIFACT,
+                        absolute_row,
+                        format!("catchment_id error: {e}"),
+                    )
+                })?;
 
                 let weight = Weight::new(weight_col.value(i)).map_err(|e| {
                     SessionError::invalid_row(ARTIFACT, absolute_row, format!("weight error: {e}"))
@@ -373,20 +386,20 @@ impl SnapStore {
                     MainstemStatus::Tributary
                 };
 
-                let geom_bytes: Vec<u8> = if let Some(arr) =
-                    geometry_col_array.as_any().downcast_ref::<BinaryArray>()
-                {
-                    arr.value(i).to_vec()
-                } else if let Some(arr) =
-                    geometry_col_array.as_any().downcast_ref::<LargeBinaryArray>()
-                {
-                    arr.value(i).to_vec()
-                } else {
-                    return Err(SessionError::parquet_schema(
-                        ARTIFACT,
-                        "column 'geometry' has unsupported type",
-                    ));
-                };
+                let geom_bytes: Vec<u8> =
+                    if let Some(arr) = geometry_col_array.as_any().downcast_ref::<BinaryArray>() {
+                        arr.value(i).to_vec()
+                    } else if let Some(arr) = geometry_col_array
+                        .as_any()
+                        .downcast_ref::<LargeBinaryArray>()
+                    {
+                        arr.value(i).to_vec()
+                    } else {
+                        return Err(SessionError::parquet_schema(
+                            ARTIFACT,
+                            "column 'geometry' has unsupported type",
+                        ));
+                    };
 
                 let geometry = WkbGeometry::new(geom_bytes).map_err(|e| {
                     SessionError::invalid_row(
@@ -436,38 +449,58 @@ impl SnapStore {
     pub fn read_all_catchment_ids(&self) -> Result<Vec<hfx_core::AtomId>, SessionError> {
         let file = std::fs::File::open(&self.path).map_err(|e| SessionError::io(ARTIFACT, e))?;
         let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
-            .map_err(|e| SessionError::ParquetParse { artifact: ARTIFACT, source: e })?;
+            .map_err(|e| SessionError::ParquetParse {
+                artifact: ARTIFACT,
+                source: e,
+            })?;
 
         let parquet_schema = builder.parquet_schema();
         let col_idx = parquet_schema
             .columns()
             .iter()
             .position(|c| c.name() == "catchment_id")
-            .ok_or_else(|| SessionError::parquet_schema(ARTIFACT, "missing column \"catchment_id\""))?;
+            .ok_or_else(|| {
+                SessionError::parquet_schema(ARTIFACT, "missing column \"catchment_id\"")
+            })?;
 
         let mask = parquet::arrow::ProjectionMask::roots(parquet_schema, [col_idx]);
         let reader = builder
             .with_projection(mask)
             .with_batch_size(8192)
             .build()
-            .map_err(|e| SessionError::ParquetParse { artifact: ARTIFACT, source: e })?;
+            .map_err(|e| SessionError::ParquetParse {
+                artifact: ARTIFACT,
+                source: e,
+            })?;
 
         let mut ids = Vec::new();
         let mut global_row = 0usize;
         for batch_result in reader {
-            let batch = batch_result
-                .map_err(|e| SessionError::ParquetParse { artifact: ARTIFACT, source: e.into() })?;
+            let batch = batch_result.map_err(|e| SessionError::ParquetParse {
+                artifact: ARTIFACT,
+                source: e.into(),
+            })?;
             let col = batch
                 .column(0)
                 .as_any()
                 .downcast_ref::<arrow::array::Int64Array>()
-                .ok_or_else(|| SessionError::parquet_schema(ARTIFACT, "catchment_id column is not Int64"))?;
+                .ok_or_else(|| {
+                    SessionError::parquet_schema(ARTIFACT, "catchment_id column is not Int64")
+                })?;
             for i in 0..batch.num_rows() {
                 if col.is_null(i) {
-                    return Err(SessionError::invalid_row(ARTIFACT, global_row + i, "null catchment_id"));
+                    return Err(SessionError::invalid_row(
+                        ARTIFACT,
+                        global_row + i,
+                        "null catchment_id",
+                    ));
                 }
                 let atom_id = hfx_core::AtomId::new(col.value(i)).map_err(|e| {
-                    SessionError::invalid_row(ARTIFACT, global_row + i, format!("invalid catchment_id: {e}"))
+                    SessionError::invalid_row(
+                        ARTIFACT,
+                        global_row + i,
+                        format!("invalid catchment_id: {e}"),
+                    )
                 })?;
                 ids.push(atom_id);
             }
@@ -486,9 +519,7 @@ impl SnapStore {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::{
-        BinaryBuilder, BooleanBuilder, Float32Builder, Int64Builder,
-    };
+    use arrow::array::{BinaryBuilder, BooleanBuilder, Float32Builder, Int64Builder};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use parquet::arrow::ArrowWriter;
@@ -746,7 +777,7 @@ mod tests {
             is_mainstem: false,
             minx: 5.0,
             miny: 10.0,
-            maxx: 5.0, // equal to minx — degenerate x axis
+            maxx: 5.0,  // equal to minx — degenerate x axis
             maxy: 10.0, // equal to miny — degenerate y axis
             geom,
         }];
@@ -784,7 +815,11 @@ mod tests {
         let query = BoundingBox::new(4.0, 8.0, 6.0, 12.0).unwrap();
         let results = store.query_by_bbox(&query).unwrap();
 
-        assert_eq!(results.len(), 1, "vertical-line snap target must be returned");
+        assert_eq!(
+            results.len(),
+            1,
+            "vertical-line snap target must be returned"
+        );
         assert_eq!(results[0].id(), SnapId::new(2).unwrap());
     }
 

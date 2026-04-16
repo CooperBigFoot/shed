@@ -17,8 +17,8 @@ use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use tempfile::TempDir;
 
 use hfx_core::{AtomId, BoundingBox, Topology};
-use shed_core::session::DatasetSession;
 use shed_core::SessionError;
+use shed_core::session::DatasetSession;
 
 // ---------------------------------------------------------------------------
 // WKB helpers
@@ -30,7 +30,13 @@ fn minimal_wkb_polygon(minx: f64, miny: f64, maxx: f64, maxy: f64) -> Vec<u8> {
     w.extend_from_slice(&3u32.to_le_bytes()); // polygon type
     w.extend_from_slice(&1u32.to_le_bytes()); // 1 ring
     w.extend_from_slice(&5u32.to_le_bytes()); // 5 points (closed)
-    for (x, y) in [(minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy), (minx, miny)] {
+    for (x, y) in [
+        (minx, miny),
+        (maxx, miny),
+        (maxx, maxy),
+        (minx, maxy),
+        (minx, miny),
+    ] {
         w.extend_from_slice(&x.to_le_bytes());
         w.extend_from_slice(&y.to_le_bytes());
     }
@@ -456,10 +462,10 @@ fn build_dataset(
 fn write_dag_graph(root: &Path) {
     let ids: Vec<i64> = vec![1, 2, 3, 4];
     let upstream: Vec<Vec<i64>> = vec![
-        vec![],     // atom 1: headwater
-        vec![1],    // atom 2: upstream of 1
-        vec![2],    // atom 3: upstream of 2
-        vec![2],    // atom 4: upstream of 2 (bifurcation)
+        vec![],  // atom 1: headwater
+        vec![1], // atom 2: upstream of 1
+        vec![2], // atom 3: upstream of 2
+        vec![2], // atom 4: upstream of 2 (bifurcation)
     ];
     write_graph_raw(root, &ids, &upstream);
 }
@@ -518,7 +524,10 @@ fn test_open_missing_manifest() {
     assert!(
         matches!(
             result,
-            Err(SessionError::RequiredArtifactMissing { artifact: "manifest.json", .. })
+            Err(SessionError::RequiredArtifactMissing {
+                artifact: "manifest.json",
+                ..
+            })
         ),
         "expected RequiredArtifactMissing for manifest.json, got: {result:?}"
     );
@@ -536,7 +545,10 @@ fn test_open_missing_graph() {
     assert!(
         matches!(
             result,
-            Err(SessionError::RequiredArtifactMissing { artifact: "graph.arrow", .. })
+            Err(SessionError::RequiredArtifactMissing {
+                artifact: "graph.arrow",
+                ..
+            })
         ),
         "expected RequiredArtifactMissing for graph.arrow, got: {result:?}"
     );
@@ -554,7 +566,10 @@ fn test_open_missing_catchments() {
     assert!(
         matches!(
             result,
-            Err(SessionError::RequiredArtifactMissing { artifact: "catchments.parquet", .. })
+            Err(SessionError::RequiredArtifactMissing {
+                artifact: "catchments.parquet",
+                ..
+            })
         ),
         "expected RequiredArtifactMissing for catchments.parquet, got: {result:?}"
     );
@@ -574,7 +589,10 @@ fn test_open_snap_declared_but_missing() {
     assert!(
         matches!(
             result,
-            Err(SessionError::OptionalArtifactMissing { artifact: "snap.parquet", .. })
+            Err(SessionError::OptionalArtifactMissing {
+                artifact: "snap.parquet",
+                ..
+            })
         ),
         "expected OptionalArtifactMissing for snap.parquet, got: {result:?}"
     );
@@ -619,7 +637,11 @@ fn test_graph_traversal_from_session() {
             break;
         }
         let ups = row.upstream_ids();
-        assert_eq!(ups.len(), 1, "linear chain: each non-headwater has exactly 1 upstream");
+        assert_eq!(
+            ups.len(),
+            1,
+            "linear chain: each non-headwater has exactly 1 upstream"
+        );
         current_id = ups[0];
         visited.push(current_id.get());
     }
@@ -653,12 +675,13 @@ fn test_catchment_bbox_query() {
     let query = BoundingBox::new(1.5, 0.0, 1.9, 0.4).unwrap();
     let results = session.catchments().query_by_bbox(&query).unwrap();
 
-    assert_eq!(results.len(), 1, "expected exactly 1 catchment, got: {:?}", results.len());
     assert_eq!(
-        results[0].id(),
-        AtomId::new(3).unwrap(),
-        "expected atom 3"
+        results.len(),
+        1,
+        "expected exactly 1 catchment, got: {:?}",
+        results.len()
     );
+    assert_eq!(results[0].id(), AtomId::new(3).unwrap(), "expected atom 3");
 }
 
 #[test]
@@ -676,7 +699,12 @@ fn test_snap_bbox_query() {
     let query = BoundingBox::new(1.0, 0.0, 1.4, 0.4).unwrap();
     let results = snap.query_by_bbox(&query).unwrap();
 
-    assert_eq!(results.len(), 1, "expected exactly 1 snap target, got: {:?}", results.len());
+    assert_eq!(
+        results.len(),
+        1,
+        "expected exactly 1 snap target, got: {:?}",
+        results.len()
+    );
     assert_eq!(
         results[0].catchment_id(),
         AtomId::new(2).unwrap(),

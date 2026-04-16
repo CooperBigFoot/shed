@@ -42,7 +42,9 @@ use crate::algo::traits::{RasterSource, RasterSourceError};
 #[derive(Debug, thiserror::Error)]
 pub enum RefinementError {
     /// Flow direction and accumulation tiles have different grid dimensions.
-    #[error("tile dimension mismatch: flow_dir is {fd_rows}x{fd_cols}, accumulation is {acc_rows}x{acc_cols}")]
+    #[error(
+        "tile dimension mismatch: flow_dir is {fd_rows}x{fd_cols}, accumulation is {acc_rows}x{acc_cols}"
+    )]
     DimensionMismatch {
         /// Number of rows in the flow direction tile.
         fd_rows: usize,
@@ -56,7 +58,9 @@ pub enum RefinementError {
 
     /// Flow direction and accumulation tiles have the same dimensions but
     /// different geo-transforms (origin or pixel size).
-    #[error("tile geo-transform mismatch: tiles share {rows}x{cols} dims but have different origins or pixel sizes")]
+    #[error(
+        "tile geo-transform mismatch: tiles share {rows}x{cols} dims but have different origins or pixel sizes"
+    )]
     GeoTransformMismatch {
         /// Shared row count.
         rows: usize,
@@ -308,8 +312,7 @@ mod tests {
 
     fn make_flow_tile(rows: usize, cols: usize, values: &[u8]) -> FlowDirectionTile<Raw> {
         let dims = GridDims::new(rows, cols);
-        let mut tile =
-            FlowDirectionTile::new(dims, simple_geo(), FlowDirEncoding::Esri).unwrap();
+        let mut tile = FlowDirectionTile::new(dims, simple_geo(), FlowDirEncoding::Esri).unwrap();
         for r in 0..rows {
             for c in 0..cols {
                 tile.set_raw(GridCoord::new(r, c), values[r * cols + c]);
@@ -337,8 +340,7 @@ mod tests {
 
     fn make_acc_tile(rows: usize, cols: usize, values: &[f32]) -> AccumulationTile<Raw> {
         let dims = GridDims::new(rows, cols);
-        let raw =
-            RasterTile::from_vec(values.to_vec(), dims, f32::NAN, simple_geo()).unwrap();
+        let raw = RasterTile::from_vec(values.to_vec(), dims, f32::NAN, simple_geo()).unwrap();
         AccumulationTile::from_raw(raw)
     }
 
@@ -355,13 +357,7 @@ mod tests {
 
     fn rect_polygon(x0: f64, y0: f64, x1: f64, y1: f64) -> MultiPolygon<f64> {
         let poly = Polygon::new(
-            LineString::from(vec![
-                (x0, y0),
-                (x1, y0),
-                (x1, y1),
-                (x0, y1),
-                (x0, y0),
-            ]),
+            LineString::from(vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)]),
             vec![],
         );
         MultiPolygon::new(vec![poly])
@@ -458,10 +454,7 @@ mod tests {
         use geo::algorithm::Area;
         let area = result.polygon().unsigned_area();
         // Cells (0,0), (0,1), (0,2) contribute; (0,0) and (0,1) trace upstream of (0,2)
-        assert!(
-            (area - 3.0).abs() < 0.001,
-            "expected area ~3.0, got {area}"
-        );
+        assert!((area - 3.0).abs() < 0.001, "expected area ~3.0, got {area}");
     }
 
     #[test]
@@ -585,10 +578,7 @@ mod tests {
 
         use geo::algorithm::Area;
         let area = result.polygon().unsigned_area();
-        assert!(
-            (area - 9.0).abs() < 0.001,
-            "expected area ~9.0, got {area}"
-        );
+        assert!((area - 9.0).abs() < 0.001, "expected area ~9.0, got {area}");
 
         let coord = result.snapped_coord();
         assert!(
@@ -688,8 +678,7 @@ mod tests {
         let threshold = SnapThreshold::new(500);
 
         // Should succeed: snap finds nearest valid cell
-        let result =
-            refine_terminal(&terminal_polygon, outlet, flow_dir, accumulation, threshold);
+        let result = refine_terminal(&terminal_polygon, outlet, flow_dir, accumulation, threshold);
         assert!(result.is_ok(), "expected Ok, got {:?}", result);
     }
 
@@ -835,9 +824,8 @@ mod tests {
         let outlet = GeoCoord::new(1.5, -1.5);
         let threshold = SnapThreshold::new(500);
 
-        let err =
-            refine_terminal(&terminal_polygon, outlet, flow_dir, accumulation, threshold)
-                .unwrap_err();
+        let err = refine_terminal(&terminal_polygon, outlet, flow_dir, accumulation, threshold)
+            .unwrap_err();
         assert!(
             matches!(err, RefinementError::SnapFailed { .. }),
             "expected SnapFailed, got {err:?}"
@@ -857,9 +845,8 @@ mod tests {
         let outlet = GeoCoord::new(10.0, 10.0);
         let threshold = SnapThreshold::new(500);
 
-        let err =
-            refine_terminal(&terminal_polygon, outlet, flow_dir, accumulation, threshold)
-                .unwrap_err();
+        let err = refine_terminal(&terminal_polygon, outlet, flow_dir, accumulation, threshold)
+            .unwrap_err();
         assert!(
             matches!(err, RefinementError::SnapFailed { .. }),
             "expected SnapFailed, got {err:?}"
@@ -881,9 +868,8 @@ mod tests {
         let outlet = GeoCoord::new(0.5, -0.5);
         let threshold = SnapThreshold::new(500);
 
-        let err =
-            refine_terminal(&terminal_polygon, outlet, flow_dir, accumulation, threshold)
-                .unwrap_err();
+        let err = refine_terminal(&terminal_polygon, outlet, flow_dir, accumulation, threshold)
+            .unwrap_err();
         assert!(
             matches!(err, RefinementError::SnapFailed { .. }),
             "expected SnapFailed, got {err:?}"
@@ -902,9 +888,8 @@ mod tests {
         let outlet = GeoCoord::new(11.5, 11.5);
         let threshold = SnapThreshold::new(500);
 
-        let err =
-            refine_terminal(&terminal_polygon, outlet, flow_dir, accumulation, threshold)
-                .unwrap_err();
+        let err = refine_terminal(&terminal_polygon, outlet, flow_dir, accumulation, threshold)
+            .unwrap_err();
         assert!(
             matches!(err, RefinementError::EmptyRasterMask { .. }),
             "expected EmptyRasterMask, got {err:?}"
@@ -920,16 +905,16 @@ mod tests {
         let flow_dir = make_flow_tile(3, 3, &fd_values);
         // Use simple_geo for both but different dims
         let acc_dims = GridDims::new(5, 5);
-        let raw = RasterTile::from_vec(acc_values.to_vec(), acc_dims, f32::NAN, simple_geo()).unwrap();
+        let raw =
+            RasterTile::from_vec(acc_values.to_vec(), acc_dims, f32::NAN, simple_geo()).unwrap();
         let accumulation = AccumulationTile::from_raw(raw);
 
         let terminal_polygon = rect_polygon(0.0, 0.0, 3.0, -3.0);
         let outlet = GeoCoord::new(1.5, -1.5);
         let threshold = SnapThreshold::new(500);
 
-        let err =
-            refine_terminal(&terminal_polygon, outlet, flow_dir, accumulation, threshold)
-                .unwrap_err();
+        let err = refine_terminal(&terminal_polygon, outlet, flow_dir, accumulation, threshold)
+            .unwrap_err();
         assert!(
             matches!(err, RefinementError::DimensionMismatch { .. }),
             "expected DimensionMismatch, got {err:?}"
@@ -952,9 +937,8 @@ mod tests {
         let outlet = GeoCoord::new(1.5, -1.5);
         let threshold = SnapThreshold::new(500);
 
-        let err =
-            refine_terminal(&terminal_polygon, outlet, flow_dir, accumulation, threshold)
-                .unwrap_err();
+        let err = refine_terminal(&terminal_polygon, outlet, flow_dir, accumulation, threshold)
+            .unwrap_err();
         assert!(
             matches!(err, RefinementError::GeoTransformMismatch { .. }),
             "expected GeoTransformMismatch, got {err:?}"
