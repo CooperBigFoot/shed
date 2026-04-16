@@ -217,31 +217,63 @@
 - Final geometry assembly is independent of fabric-specific reach data.
 - The terminal atom substitution path is explicit and tested.
 
-### Component 7: Engine Surface
+### Component 7: Engine Surface, CLI, and PyO3 Bindings
 
 #### Goal
 
-- Expose the minimum useful query API around the above components.
+- Compose the pipeline into a public `Engine` API, a CLI binary, and Python bindings (`pyshed`).
 
-#### Build
+#### Built
 
-- Define request and result types.
-- Compose session loading, outlet resolution, traversal, optional refinement, geometry fetch, dissolve, cleanup, and area computation.
-- Keep invocation thin: one dataset, one outlet, one result.
-- If a CLI is added, keep it minimal and debug-oriented.
+- **Engine** (`crates/core/src/engine.rs`): `Engine` struct with builder pattern, `DelineationResult` with typed accessors and WKB export, `DelineationOptions` with per-call knobs, `RefinementOutcome` enum, batch delineation via rayon.
+- **CLI** (`src/main.rs`): `shed delineate --dataset <path> --lat/--lon` or `--outlets <csv>`. GeoJSON FeatureCollection output (stdout or `--output`), `--json` machine-readable envelope, verbosity flags, `--no-refine`.
+- **PyO3** (`crates/python/`): `pyshed.Engine(path)` with `delineate(lat, lon)` and `delineate_batch(outlets)`. Returns `DelineationResult` with `geometry_wkb`, `to_geojson()`, typed getters. GIL released during Rust computation. Custom exception hierarchy. Published as `pyshed` via maturin.
+- **Supporting**: WKB encoding in `algo/wkb.rs`, `test-fixtures` feature flag on shed-core.
 
-#### Exclude For Now
+#### Divergence From Original Plan
 
-- Batch orchestration.
-- Checkpointing and resume.
-- Download/cache UX.
-- Reverse geocoding.
-- River network output.
-- Stream ordering.
+- Original plan scoped Component 7 as "minimal engine surface, thin CLI if added, exclude batch." Actual scope expanded to include batch delineation (rayon), a full clap CLI with CSV batch input and `--json` envelope, and PyO3 bindings with maturin packaging. This was driven by the downstream goal of wiring into `watershed-retrieve`.
+- `assembly.rs` stayed `pub(crate)` — the Engine consumes it internally. `EngineError::Assembly` stores an opaque `Box<dyn Error>` to preserve the error chain without leaking the internal type.
+- GeoJSON serialization lives in CLI and PyO3, not in shed-core (presentation concern).
 
 #### Done When
 
-- One caller can load an HFX dataset and delineate one outlet end-to-end through a stable engine API.
+- `shed delineate --dataset <path> --lat <f> --lon <f>` works end-to-end. ✓
+- `pyshed.Engine(path).delineate(lat, lon)` works from Python. ✓
+- Batch mode processes multiple outlets in parallel. ✓
+- `uv run pytest tests/ -q` passes from `crates/python/`. ✓
+
+### Component 8: Wire pyshed into watershed-retrieve
+
+#### Goal
+
+- Add on-the-fly delineation to `watershed-retrieve` so users can pass `(lat, lon)` and get a watershed polygon delineated from any HFX-compliant dataset, not just pre-computed lookups.
+
+#### Build
+
+- Add `pyshed` as a dependency of `watershed-retrieve`.
+- Add a `delineate(lat, lon, dataset=...)` function (or similar) that wraps `pyshed.Engine`.
+- Return a `GeoDataFrame` matching the existing `get_watershed()` schema — the caller should not need to know whether the result was pre-computed or delineated on the fly.
+- Handle the dataset path: accept an explicit path, or resolve from a configured default.
+- Map `pyshed` exceptions to `watershed-retrieve`'s error hierarchy (`WatershedRetrieveError` and subclasses).
+
+#### Exclude For Now
+
+- Automatic HFX dataset downloading (user provides the dataset path).
+- Caching of delineation results.
+- River network output from the delineation path.
+- Batch delineation at the `watershed-retrieve` API level (can be added later; `pyshed` already supports it).
+
+#### Output
+
+- A new public function in `watershed-retrieve` that delineates on the fly.
+- The function returns the same `GeoDataFrame` shape as existing lookup functions.
+
+#### Done When
+
+- `watershed_retrieve.delineate(lat=47.3, lon=8.5, dataset="/path/to/hfx")` returns a single-row `GeoDataFrame` with a polygon geometry and area.
+- The result is indistinguishable in schema from `get_watershed()` output.
+- Errors from the engine surface as the appropriate `watershed-retrieve` exception types.
 
 ### Test Plan
 
