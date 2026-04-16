@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-hfx-core = { path = "../../../hfx/crates/hfx-core" }
+hfx-core.workspace = true
 arrow = { version = "54", default-features = false, features = ["ipc"] }
 geo = "0.29"
 geozero = { version = "0.14", default-features = false, features = ["with-geo", "with-wkb"] }

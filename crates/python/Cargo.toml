@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 [dependencies]
 shed-core = { path = "../core" }
 shed-gdal = { path = "../gdal" }
-hfx-core = { path = "../../../hfx/crates/hfx-core" }
+hfx-core.workspace = true
 pyo3 = { version = "0.24", features = ["extension-module", "abi3-py39"] }
 geo = "0.29"
 serde_json = "1"

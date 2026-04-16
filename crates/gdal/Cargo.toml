@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 shed-core = { path = "../core" }
-hfx-core = { path = "../../../hfx/crates/hfx-core" }
+hfx-core.workspace = true
 gdal = { version = "0.19", features = ["bindgen"] }
 geo = "0.29"
 thiserror = "2"

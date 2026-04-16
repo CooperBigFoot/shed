@@ -1,9 +1,12 @@
 [workspace]
 members = ["crates/*"]
 
+[workspace.dependencies]
+hfx-core = "=0.1.26"
+
 [package]
 name = "shed"
-version = "0.1.41"
+version = "0.1.42"
 edition = "2024"
 
 [dependencies]
@@ -23,3 +26,7 @@ assert_cmd = "2"
 tempfile = "3"
 serde_json = "1"
 shed-core = { path = "crates/core", features = ["test-fixtures"] }
+
+# Uncomment for local hfx-core development:
+# [patch.crates-io]
+# hfx-core = { path = "../hfx/crates/hfx-core" }
