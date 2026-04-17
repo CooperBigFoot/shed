@@ -5,6 +5,11 @@ All notable changes to `pyshed` are documented in this file. The format is based
 [PEP 440](https://peps.python.org/pep-0440/) versioning (decoupled from the workspace's
 per-commit Rust crate versioning).
 
+## [0.1.0rc1] - 2026-04-17
+
+First release candidate — exercises the TestPyPI publication pipeline. No
+functional difference from the planned 0.1.0 final.
+
 ## [0.1.0] - 2026-04-17
 
 ### Added
