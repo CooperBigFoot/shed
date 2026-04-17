@@ -2,6 +2,12 @@
 name = "pyshed"
 version = "0.1.0"
 edition = "2024"
+description = "Python bindings for the shed watershed delineation engine"
+license = "MIT"
+repository = "https://github.com/CooperBigFoot/shed"
+homepage = "https://github.com/CooperBigFoot/shed"
+readme = "README.md"
+publish = false
 
 [lib]
 name = "pyshed"

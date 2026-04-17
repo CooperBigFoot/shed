@@ -301,3 +301,14 @@
 - Every session should re-explore the repo and the relevant `hydra-shed` code before editing.
 - Prefer direct ports where the algorithm is already generic.
 - Prefer replacement, not adaptation, where the old code exists only to support MERIT/HydroSHEDS layout or UX.
+
+## Python bindings
+
+`pyshed` is published on PyPI (Apple Silicon only in v0.1):
+
+```bash
+pip install pyshed
+```
+
+See `crates/python/README.md` for usage and `CONTRIBUTING.md` for the open call for
+cross-platform wheel contributions.

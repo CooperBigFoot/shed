@@ -1,0 +1,30 @@
+XZ Utils - Public Domain / 0BSD (BSD Zero Clause License)
+https://tukaani.org/xz/
+Version: 5.8.2
+
+The liblzma library in XZ Utils is in the public domain. Additionally, the
+public-domain parts are available under the 0BSD license (BSD Zero Clause
+License):
+
+---
+
+BSD Zero Clause License (SPDX: 0BSD)
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY
+AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
+LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
+OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+PERFORMANCE OF THIS SOFTWARE.
+
+---
+
+Note: Some components of xz (e.g., the xz command-line tool and certain
+helper scripts) are under GPL-2.0 or LGPL-2.1. The library (liblzma) that is
+bundled in the pyshed wheel is public domain / 0BSD. See
+https://github.com/tukaani-project/xz/blob/v5.8.2/COPYING for the complete
+per-file licensing breakdown.

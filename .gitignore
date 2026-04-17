@@ -4,3 +4,4 @@
 .DS_Store
 Thumbs.db
 __pycache__/
+crates/python/python/pyshed/_data/

@@ -7,6 +7,39 @@ name = "pyshed"
 version = "0.1.0"
 requires-python = ">=3.9"
 description = "Python bindings for the shed watershed delineation engine"
+readme = "README.md"
+license = "MIT"
+license-files = ["../../LICENSE", "../../LICENSES/*"]
+authors = [
+  { name = "Nicolas Lazaro", email = "business.coopernick@gmail.com" },
+]
+keywords = ["gis", "hydrology", "watershed", "delineation", "hfx", "gdal"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS :: MacOS X",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Rust",
+  "Topic :: Scientific/Engineering :: GIS",
+  "Topic :: Scientific/Engineering :: Hydrology",
+]
+
+[project.urls]
+Homepage = "https://github.com/CooperBigFoot/shed"
+Repository = "https://github.com/CooperBigFoot/shed"
+Issues = "https://github.com/CooperBigFoot/shed/issues"
+Changelog = "https://github.com/CooperBigFoot/shed/blob/main/crates/python/CHANGELOG.md"
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pyarrow>=15"]
+dev = ["pyshed[test]", "ruff", "maturin>=1.7,<2"]
 
 [tool.maturin]
 features = ["pyo3/extension-module"]

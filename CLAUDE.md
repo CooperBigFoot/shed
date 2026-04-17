@@ -58,6 +58,18 @@ Before committing, follow this exact sequence:
 
 > **Note:** `cargo bump` does not support Cargo workspaces (it panics). Use `./scripts/bump-version.sh` instead — it edits `Cargo.toml` directly.
 
+### Pyshed exemption
+
+The `pyshed` crate (`crates/python/`) is **exempt** from the per-commit patch-bump rule. Its
+version evolves only on intentional PyPI releases and uses a separate tag namespace:
+
+- Bump with `./scripts/bump-pyshed-version.sh <patch|minor|major|set <PEP440-version>>`.
+- The `set` mode is required for prereleases (e.g. `set 0.1.0rc1`) — `cargo metadata` rejects
+  PEP 440 prerelease syntax, so the script writes the SemVer 2.0 equivalent (`0.1.0-rc.1`)
+  to `Cargo.toml` while writing the PEP 440 form (`0.1.0rc1`) to `pyproject.toml`.
+- Tag pyshed releases with the `pyshed-v*` prefix (e.g. `pyshed-v0.1.0rc1`,
+  `pyshed-v0.1.0`) to avoid colliding with the workspace's `v*` tags.
+
 ### Quick Reference
 
 | Command | Effect |
