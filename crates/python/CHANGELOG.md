@@ -5,43 +5,38 @@ All notable changes to `pyshed` are documented in this file. The format is based
 [PEP 440](https://peps.python.org/pep-0440/) versioning (decoupled from the workspace's
 per-commit Rust crate versioning).
 
-## [0.1.0rc4] - 2026-04-17
-
-Fourth release candidate. Drops `PROJ_RENAME_SYMBOLS=ON` from the PROJ
-build and the matching `-DPROJ_RENAME_SYMBOLS` CFLAGS in the GDAL build.
-rc3 failed to link GDAL: undefined symbols `_internal_geod_init`,
-`_internal_geod_inverse`, `_internal_geod_polygonarea` — the PROJ cmake
-option renames PROJ's own symbols but not libgeod's, so the GDAL
-preprocessor saw renamed names that PROJ didn't export.
-
-Symbol-collision safety with rasterio/fiona was the original motivation,
-but that's a theoretical risk for solo-import scenarios; revisit later if
-it actually bites.
-
-## [0.1.0rc3] - 2026-04-17
-
-Third release candidate. Fixes a build-order bug in ci/config.sh: PROJ's
-cmake requires TIFF, so build_tiff must run before build_proj. rc2 built
-PROJ before TIFF and failed with "Could NOT find TIFF (missing:
-TIFF_LIBRARY)".
-
-## [0.1.0rc2] - 2026-04-17
-
-Second release candidate. Fixes CI checkout permissions — the top-level
-`permissions: actions: read` block in build-wheels.yaml was overriding
-the default and removing `contents: read`, causing `actions/checkout`
-to fail on the private repository.
-
-## [0.1.0rc1] - 2026-04-17
-
-First release candidate — exercises the TestPyPI publication pipeline. No
-functional difference from the planned 0.1.0 final.
-
 ## [0.1.0] - 2026-04-17
 
+First public release on PyPI. Apple Silicon macOS only (`macosx_11_0_arm64`);
+community contributions for Linux / Intel / Windows are welcome — see
+[CONTRIBUTING.md](https://github.com/CooperBigFoot/shed/blob/main/CONTRIBUTING.md).
+
 ### Added
-- First public release on PyPI.
 - `pyshed.Engine(path).delineate(lat, lon)` and `.delineate_batch(outlets)`.
-- `DelineationResult` with `geometry_wkb`, `to_geojson()`, area, snap info.
-- Apple Silicon macOS wheel (cp39-abi3, `macosx_11_0_arm64`).
-- Bundled GDAL 3.12.1, PROJ 9.7.1, GEOS 3.14.1, libtiff, SQLite, etc. (see `LICENSES/`).
+- `DelineationResult` with `geometry_wkb`, `to_geojson()`, area, and snap info.
+- Typed exception hierarchy rooted at `ShedError` (`DatasetError`,
+  `ResolutionError`, `AssemblyError`).
+- Bundled native stack inside the wheel: GDAL 3.12.1, PROJ 9.7.1, GEOS 3.14.1,
+  libtiff 4.7.1, SQLite, zlib, libcurl, nghttp2, OpenSSL, libpng, jpeg-turbo,
+  zstd, libdeflate, xz. All 14 licenses shipped under
+  `pyshed-0.1.0.dist-info/licenses/`.
+- Runtime injection of bundled `GDAL_DATA` and `proj.db` via `CPLSetConfigOption`
+  and `OSRSetPROJSearchPaths` at module import time.
+
+## Pre-release history
+
+### [0.1.0rc4] - 2026-04-17
+Dropped `PROJ_RENAME_SYMBOLS` — PROJ's cmake renames its own symbols but not
+libgeod's, so GDAL's preprocessor rewrote `geod_init` → `internal_geod_init`
+against a PROJ that didn't export the renamed names.
+
+### [0.1.0rc3] - 2026-04-17
+Fixed build order: `build_tiff` must run before `build_proj`; PROJ 9.7's cmake
+requires TIFF.
+
+### [0.1.0rc2] - 2026-04-17
+Removed a top-level `permissions: actions: read` block that was stripping
+`contents: read` and causing `actions/checkout` to fail on the private repo.
+
+### [0.1.0rc1] - 2026-04-17
+Initial TestPyPI dry run.

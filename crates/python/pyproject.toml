@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "pyshed"
-version = "0.1.0rc4"
+version = "0.1.0"
 requires-python = ">=3.9"
 description = "Python bindings for the shed watershed delineation engine"
 readme = "README.md"
