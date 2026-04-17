@@ -5,6 +5,19 @@ All notable changes to `pyshed` are documented in this file. The format is based
 [PEP 440](https://peps.python.org/pep-0440/) versioning (decoupled from the workspace's
 per-commit Rust crate versioning).
 
+## [0.1.0rc4] - 2026-04-17
+
+Fourth release candidate. Drops `PROJ_RENAME_SYMBOLS=ON` from the PROJ
+build and the matching `-DPROJ_RENAME_SYMBOLS` CFLAGS in the GDAL build.
+rc3 failed to link GDAL: undefined symbols `_internal_geod_init`,
+`_internal_geod_inverse`, `_internal_geod_polygonarea` — the PROJ cmake
+option renames PROJ's own symbols but not libgeod's, so the GDAL
+preprocessor saw renamed names that PROJ didn't export.
+
+Symbol-collision safety with rasterio/fiona was the original motivation,
+but that's a theoretical risk for solo-import scenarios; revisit later if
+it actually bites.
+
 ## [0.1.0rc3] - 2026-04-17
 
 Third release candidate. Fixes a build-order bug in ci/config.sh: PROJ's

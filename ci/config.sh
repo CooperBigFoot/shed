@@ -427,9 +427,6 @@ function build_sqlite {
 function build_proj {
     if [ -e proj-stamp ]; then return; fi
     echo "Running build_proj"
-    # -DPROJ_RENAME_SYMBOLS=ON prevents symbol collisions when rasterio/fiona
-    # are co-installed in the same Python environment — a pyshed-specific
-    # requirement not present in rasterio's own build.
     local cmake=cmake
     (cd "${PROJ_FNAME}" &&
         $cmake . \
@@ -443,7 +440,6 @@ function build_proj {
             -DBUILD_SHARED_LIBS=ON \
             -DCMAKE_BUILD_TYPE=Release \
             -DENABLE_IPO=ON \
-            -DPROJ_RENAME_SYMBOLS=ON \
             -DBUILD_APPS:BOOL=OFF \
             -DBUILD_TESTING:BOOL=OFF &&
         $cmake --build . -j4 &&
@@ -493,11 +489,6 @@ function build_tiff {
 function build_gdal {
     if [ -e gdal-stamp ]; then return; fi
     echo "Running build_gdal"
-    # Pass PROJ_RENAME_SYMBOLS defines so that GDAL's PROJ usage also uses the
-    # renamed symbols — required when PROJ was built with PROJ_RENAME_SYMBOLS=ON.
-    CFLAGS="$CFLAGS -DPROJ_RENAME_SYMBOLS"
-    CXXFLAGS="$CXXFLAGS -DPROJ_RENAME_SYMBOLS -DPROJ_INTERNAL_CPP_NAMESPACE"
-
     local cmake=cmake
     (cd "${GDAL_FNAME}" &&
         mkdir build &&
