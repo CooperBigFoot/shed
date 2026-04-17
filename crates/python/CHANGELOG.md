@@ -5,6 +5,13 @@ All notable changes to `pyshed` are documented in this file. The format is based
 [PEP 440](https://peps.python.org/pep-0440/) versioning (decoupled from the workspace's
 per-commit Rust crate versioning).
 
+## [0.1.0rc3] - 2026-04-17
+
+Third release candidate. Fixes a build-order bug in ci/config.sh: PROJ's
+cmake requires TIFF, so build_tiff must run before build_proj. rc2 built
+PROJ before TIFF and failed with "Could NOT find TIFF (missing:
+TIFF_LIBRARY)".
+
 ## [0.1.0rc2] - 2026-04-17
 
 Second release candidate. Fixes CI checkout permissions — the top-level

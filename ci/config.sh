@@ -571,9 +571,9 @@ suppress build_nghttp2
 rm -rf "$BUILD_PREFIX/lib/libcurl"* || true
 suppress build_curl
 build_sqlite
+build_tiff
 build_proj
 suppress build_geos
-build_tiff
 build_gdal
 
 echo ""
