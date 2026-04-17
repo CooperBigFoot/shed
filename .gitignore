@@ -5,3 +5,6 @@
 Thumbs.db
 __pycache__/
 crates/python/python/pyshed/_data/
+crates/python/python/pyshed/_pyshed*.so
+crates/python/python/pyshed/_pyshed*.dylib
+crates/python/python/pyshed/_pyshed*.pyd

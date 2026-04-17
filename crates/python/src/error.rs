@@ -4,6 +4,11 @@ use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::PyErr;
 
+// The first argument to `create_exception!` sets the `__module__` attribute
+// that appears in Python tracebacks. We use `pyshed` (not `_pyshed`) so that
+// users see `pyshed.DatasetError` rather than `pyshed._pyshed.DatasetError`.
+// The exception types are registered in the `_pyshed` compiled extension and
+// re-exported by `pyshed/__init__.py`, but their `__module__` stays `pyshed`.
 create_exception!(pyshed, ShedError, PyException);
 create_exception!(pyshed, DatasetError, ShedError);
 create_exception!(pyshed, ResolutionError, ShedError);

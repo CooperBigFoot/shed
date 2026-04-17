@@ -10,7 +10,7 @@ readme = "README.md"
 publish = false
 
 [lib]
-name = "pyshed"
+name = "_pyshed"
 crate-type = ["cdylib"]
 
 [dependencies]
@@ -22,3 +22,5 @@ geo = "0.29"
 serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
+gdal = { version = "0.19", features = ["bindgen"] }
+gdal-sys = "=0.12.0"

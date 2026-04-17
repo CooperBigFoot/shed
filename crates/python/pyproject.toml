@@ -9,7 +9,7 @@ requires-python = ">=3.9"
 description = "Python bindings for the shed watershed delineation engine"
 readme = "README.md"
 license = "MIT"
-license-files = ["../../LICENSE", "../../LICENSES/*"]
+license-files = ["LICENSE", "LICENSES/*"]
 authors = [
   { name = "Nicolas Lazaro", email = "business.coopernick@gmail.com" },
 ]
@@ -43,5 +43,7 @@ dev = ["pyshed[test]", "ruff", "maturin>=1.7,<2"]
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
-module-name = "pyshed"
+module-name = "pyshed._pyshed"
+python-source = "python"
 auditwheel = "skip"
+include = [{ path = "python/pyshed/_data/**/*", format = "wheel" }]
