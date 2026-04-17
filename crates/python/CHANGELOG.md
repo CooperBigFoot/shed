@@ -5,6 +5,13 @@ All notable changes to `pyshed` are documented in this file. The format is based
 [PEP 440](https://peps.python.org/pep-0440/) versioning (decoupled from the workspace's
 per-commit Rust crate versioning).
 
+## [0.1.0rc2] - 2026-04-17
+
+Second release candidate. Fixes CI checkout permissions — the top-level
+`permissions: actions: read` block in build-wheels.yaml was overriding
+the default and removing `contents: read`, causing `actions/checkout`
+to fail on the private repository.
+
 ## [0.1.0rc1] - 2026-04-17
 
 First release candidate — exercises the TestPyPI publication pipeline. No
