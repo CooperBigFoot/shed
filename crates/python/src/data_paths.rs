@@ -34,6 +34,8 @@ pub(crate) fn _set_gdal_data(path: &str) -> PyResult<()> {
 #[pyfunction]
 pub(crate) fn _set_proj_data(path: &str) -> PyResult<()> {
     tracing::debug!(proj_data = %path, "injecting PROJ search path");
+    gdal::config::set_config_option("PROJ_DATA", path)
+        .map_err(|e| PyRuntimeError::new_err(format!("set PROJ_DATA: {e}")))?;
     let c_path =
         CString::new(path).map_err(|e| PyRuntimeError::new_err(format!("NUL in path: {e}")))?;
     // SAFETY: `ptrs` is a NULL-terminated array of `*const c_char`. `c_path`

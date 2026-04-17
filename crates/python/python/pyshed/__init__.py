@@ -12,6 +12,29 @@ import os
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
 
+_PKG_DIR = Path(__file__).resolve().parent
+_log = logging.getLogger(__name__)
+
+
+def _bundled(subdir: str, sentinel: str) -> str | None:
+    candidate = _PKG_DIR / "_data" / subdir
+    return str(candidate) if (candidate / sentinel).is_file() else None
+
+
+def _preseed_bundled_data() -> None:
+    if "GDAL_DATA" not in os.environ:
+        path = _bundled("gdal", "gdalvrt.xsd")
+        if path is not None:
+            os.environ["GDAL_DATA"] = path
+
+    if "PROJ_DATA" not in os.environ and "PROJ_LIB" not in os.environ:
+        path = _bundled("proj", "proj.db")
+        if path is not None:
+            os.environ["PROJ_DATA"] = path
+
+
+_preseed_bundled_data()
+
 from pyshed import _pyshed
 from pyshed._pyshed import (
     AssemblyError,
@@ -35,14 +58,6 @@ try:
     __version__ = _pkg_version("pyshed")
 except PackageNotFoundError:
     __version__ = "0.0.0+unknown"
-
-_log = logging.getLogger(__name__)
-_PKG_DIR = Path(__file__).resolve().parent
-
-
-def _bundled(subdir: str, sentinel: str) -> str | None:
-    candidate = _PKG_DIR / "_data" / subdir
-    return str(candidate) if (candidate / sentinel).is_file() else None
 
 
 def _inject_gdal_data() -> None:

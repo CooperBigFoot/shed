@@ -6,8 +6,6 @@
 #   - macOS arm64 only (no Linux/Windows paths).
 #   - Dropped: hdf5, libaec, netcdf, openjpeg, lerc, json-c (external),
 #     libwebp, lcms2, giflib, blosc, pcre2, expat — not needed by pyshed.
-#   - PROJ_RENAME_SYMBOLS=ON passed as cmake flag (not just CFLAGS) to avoid
-#     symbol collisions when rasterio/fiona are co-installed in the same env.
 #   - GDAL_USE_GEOS=ON (rasterio disables it on macOS; pyshed needs GEOS for
 #     geometry repair).
 #   - Minimal GDAL driver set: GTiff, VRT, MEM (raster) + GeoJSON, Shape (OGR).
@@ -119,6 +117,20 @@ function update_env_for_build_prefix {
     export LIBRARY_PATH="$BUILD_PREFIX/lib:$LIBRARY_PATH_BACKUP"
     export PKG_CONFIG_PATH="$BUILD_PREFIX/lib/pkgconfig/:$PKG_CONFIG_PATH_BACKUP"
     export PATH="$BUILD_PREFIX/bin:$PATH"
+}
+
+function fix_install_name_ids {
+    local pattern="$1"
+    local libs
+    libs=$(find "$BUILD_PREFIX/lib" -maxdepth 1 -type f -name "$pattern" -print)
+    if [ -z "$libs" ]; then
+        echo "No dylibs matched $pattern in $BUILD_PREFIX/lib" >&2
+        exit 1
+    fi
+    while IFS= read -r lib_path; do
+        [ -n "$lib_path" ] || continue
+        install_name_tool -id "$BUILD_PREFIX/lib/$(basename "$lib_path")" "$lib_path"
+    done <<< "$libs"
 }
 
 # ---------------------------------------------------------------------------
@@ -411,6 +423,7 @@ function build_curl {
         DYLD_LIBRARY_PATH="${DYLD_LIBRARY_PATH:-}:$BUILD_PREFIX/lib" ./configure $flags &&
         make -j4 &&
         make install)
+    fix_install_name_ids "libcurl*.dylib"
     touch curl-stamp
 }
 
@@ -421,6 +434,7 @@ function build_sqlite {
         ./configure --enable-rtree --enable-threadsafe --prefix="$BUILD_PREFIX" &&
         make &&
         make install)
+    fix_install_name_ids "libsqlite3*.dylib"
     touch sqlite-stamp
 }
 
@@ -433,6 +447,7 @@ function build_proj {
             -DCMAKE_INSTALL_PREFIX:PATH="$BUILD_PREFIX" \
             -DCMAKE_PREFIX_PATH="${BUILD_PREFIX}" \
             -DCMAKE_INCLUDE_PATH="$BUILD_PREFIX/include" \
+            -DCMAKE_INSTALL_NAME_DIR="$BUILD_PREFIX/lib" \
             -DSQLite3_INCLUDE_DIR="$BUILD_PREFIX/include" \
             -DSQLite3_LIBRARY="$BUILD_PREFIX/lib/libsqlite3.$lib_ext" \
             -DCMAKE_OSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET}" \
@@ -456,6 +471,7 @@ function build_geos {
         $cmake .. \
             -DCMAKE_INSTALL_PREFIX:PATH="$BUILD_PREFIX" \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_INSTALL_NAME_DIR="$BUILD_PREFIX/lib" \
             -DCMAKE_OSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET}" \
             -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}" \
             -DBUILD_SHARED_LIBS=ON \
@@ -483,6 +499,7 @@ function build_tiff {
             --with-jpeg-lib-dir="$BUILD_PREFIX/lib" &&
         make -j4 &&
         make install)
+    fix_install_name_ids "libtiff*.dylib"
     touch tiff-stamp
 }
 
@@ -499,11 +516,20 @@ function build_gdal {
             -DCMAKE_INCLUDE_PATH="$BUILD_PREFIX/include" \
             -DCMAKE_LIBRARY_PATH="$BUILD_PREFIX/lib" \
             -DCMAKE_PROGRAM_PATH="$BUILD_PREFIX/bin" \
+            -DCMAKE_INSTALL_NAME_DIR="$BUILD_PREFIX/lib" \
             -DCMAKE_OSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET}" \
             -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}" \
             -DBUILD_SHARED_LIBS=ON \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DGDAL_USE_EXTERNAL_LIBS=OFF \
+            -DPROJ_ROOT="$BUILD_PREFIX" \
+            -DTIFF_ROOT="$BUILD_PREFIX" \
+            -DSQLite3_ROOT="$BUILD_PREFIX" \
+            -DGEOS_LIBRARY="$BUILD_PREFIX/lib/libgeos_c.$lib_ext" \
+            -DGEOS_INCLUDE_DIR="$BUILD_PREFIX/include" \
+            -DCURL_LIBRARY="$BUILD_PREFIX/lib/libcurl.$lib_ext" \
+            -DCURL_INCLUDE_DIR="$BUILD_PREFIX/include" \
             -DSQLite3_INCLUDE_DIR="$BUILD_PREFIX/include" \
             -DSQLite3_LIBRARY="$BUILD_PREFIX/lib/libsqlite3.$lib_ext" \
             -DGDAL_BUILD_OPTIONAL_DRIVERS=OFF \

@@ -5,6 +5,20 @@ All notable changes to `pyshed` are documented in this file. The format is based
 [PEP 440](https://peps.python.org/pep-0440/) versioning (decoupled from the workspace's
 per-commit Rust crate versioning).
 
+## [0.1.1] - 2026-04-17
+
+### Changed
+- Locked GDAL's cmake dependency discovery to the wheel build prefix and passed
+  explicit PROJ, TIFF, SQLite, GEOS, and curl hints to reduce accidental
+  linkage against runner-local libraries.
+- Added a delocate preflight step that inspects install names with `otool`
+  before repair, plus an unrepaired-wheel `delocate-listdeps` dump ahead of
+  `delocate-wheel`.
+- Seeded bundled `GDAL_DATA` and `PROJ_DATA` in `pyshed.__init__` before
+  importing `_pyshed`, while keeping the existing PyO3 runtime injection as a
+  belt-and-suspenders fallback. `_set_proj_data()` now also sets the `PROJ_DATA`
+  GDAL config option before calling `OSRSetPROJSearchPaths`.
+
 ## [0.1.0] - 2026-04-17
 
 First public release on PyPI. Apple Silicon macOS only (`macosx_11_0_arm64`);
