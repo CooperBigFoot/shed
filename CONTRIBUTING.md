@@ -105,34 +105,35 @@ Reach out via a GitHub issue if you want to coordinate before starting.
 
 ## Maintainers: first-time PyPI setup
 
-These steps are performed once when setting up the trusted publisher flow.
-They are documented here so any future maintainer can reproduce the setup.
+These steps are performed once, then both release paths (TestPyPI for
+release candidates, PyPI for real releases) run automatically on tag push.
 
-### 1. Register the pending publisher on PyPI
+### 1. Create a PyPI project-scoped API token
 
-Go to https://pypi.org/manage/account/publishing/ and add a new pending
-publisher with these values:
+Go to https://pypi.org/manage/account/token/ and create a token scoped to
+the `pyshed` project (create the project first by uploading once manually,
+or use the account-scoped token and tighten after first release). Copy the
+token (starts with `pypi-`).
 
-- **PyPI project name:** `pyshed`
-- **Owner:** `CooperBigFoot`
-- **Repository:** `shed`
-- **Workflow filename:** `build-wheels.yaml`
-- **Environment name:** `pypi`
+### 2. Create a TestPyPI token
 
-### 2. Repeat on TestPyPI
+Same flow on https://test.pypi.org/manage/account/token/. Copy that token.
 
-Go to https://test.pypi.org/manage/account/publishing/ and add a pending
-publisher with the same values except **Environment name:** `testpypi`.
+### 3. Store both tokens as GitHub repository secrets
 
-### 3. Create GitHub Environments
+From the repo root:
 
-In the `shed` repository on GitHub, go to **Settings → Environments** and
-create two environments:
+```bash
+gh secret set PYPI_TOKEN     --repo CooperBigFoot/shed  # paste PyPI token
+gh secret set TESTPYPI_TOKEN --repo CooperBigFoot/shed  # paste TestPyPI token
+```
 
-**`pypi`**
-- Deployment branches/tags: tag pattern `pyshed-v*`, excluding `*rc*`
-  (production releases only)
+The `build-wheels.yaml` workflow reads these via `secrets.PYPI_TOKEN` and
+`secrets.TESTPYPI_TOKEN`. No GitHub environments are required.
 
-**`testpypi`**
-- Deployment branches/tags: tag pattern `pyshed-v*rc*`
-  (release candidates only)
+### Rotation
+
+Rotate both tokens on a cadence you're comfortable with (or immediately
+after exposure — e.g. if a token ever leaks into a commit, PR, or chat
+transcript). Rotation means: revoke the old token on PyPI/TestPyPI, create
+a new one, re-run `gh secret set` with the new value.
