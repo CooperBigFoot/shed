@@ -5,6 +5,20 @@ All notable changes to `pyshed` are documented in this file. The format is based
 [PEP 440](https://peps.python.org/pep-0440/) versioning (decoupled from the workspace's
 per-commit Rust crate versioning).
 
+## [0.1.2] - 2026-04-18
+
+### Added
+- Shipped PEP 561 typing metadata in the wheel via `pyshed/__init__.pyi` and
+  `pyshed/py.typed`, so IDE hover, autocomplete, and static type checking now
+  work against the public Python API.
+- Added a developer-oriented API reference in `crates/python/API.md`
+  documenting the exported classes, return types, properties, and exceptions.
+
+### Changed
+- Corrected the batch-delineation README example to match the real API shape:
+  `Engine.delineate_batch()` accepts outlet dicts with `"lat"` and `"lon"`
+  keys.
+
 ## [0.1.1] - 2026-04-17
 
 ### Changed

@@ -32,8 +32,9 @@ print(result.terminal_atom_id)
 geojson = result.to_geojson()
 ```
 
-See [`crates/python/README.md`](crates/python/README.md) for the full Python
-API.
+See [`crates/python/README.md`](crates/python/README.md) for the Python
+quickstart and [`crates/python/API.md`](crates/python/API.md) for the full
+developer API reference.
 
 ## Use it from the CLI
 

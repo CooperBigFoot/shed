@@ -1362,7 +1362,7 @@ dependencies = [
 
 [[package]]
 name = "pyshed"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "gdal",
  "gdal-sys",
@@ -1569,7 +1569,7 @@ dependencies = [
 
 [[package]]
 name = "shed"
-version = "0.1.53"
+version = "0.1.55"
 dependencies = [
  "anyhow",
  "assert_cmd",

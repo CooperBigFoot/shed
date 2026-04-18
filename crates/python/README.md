@@ -30,9 +30,17 @@ print(result.area_km2)
 For batch delineation:
 
 ```python
-outlets = [(47.3769, 8.5417), (46.9480, 7.4474)]
+outlets = [
+    {"lat": 47.3769, "lon": 8.5417},
+    {"lat": 46.9480, "lon": 7.4474},
+]
 results = engine.delineate_batch(outlets)
 ```
+
+## API Reference
+
+For the full developer-oriented API surface, including argument types, return
+types, and the exception hierarchy, see [API.md](API.md).
 
 ## What it does
 
