@@ -2,6 +2,10 @@
 
 Pure-Rust core library for the shed watershed extraction engine. It handles two responsibilities: loading HFX datasets from disk (`session` + `reader`), and providing all watershed-delineation algorithms (`algo`). External capabilities — GDAL raster I/O, GEOS geometry repair — are kept behind traits defined here and implemented in `shed-gdal`, so the hot path has no native dependencies.
 
+## Snap Strategy
+
+`ResolverConfig::new()` defaults to `SnapStrategy::WeightFirst` to align with the HFX v0.2 weight contract, which requires that the `weight` column be monotonically increasing in drainage dominance (higher weight = more hydrologically significant reach). Under this default, when an outlet is coincident with a tiny tributary stub, the hydrologically dominant mainstem candidate wins over the geometrically closest one. `SnapStrategy::DistanceFirst` remains available for datasets whose `weight` column is not rank-meaningful: configure it via `ResolverConfig::new().with_snap_strategy(SnapStrategy::DistanceFirst)`.
+
 ## Architecture
 
 ```mermaid

@@ -71,7 +71,12 @@ struct DelineateArgs {
     #[arg(long)]
     clean_epsilon: Option<f64>,
 
-    #[arg(long, value_enum)]
+    #[arg(
+        long,
+        value_enum,
+        help = "Snap ranking strategy [default: weight-first]. Use 'distance-first' for datasets \
+                whose weight column is not hydrologically rank-meaningful."
+    )]
     snap_strategy: Option<SnapStrategyArg>,
 
     #[arg(long)]

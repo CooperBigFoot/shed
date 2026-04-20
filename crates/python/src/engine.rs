@@ -50,8 +50,9 @@ impl PyEngine {
     ///     Optional snap-path search radius in metres (must be finite and
     ///     positive). Defaults to 1 000 m.
     /// snap_strategy:
-    ///     Optional snap ranking strategy: `"distance-first"` (default) or
-    ///     `"weight-first"`.
+    ///     Optional snap ranking strategy: `"weight-first"` (default, matches
+    ///     HFX v0.2 contract) or `"distance-first"` (opt-in; use for datasets
+    ///     whose weights are not hydrologically rank-meaningful).
     /// snap_threshold:
     ///     Minimum upstream-pixel count for stream-network snapping. Defaults
     ///     to 1 000 cells.

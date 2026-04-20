@@ -54,10 +54,14 @@ impl fmt::Display for SearchRadiusMetres {
 /// Snap-target ranking strategy for outlet resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnapStrategy {
-    /// Prefer the nearest candidate, using weight/mainstem only as tie-breakers.
+    /// Opt-in strategy: prefer the nearest candidate, using weight/mainstem
+    /// only as tie-breakers within a configurable distance tolerance band.
+    /// Use this for datasets whose weights are not hydrologically rank-meaningful.
     DistanceFirst,
-    /// Prefer the highest-weight candidate inside the search radius, using
-    /// mainstem preference, distance, then snap ID as tie-breakers.
+    /// Default strategy (HFX v0.2): prefer the highest-weight candidate inside
+    /// the search radius, using mainstem preference, distance, then snap ID as
+    /// tie-breakers. Requires weights to be monotonically increasing in drainage
+    /// dominance (e.g. upstream area in km²).
     WeightFirst,
 }
 
@@ -87,7 +91,7 @@ impl ResolverConfig {
         Self {
             search_radius: SearchRadiusMetres::DEFAULT,
             distance_tolerance_m: 1.0,
-            snap_strategy: SnapStrategy::DistanceFirst,
+            snap_strategy: SnapStrategy::WeightFirst,
         }
     }
 
@@ -746,7 +750,7 @@ mod tests {
     #[test]
     fn config_default_snap_strategy() {
         let config = ResolverConfig::new();
-        assert_eq!(config.snap_strategy(), SnapStrategy::DistanceFirst);
+        assert_eq!(config.snap_strategy(), SnapStrategy::WeightFirst);
     }
 
     #[test]
@@ -943,8 +947,12 @@ mod tests {
             .build();
         let session = DatasetSession::open(&root).unwrap();
 
-        let result =
-            resolve_outlet(&session, GeoCoord::new(0.2, 0.2), &ResolverConfig::new()).unwrap();
+        let result = resolve_outlet(
+            &session,
+            GeoCoord::new(0.2, 0.2),
+            &ResolverConfig::new().with_snap_strategy(SnapStrategy::DistanceFirst),
+        )
+        .unwrap();
         assert_eq!(result.atom_id, AtomId::new(1).unwrap());
         assert!(matches!(
             result.method,
@@ -1087,7 +1095,10 @@ mod tests {
             .with_custom_snap_targets(targets)
             .build();
         let session = DatasetSession::open(&root).unwrap();
-        let config = ResolverConfig::new().with_distance_tolerance(0.0).unwrap();
+        let config = ResolverConfig::new()
+            .with_snap_strategy(SnapStrategy::DistanceFirst)
+            .with_distance_tolerance(0.0)
+            .unwrap();
 
         let result = resolve_outlet(&session, GeoCoord::new(0.2, 0.2), &config).unwrap();
         assert_eq!(result.atom_id, AtomId::new(1).unwrap());
@@ -1098,6 +1109,69 @@ mod tests {
                 snap_id,
                 ..
             } if snap_id == hfx_core::SnapId::new(11).unwrap()
+        ));
+    }
+
+    #[test]
+    fn default_strategy_picks_mainstem_over_coincident_tiny_stub() {
+        // Bulgaria regression: when the input sits exactly on a tiny
+        // tributary stub's first vertex (distance=0), the default strategy
+        // must still pick the larger mainstem ~60 m away. This encodes the
+        // HFX v0.2 weight-first contract: weight determines ranking;
+        // mainstem/distance/id are only tie-breakers.
+        let catchments = vec![
+            TestCatchment {
+                id: 1,
+                area_km2: 0.08,
+                up_area_km2: None,
+                polygon: (9.99, 44.99, 10.01, 45.01),
+            },
+            TestCatchment {
+                id: 2,
+                area_km2: 100.0,
+                up_area_km2: Some(8800.0),
+                polygon: (9.98, 44.98, 10.02, 45.02),
+            },
+        ];
+        let targets = vec![
+            TestSnapTarget {
+                id: 11,
+                catchment_id: 1,
+                weight: 0.1,
+                is_mainstem: false,
+                // First vertex at (10.0, 45.0) — coincident with the input.
+                geometry: TestSnapGeometry::LineString(10.0, 45.0, 10.0001, 45.0001),
+            },
+            TestSnapTarget {
+                id: 22,
+                catchment_id: 2,
+                weight: 8816.84,
+                is_mainstem: true,
+                // ~60 m east at this latitude (0.000771 deg lon * 111320 * cos45° ≈ 60.7 m).
+                geometry: TestSnapGeometry::LineString(10.000771, 44.9995, 10.000771, 45.0005),
+            },
+        ];
+        let (_dir, root) = DatasetBuilder::new(2)
+            .with_custom_catchments(catchments)
+            .with_custom_snap_targets(targets)
+            .build();
+        let session = DatasetSession::open(&root).unwrap();
+
+        let result =
+            resolve_outlet(&session, GeoCoord::new(10.0, 45.0), &ResolverConfig::new()).unwrap();
+
+        assert_eq!(
+            result.atom_id,
+            AtomId::new(2).unwrap(),
+            "default strategy must pick the mainstem (atom 2), not the coincident tiny stub (atom 1)"
+        );
+        assert!(matches!(
+            result.method,
+            ResolutionMethod::Snap {
+                strategy: SnapStrategy::WeightFirst,
+                snap_id,
+                ..
+            } if snap_id == hfx_core::SnapId::new(22).unwrap()
         ));
     }
 }

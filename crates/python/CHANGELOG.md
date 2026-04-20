@@ -5,6 +5,16 @@ All notable changes to `pyshed` are documented in this file. The format is based
 [PEP 440](https://peps.python.org/pep-0440/) versioning (decoupled from the workspace's
 per-commit Rust crate versioning).
 
+## [0.1.3] - 2026-04-20
+
+### Changed
+
+- Default `snap_strategy` is now `"weight-first"` (was `"distance-first"`). Fixes small-basin correctness where an outlet coincident with a tiny tributary stub's first vertex resolved to a ~0.08 km² headwater instead of the ~9000 km² mainstem. Aligns pyshed with the HFX v0.2 weight contract.
+
+### Opt-out
+
+- Pass `snap_strategy="distance-first"` to `Engine(...)` or `Engine.delineate(...)` to keep the v0.1.2 behavior.
+
 ## [0.1.2] - 2026-04-18
 
 ### Added

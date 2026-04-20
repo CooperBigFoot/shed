@@ -42,7 +42,7 @@ Opens an HFX dataset and constructs a delineation engine.
 |---|---|---|
 | `dataset_path` | `str` | Path to the HFX dataset root directory |
 | `snap_radius` | `float \| None` | Optional snap-path search radius in metres; must be finite and positive when provided |
-| `snap_strategy` | `"distance-first" \| "weight-first" \| None` | Snap ranking strategy |
+| `snap_strategy` | `"distance-first" \| "weight-first" \| None` | Snap ranking strategy. Defaults to `"weight-first"` (HFX v0.2 contract: higher weight = more hydrologically significant). Pass `"distance-first"` to opt back into proximity-first ranking for datasets whose `weight` column is not rank-meaningful. |
 | `snap_threshold` | `int \| None` | Minimum upstream-pixel count for stream-network snapping |
 | `clean_epsilon` | `float \| None` | Topology-cleaning epsilon in degrees |
 | `refine` | `bool` | Whether raster-based terminal refinement is enabled |
