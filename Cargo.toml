@@ -6,7 +6,7 @@ hfx-core = "=0.2.0"
 
 [package]
 name = "shed"
-version = "0.1.56"
+version = "0.1.57"
 edition = "2024"
 
 [dependencies]
@@ -27,7 +27,6 @@ tempfile = "3"
 serde_json = "1"
 shed-core = { path = "crates/core", features = ["test-fixtures"] }
 
-# Patched to local HFX workspace until hfx-core 0.2.0 is published to
-# crates.io. Re-comment this block after publish.
-[patch.crates-io]
-hfx-core = { path = "../hfx/crates/hfx-core" }
+# Uncomment for local hfx-core development:
+# [patch.crates-io]
+# hfx-core = { path = "../hfx/crates/hfx-core" }
