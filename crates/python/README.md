@@ -12,9 +12,9 @@ install required.
 pip install pyshed
 ```
 
-**Platform support (v0.1):** Apple Silicon macOS (`macosx_11_0_arm64`) and
-Linux x86_64 (`manylinux2014_x86_64` / `manylinux_2_17_x86_64`).
-Intel macOS and Windows wheels are not yet built — see
+**Platform support (v0.1):** Apple Silicon macOS only (`macosx_11_0_arm64`).
+Linux, Intel macOS, and Windows wheels are not yet built — community
+contributions are welcome. See
 [CONTRIBUTING.md](https://github.com/CooperBigFoot/shed/blob/main/CONTRIBUTING.md)
 if you want to help port the build.
 
