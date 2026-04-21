@@ -5,6 +5,15 @@ All notable changes to `pyshed` are documented in this file. The format is based
 [PEP 440](https://peps.python.org/pep-0440/) versioning (decoupled from the workspace's
 per-commit Rust crate versioning).
 
+## [0.1.5] - 2026-04-21
+
+### Fixed
+
+- Corrected the Linux manylinux wheel stack builder to handle `lib64` installs
+  from CMake projects like PROJ while still preferring `lib` where explicitly
+  requested. This fixes the failed `0.1.4` Linux wheel build before wheel
+  repair.
+
 ## [0.1.4] - 2026-04-21
 
 ### Added
