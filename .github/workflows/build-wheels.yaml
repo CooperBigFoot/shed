@@ -28,8 +28,22 @@ env:
 jobs:
 
   build_wheels:
-    name: Build macOS arm64 wheel
-    runs-on: macos-14
+    name: Build ${{ matrix.label }} wheel
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS arm64
+            platform: macos
+            runs_on: macos-14
+            artifact_name: wheels-macos-arm64
+            cibw_build: cp39-macosx_arm64
+          - label: manylinux x86_64
+            platform: linux
+            runs_on: ubuntu-latest
+            artifact_name: wheels-manylinux-x86_64
+            cibw_build: cp39-manylinux_x86_64
+    runs-on: ${{ matrix.runs_on }}
 
     steps:
       - name: Checkout
@@ -49,8 +63,10 @@ jobs:
           package-dir: crates/python
           output-dir: wheelhouse
         env:
-          CIBW_BUILD: "cp39-macosx_arm64"
+          CIBW_BUILD: ${{ matrix.cibw_build }}
           CIBW_ARCHS_MACOS: arm64
+          CIBW_ARCHS_LINUX: x86_64
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux2014
           CIBW_ENVIRONMENT_MACOS: >-
             CMAKE_OSX_ARCHITECTURES=arm64
             MACOSX_DEPLOYMENT_TARGET=11.0
@@ -63,18 +79,43 @@ jobs:
             PKG_CONFIG_PATH=${GITHUB_WORKSPACE}/pyshed_libs/lib/pkgconfig
             LDFLAGS=-Wl,-rpath,${GITHUB_WORKSPACE}/pyshed_libs/lib
             LIBCLANG_PATH=/Library/Developer/CommandLineTools/usr/lib
+          CIBW_ENVIRONMENT_LINUX: >-
+            BUILD_PREFIX=/project/pyshed_libs
+            GDAL_HOME=/project/pyshed_libs
+            GDAL_INCLUDE_DIR=/project/pyshed_libs/include
+            GDAL_LIB_DIR=/project/pyshed_libs/lib
+            GDAL_VERSION=${{ env.GDAL_VERSION }}
+            PROJ_DATA=/project/pyshed_libs/share/proj
+            PKG_CONFIG_PATH=/project/pyshed_libs/lib/pkgconfig
+            LIBRARY_PATH=/project/pyshed_libs/lib
+            LD_LIBRARY_PATH=/project/pyshed_libs/lib
+            LDFLAGS=-Wl,-rpath,/project/pyshed_libs/lib
+            PATH=$HOME/.cargo/bin:$PATH
+            LIBCLANG_PATH=/usr/lib64
           CIBW_BEFORE_ALL_MACOS: |
             brew remove -f --ignore-dependencies liblerc webp zstd libtiff libxcb libxdcmp lcms2 xmlto ghostscript lz4 openjpeg jpeg-turbo libpng xz giflib rtmpdump brotli snappy libavif libzip
             HOMEBREW_NO_AUTO_UPDATE=1 brew install autoconf automake libtool coreutils cmake wget
             bash ./ci/config.sh
+          CIBW_BEFORE_ALL_LINUX: |
+            yum install -y autoconf automake libtool wget curl perl-core pkgconfig clang llvm-devel
+            if ! command -v rustup >/dev/null 2>&1; then
+              curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
+            fi
+            . "$HOME/.cargo/env"
+            bash ./ci/config-linux.sh
           CIBW_BEFORE_BUILD_MACOS: |
             export DYLD_LIBRARY_PATH=${BUILD_PREFIX}/lib:$DYLD_LIBRARY_PATH
             bash ./ci/copy_gdal_data.sh
             bash ./ci/delocate_preflight.sh
+          CIBW_BEFORE_BUILD_LINUX: |
+            bash ./ci/copy_gdal_data.sh
           CIBW_REPAIR_WHEEL_COMMAND_MACOS: >-
             export DYLD_LIBRARY_PATH=${GITHUB_WORKSPACE}/pyshed_libs/lib:$DYLD_LIBRARY_PATH &&
             delocate-listdeps --depending --all {wheel} &&
             delocate-wheel --require-archs {delocate_archs} -w {dest_dir} -v {wheel}
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
+            auditwheel show {wheel} &&
+            auditwheel repair -w {dest_dir} {wheel}
           CIBW_TEST_COMMAND: |
             python -c "
             import pyshed
@@ -83,15 +124,29 @@ jobs:
             assert (pkg / '_data' / 'gdal' / 'gdalvrt.xsd').is_file(), 'missing bundled gdal_data'
             assert (pkg / '_data' / 'proj' / 'proj.db').is_file(), 'missing bundled proj.db'
             assert pyshed.__version__, 'missing __version__'
+            try:
+                pyshed.Engine('/nonexistent/path/to/dataset')
+            except pyshed.DatasetError:
+                pass
+            else:
+                raise AssertionError('Engine should reject missing datasets')
             from pyshed import _pyshed
             _pyshed._self_test_proj()
             print('wheel self-test passed; version=' + pyshed.__version__)
             "
 
+      - name: Install auditwheel
+        if: matrix.platform == 'linux'
+        run: python -m pip install auditwheel
+
+      - name: Verify repaired manylinux wheel
+        if: matrix.platform == 'linux'
+        run: bash ./ci/auditwheel_preflight.sh ./wheelhouse/*.whl
+
       - name: Upload wheels artifact
         uses: actions/upload-artifact@v7
         with:
-          name: wheels-macos-arm64
+          name: ${{ matrix.artifact_name }}
           path: ./wheelhouse/*.whl
 
   publish_test:
