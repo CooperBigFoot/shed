@@ -5,6 +5,14 @@ All notable changes to `pyshed` are documented in this file. The format is based
 [PEP 440](https://peps.python.org/pep-0440/) versioning (decoupled from the workspace's
 per-commit Rust crate versioning).
 
+## [0.1.7] - 2026-04-21
+
+### Changed
+
+- Reverted the experimental Linux manylinux wheel setup. `pyshed` is again
+  published as an Apple Silicon macOS-only wheel while Linux support is left
+  open for future community contribution.
+
 ## [0.1.6] - 2026-04-21
 
 ### Fixed
