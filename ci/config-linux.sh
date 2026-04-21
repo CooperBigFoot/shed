@@ -46,7 +46,7 @@ fi
 
 export CFLAGS="${CFLAGS:-} -fPIC -g -O2"
 export CXXFLAGS="${CXXFLAGS:-} -fPIC -g -O2"
-export LDFLAGS="${LDFLAGS:-} -Wl,-rpath,$BUILD_PREFIX/lib"
+export LDFLAGS="${LDFLAGS:-} -Wl,-rpath,$BUILD_PREFIX/lib -Wl,-rpath,$BUILD_PREFIX/lib64"
 
 echo "BUILD_PREFIX: $BUILD_PREFIX"
 echo "GDAL_CONFIG:  $GDAL_CONFIG"
@@ -73,23 +73,34 @@ function suppress {
 
 function update_env_for_build_prefix {
     export CPPFLAGS="-I$BUILD_PREFIX/include $CPPFLAGS_BACKUP"
-    export LIBRARY_PATH="$BUILD_PREFIX/lib:$LIBRARY_PATH_BACKUP"
-    export LD_LIBRARY_PATH="$BUILD_PREFIX/lib:$LD_LIBRARY_PATH_BACKUP"
-    export PKG_CONFIG_PATH="$BUILD_PREFIX/lib/pkgconfig/:$PKG_CONFIG_PATH_BACKUP"
+    export LIBRARY_PATH="$BUILD_PREFIX/lib:$BUILD_PREFIX/lib64:$LIBRARY_PATH_BACKUP"
+    export LD_LIBRARY_PATH="$BUILD_PREFIX/lib:$BUILD_PREFIX/lib64:$LD_LIBRARY_PATH_BACKUP"
+    export PKG_CONFIG_PATH="$BUILD_PREFIX/lib/pkgconfig/:$BUILD_PREFIX/lib64/pkgconfig/:$PKG_CONFIG_PATH_BACKUP"
     export PATH="$BUILD_PREFIX/bin:$PATH"
+}
+
+function find_library_path {
+    local pattern="$1"
+    local lib_path
+    lib_path=$(find "$BUILD_PREFIX/lib" "$BUILD_PREFIX/lib64" -maxdepth 1 -type f -name "$pattern" -print 2>/dev/null | sort | head -1)
+    if [ -z "$lib_path" ]; then
+        echo "No shared libraries matched $pattern in $BUILD_PREFIX/lib or $BUILD_PREFIX/lib64" >&2
+        exit 1
+    fi
+    printf '%s\n' "$lib_path"
 }
 
 function ensure_rpath {
     local pattern="$1"
     local libs
-    libs=$(find "$BUILD_PREFIX/lib" -maxdepth 1 -type f -name "$pattern" -print | sort)
+    libs=$(find "$BUILD_PREFIX/lib" "$BUILD_PREFIX/lib64" -maxdepth 1 -type f -name "$pattern" -print 2>/dev/null | sort)
     if [ -z "$libs" ]; then
-        echo "No shared libraries matched $pattern in $BUILD_PREFIX/lib" >&2
+        echo "No shared libraries matched $pattern in $BUILD_PREFIX/lib or $BUILD_PREFIX/lib64" >&2
         exit 1
     fi
     while IFS= read -r lib_path; do
         [ -n "$lib_path" ] || continue
-        patchelf --set-rpath "$BUILD_PREFIX/lib" "$lib_path"
+        patchelf --set-rpath "$BUILD_PREFIX/lib:$BUILD_PREFIX/lib64" "$lib_path"
     done <<< "$libs"
 }
 
@@ -275,6 +286,7 @@ function build_libdeflate {
         mkdir -p build && cd build &&
         $cmake .. \
             -DCMAKE_INSTALL_PREFIX:PATH="$BUILD_PREFIX" \
+            -DCMAKE_INSTALL_LIBDIR=lib \
             -DCMAKE_PREFIX_PATH="${BUILD_PREFIX}" \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_INSTALL_RPATH="$BUILD_PREFIX/lib" \
@@ -294,6 +306,7 @@ function build_zstd {
         $cmake . \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX:PATH="$BUILD_PREFIX" \
+            -DCMAKE_INSTALL_LIBDIR=lib \
             -DCMAKE_PREFIX_PATH="${BUILD_PREFIX}" \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_INSTALL_RPATH="$BUILD_PREFIX/lib" \
@@ -347,7 +360,7 @@ function build_openssl {
     if [ -e openssl-stamp ]; then return; fi
     echo "Running build_openssl"
     (cd "${OPENSSL_FNAME}" &&
-        ./Configure linux-x86_64 shared -fPIC --prefix="$BUILD_PREFIX" &&
+        ./Configure linux-x86_64 shared -fPIC --prefix="$BUILD_PREFIX" --libdir=lib &&
         make -j4 &&
         make install)
     touch openssl-stamp
@@ -385,11 +398,12 @@ function build_proj {
     (cd "${PROJ_FNAME}" &&
         $cmake . \
             -DCMAKE_INSTALL_PREFIX:PATH="$BUILD_PREFIX" \
+            -DCMAKE_INSTALL_LIBDIR=lib \
             -DCMAKE_PREFIX_PATH="${BUILD_PREFIX}" \
             -DCMAKE_INCLUDE_PATH="$BUILD_PREFIX/include" \
             -DCMAKE_INSTALL_RPATH="$BUILD_PREFIX/lib" \
             -DSQLite3_INCLUDE_DIR="$BUILD_PREFIX/include" \
-            -DSQLite3_LIBRARY="$BUILD_PREFIX/lib/libsqlite3.$lib_ext" \
+            -DSQLite3_LIBRARY="$(find_library_path "libsqlite3.$lib_ext")" \
             -DBUILD_SHARED_LIBS=ON \
             -DCMAKE_BUILD_TYPE=Release \
             -DENABLE_IPO=OFF \
@@ -409,6 +423,7 @@ function build_geos {
         mkdir -p build && cd build &&
         $cmake .. \
             -DCMAKE_INSTALL_PREFIX:PATH="$BUILD_PREFIX" \
+            -DCMAKE_INSTALL_LIBDIR=lib \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_INSTALL_RPATH="$BUILD_PREFIX/lib" \
             -DBUILD_SHARED_LIBS=ON \
@@ -450,9 +465,10 @@ function build_gdal {
         cd build &&
         $cmake .. \
             -DCMAKE_INSTALL_PREFIX="$BUILD_PREFIX" \
+            -DCMAKE_INSTALL_LIBDIR=lib \
             -DCMAKE_PREFIX_PATH="${BUILD_PREFIX}" \
             -DCMAKE_INCLUDE_PATH="$BUILD_PREFIX/include" \
-            -DCMAKE_LIBRARY_PATH="$BUILD_PREFIX/lib" \
+            -DCMAKE_LIBRARY_PATH="$BUILD_PREFIX/lib;$BUILD_PREFIX/lib64" \
             -DCMAKE_PROGRAM_PATH="$BUILD_PREFIX/bin" \
             -DCMAKE_INSTALL_RPATH="$BUILD_PREFIX/lib" \
             -DBUILD_SHARED_LIBS=ON \
@@ -462,12 +478,12 @@ function build_gdal {
             -DPROJ_ROOT="$BUILD_PREFIX" \
             -DTIFF_ROOT="$BUILD_PREFIX" \
             -DSQLite3_ROOT="$BUILD_PREFIX" \
-            -DGEOS_LIBRARY="$BUILD_PREFIX/lib/libgeos_c.$lib_ext" \
+            -DGEOS_LIBRARY="$(find_library_path "libgeos_c.$lib_ext")" \
             -DGEOS_INCLUDE_DIR="$BUILD_PREFIX/include" \
-            -DCURL_LIBRARY="$BUILD_PREFIX/lib/libcurl.$lib_ext" \
+            -DCURL_LIBRARY="$(find_library_path "libcurl.$lib_ext")" \
             -DCURL_INCLUDE_DIR="$BUILD_PREFIX/include" \
             -DSQLite3_INCLUDE_DIR="$BUILD_PREFIX/include" \
-            -DSQLite3_LIBRARY="$BUILD_PREFIX/lib/libsqlite3.$lib_ext" \
+            -DSQLite3_LIBRARY="$(find_library_path "libsqlite3.$lib_ext")" \
             -DGDAL_BUILD_OPTIONAL_DRIVERS=OFF \
             -DOGR_BUILD_OPTIONAL_DRIVERS=OFF \
             -DGDAL_ENABLE_DRIVER_GTIFF=ON \

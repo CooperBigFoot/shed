@@ -86,10 +86,10 @@ jobs:
             GDAL_LIB_DIR=/project/pyshed_libs/lib
             GDAL_VERSION=${{ env.GDAL_VERSION }}
             PROJ_DATA=/project/pyshed_libs/share/proj
-            PKG_CONFIG_PATH=/project/pyshed_libs/lib/pkgconfig
-            LIBRARY_PATH=/project/pyshed_libs/lib
-            LD_LIBRARY_PATH=/project/pyshed_libs/lib
-            LDFLAGS=-Wl,-rpath,/project/pyshed_libs/lib
+            PKG_CONFIG_PATH=/project/pyshed_libs/lib/pkgconfig:/project/pyshed_libs/lib64/pkgconfig
+            LIBRARY_PATH=/project/pyshed_libs/lib:/project/pyshed_libs/lib64
+            LD_LIBRARY_PATH=/project/pyshed_libs/lib:/project/pyshed_libs/lib64
+            LDFLAGS=-Wl,-rpath,/project/pyshed_libs/lib -Wl,-rpath,/project/pyshed_libs/lib64
             PATH=$HOME/.cargo/bin:$PATH
             LIBCLANG_PATH=/usr/lib64
           CIBW_BEFORE_ALL_MACOS: |
