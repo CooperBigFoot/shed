@@ -40,7 +40,7 @@ results = engine.delineate_batch(outlets)
 ## API Reference
 
 For the full developer-oriented API surface, including argument types, return
-types, and the exception hierarchy, see [API.md](API.md).
+types, and the exception hierarchy, see [API.md](https://github.com/CooperBigFoot/shed/blob/main/crates/python/API.md).
 
 ## What it does
 
