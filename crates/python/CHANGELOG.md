@@ -5,6 +5,15 @@ All notable changes to `pyshed` are documented in this file. The format is based
 [PEP 440](https://peps.python.org/pep-0440/) versioning (decoupled from the workspace's
 per-commit Rust crate versioning).
 
+## [0.1.6] - 2026-04-21
+
+### Fixed
+
+- Quoted the Linux `LDFLAGS` assignment in the cibuildwheel environment so the
+  manylinux job parses correctly. This fixes the immediate `Malformed
+  environment option` failure seen in `0.1.5` before the Linux build even
+  started.
+
 ## [0.1.5] - 2026-04-21
 
 ### Fixed
