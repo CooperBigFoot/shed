@@ -5,6 +5,20 @@ All notable changes to `pyshed` are documented in this file. The format is based
 [PEP 440](https://peps.python.org/pep-0440/) versioning (decoupled from the workspace's
 per-commit Rust crate versioning).
 
+## [0.1.4] - 2026-04-21
+
+### Added
+
+- Added Linux x86_64 wheel builds via cibuildwheel's `manylinux2014` image,
+  alongside the existing Apple Silicon macOS wheel.
+- Added Linux wheel verification with `auditwheel show`, an `ldd` dependency
+  check against the repaired wheel, and a clean-container import smoke test.
+
+### Changed
+
+- Documented Linux x86_64 as a supported wheel platform in the package README
+  and metadata.
+
 ## [0.1.3] - 2026-04-20
 
 ### Changed

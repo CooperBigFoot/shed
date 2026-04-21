@@ -1,6 +1,6 @@
 [package]
 name = "pyshed"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 description = "Python bindings for the shed watershed delineation engine"
 license = "MIT"
