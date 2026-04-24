@@ -513,13 +513,10 @@ fn test_open_missing_root() {
 }
 
 #[test]
-fn test_open_remote_source_not_yet_supported() {
-    let err = DatasetSession::open("s3://shed-test/example/root").unwrap_err();
+fn test_open_unsupported_remote_source() {
+    let err = DatasetSession::open("gs://shed-test/example/root").unwrap_err();
 
-    assert!(matches!(
-        err,
-        SessionError::RemoteDatasetNotSupported { .. }
-    ));
+    assert!(matches!(err, SessionError::UnsupportedDatasetSource { .. }));
 }
 
 #[test]

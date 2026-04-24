@@ -201,7 +201,19 @@ pub enum SessionError {
         /// The dataset source string supplied by the caller.
         input: String,
         /// Underlying object-store configuration error.
-        source: object_store::Error,
+        source: Box<object_store::Error>,
+    },
+
+    /// Fired when an object-store artifact cannot be fetched from a remote
+    /// dataset source.
+    #[error("failed to read remote artifact {artifact:?} at {path}: {source}")]
+    RemoteArtifactRead {
+        /// Short name of the artifact being read.
+        artifact: &'static str,
+        /// Object-store path that was requested.
+        path: String,
+        /// Underlying object-store error.
+        source: Box<object_store::Error>,
     },
 
     /// Fired when a remote dataset source parses successfully but the session
@@ -275,6 +287,19 @@ impl SessionError {
     pub(crate) fn integrity(detail: impl Into<String>) -> Self {
         Self::IntegrityViolation {
             detail: detail.into(),
+        }
+    }
+
+    /// Construct a [`SessionError::RemoteArtifactRead`] variant.
+    pub(crate) fn remote_artifact_read(
+        artifact: &'static str,
+        path: impl Into<String>,
+        source: object_store::Error,
+    ) -> Self {
+        Self::RemoteArtifactRead {
+            artifact,
+            path: path.into(),
+            source: Box::new(source),
         }
     }
 }

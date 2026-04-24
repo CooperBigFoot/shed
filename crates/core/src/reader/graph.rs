@@ -1,5 +1,6 @@
 //! Graph reader — loads graph.arrow into a DrainageGraph.
 
+use std::io::{Cursor, Read, Seek};
 use std::path::Path;
 
 use arrow::array::{Array, Int64Array, LargeListArray, ListArray};
@@ -41,8 +42,39 @@ pub fn load_graph(path: &Path) -> Result<DrainageGraph, SessionError> {
     Ok(graph)
 }
 
+/// Load `graph.arrow` bytes and return a [`DrainageGraph`].
+///
+/// # Errors
+///
+/// | Condition | Error variant |
+/// |-----------|---------------|
+/// | Bytes are not valid Arrow IPC | [`SessionError::GraphArrowParse`] |
+/// | Schema missing or wrong column type | [`SessionError::GraphSchema`] |
+/// | A row contains an invalid atom ID (zero or negative) | [`SessionError::InvalidRow`] |
+/// | Graph domain validation fails (empty, duplicate IDs) | [`SessionError::GraphDomain`] |
+#[instrument(skip_all, fields(byte_len = bytes.len()))]
+pub fn load_graph_from_bytes(bytes: bytes::Bytes) -> Result<DrainageGraph, SessionError> {
+    let reader = FileReader::try_new(Cursor::new(bytes), None)
+        .map_err(|e| SessionError::GraphArrowParse { source: e })?;
+
+    validate_schema(&reader)?;
+
+    debug!("graph.arrow schema validated, reading record batches");
+
+    let rows = read_rows(reader)?;
+
+    let row_count = rows.len();
+    let graph = DrainageGraph::new(rows).map_err(|e| SessionError::GraphDomain { source: e })?;
+
+    info!(row_count, "graph.arrow loaded");
+    Ok(graph)
+}
+
 /// Validate that the Arrow IPC schema contains the expected columns.
-fn validate_schema(reader: &FileReader<std::fs::File>) -> Result<(), SessionError> {
+fn validate_schema<R>(reader: &FileReader<R>) -> Result<(), SessionError>
+where
+    R: Read + Seek,
+{
     let schema = reader.schema();
 
     // Check "id" column: must be Int64.
@@ -95,7 +127,10 @@ fn is_list_int64(dt: &DataType) -> bool {
 }
 
 /// Read all record batches from the reader and convert each row into an [`AdjacencyRow`].
-fn read_rows(reader: FileReader<std::fs::File>) -> Result<Vec<AdjacencyRow>, SessionError> {
+fn read_rows<R>(reader: FileReader<R>) -> Result<Vec<AdjacencyRow>, SessionError>
+where
+    R: Read + Seek,
+{
     let mut rows: Vec<AdjacencyRow> = Vec::new();
     let mut global_row: usize = 0;
 
@@ -223,11 +258,16 @@ mod tests {
 
     use crate::error::SessionError;
 
-    use super::load_graph;
+    use super::{load_graph, load_graph_from_bytes};
 
     // --- Fixture helpers ---
 
     fn write_graph_fixture(path: &Path, ids: &[i64], upstream_ids: &[Vec<i64>]) {
+        let bytes = graph_fixture_bytes(ids, upstream_ids);
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn graph_fixture_bytes(ids: &[i64], upstream_ids: &[Vec<i64>]) -> Vec<u8> {
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Int64, false),
             Field::new(
@@ -253,10 +293,11 @@ mod tests {
         )
         .unwrap();
 
-        let file = std::fs::File::create(path).unwrap();
-        let mut writer = FileWriter::try_new(file, &schema).unwrap();
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = FileWriter::try_new(cursor, &schema).unwrap();
         writer.write(&batch).unwrap();
         writer.finish().unwrap();
+        writer.into_inner().unwrap().into_inner()
     }
 
     fn write_schema_only_fixture(path: &Path, schema: Arc<Schema>) {
@@ -287,6 +328,20 @@ mod tests {
         assert!(row1.is_headwater());
 
         let row3 = graph.get(id3).expect("atom 3 should be present");
+        assert_eq!(row3.upstream_ids().len(), 2);
+    }
+
+    #[test]
+    fn test_valid_tree_graph_from_bytes() {
+        let bytes = graph_fixture_bytes(&[1, 2, 3], &[vec![], vec![1], vec![1, 2]]);
+
+        let graph =
+            load_graph_from_bytes(bytes::Bytes::from(bytes)).expect("valid graph should load");
+
+        assert_eq!(graph.len(), 3);
+        let row3 = graph
+            .get(hfx_core::AtomId::new(3).unwrap())
+            .expect("atom 3 should be present");
         assert_eq!(row3.upstream_ids().len(), 2);
     }
 

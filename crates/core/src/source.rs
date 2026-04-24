@@ -83,7 +83,7 @@ impl DatasetSource {
             .build()
             .map_err(|source| SessionError::ObjectStoreConfig {
                 input: input.to_string(),
-                source,
+                source: Box::new(source),
             })?;
 
         Ok(Self::Remote {
@@ -142,7 +142,7 @@ impl DatasetSource {
             .build()
             .map_err(|source| SessionError::ObjectStoreConfig {
                 input: input.to_string(),
-                source,
+                source: Box::new(source),
             })?;
 
         Ok(Self::Remote {

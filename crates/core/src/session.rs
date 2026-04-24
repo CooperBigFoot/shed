@@ -3,6 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use hfx_core::{Manifest, RasterAvailability, SnapAvailability, Topology};
+use object_store::path::Path as ObjectPath;
+use object_store::{ObjectStore, ObjectStoreExt};
 use tracing::{debug, info, instrument};
 use url::Url;
 
@@ -10,6 +12,7 @@ use crate::error::SessionError;
 use crate::reader;
 use crate::reader::catchment_store::CatchmentStore;
 use crate::reader::snap_store::SnapStore;
+use crate::runtime::RT;
 use crate::source::DatasetSource;
 
 /// Validated paths to the optional raster pair.
@@ -65,7 +68,9 @@ impl DatasetSession {
     pub fn open(input: &str) -> Result<Self, SessionError> {
         match DatasetSource::parse(input)? {
             DatasetSource::Local(root) => Self::open_path(&root),
-            DatasetSource::Remote { url, .. } => Self::open_remote(&url),
+            DatasetSource::Remote { store, root, url } => {
+                Self::open_remote(store.as_ref(), &root, &url)
+            }
         }
     }
 
@@ -234,7 +239,27 @@ impl DatasetSession {
         })
     }
 
-    fn open_remote(url: &Url) -> Result<Self, SessionError> {
+    fn open_remote(
+        store: &dyn ObjectStore,
+        root: &ObjectPath,
+        url: &Url,
+    ) -> Result<Self, SessionError> {
+        let manifest_path = remote_artifact_path(root, "manifest.json");
+        let graph_path = remote_artifact_path(root, "graph.arrow");
+
+        let manifest_bytes = read_remote_artifact(store, manifest_path, "manifest.json")?;
+        let manifest = reader::manifest::read_manifest_from_bytes(&manifest_bytes)?;
+
+        let graph_bytes = read_remote_artifact(store, graph_path, "graph.arrow")?;
+        let graph = reader::graph::load_graph_from_bytes(graph_bytes)?;
+
+        debug!(
+            fabric = manifest.fabric_name(),
+            atoms = manifest.atom_count().get(),
+            graph_atoms = graph.len(),
+            "remote manifest and graph parsed"
+        );
+
         Err(SessionError::RemoteDatasetNotSupported {
             url: url.as_str().to_string(),
         })
@@ -273,5 +298,138 @@ impl DatasetSession {
     /// Return the dataset root directory path.
     pub fn root(&self) -> &Path {
         &self.root
+    }
+}
+
+fn remote_artifact_path(root: &ObjectPath, artifact: &'static str) -> ObjectPath {
+    root.clone().join(artifact)
+}
+
+fn read_remote_artifact(
+    store: &dyn ObjectStore,
+    path: ObjectPath,
+    artifact: &'static str,
+) -> Result<bytes::Bytes, SessionError> {
+    let path_display = path.as_ref().to_string();
+    RT.block_on(async {
+        let result = store.get(&path).await.map_err(|source| {
+            SessionError::remote_artifact_read(artifact, &path_display, source)
+        })?;
+
+        result
+            .bytes()
+            .await
+            .map_err(|source| SessionError::remote_artifact_read(artifact, path_display, source))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+    use std::sync::Arc;
+
+    use arrow::array::{Int64Array, Int64Builder, ListBuilder};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::ipc::writer::FileWriter;
+    use arrow::record_batch::RecordBatch;
+    use object_store::memory::InMemory;
+    use object_store::path::Path as ObjectPath;
+    use object_store::{ObjectStoreExt, PutPayload};
+    use url::Url;
+
+    use super::DatasetSession;
+    use crate::error::SessionError;
+    use crate::runtime::RT;
+
+    fn manifest_bytes() -> String {
+        serde_json::json!({
+            "format_version": "0.1",
+            "fabric_name": "testfabric",
+            "crs": "EPSG:4326",
+            "topology": "tree",
+            "terminal_sink_id": 0,
+            "bbox": [-10.0, -5.0, 10.0, 5.0],
+            "atom_count": 2,
+            "created_at": "2026-01-01T00:00:00Z",
+            "adapter_version": "test-v1"
+        })
+        .to_string()
+    }
+
+    fn graph_bytes() -> Vec<u8> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new(
+                "upstream_ids",
+                DataType::List(Arc::new(Field::new("item", DataType::Int64, true))),
+                false,
+            ),
+        ]));
+
+        let id_arr = Int64Array::from(vec![1_i64, 2]);
+        let mut list_builder = ListBuilder::new(Int64Builder::new());
+        list_builder.append(true);
+        list_builder.values().append_value(1);
+        list_builder.append(true);
+        let upstream_arr = list_builder.finish();
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(id_arr), Arc::new(upstream_arr)],
+        )
+        .unwrap();
+
+        let cursor = Cursor::new(Vec::new());
+        let mut writer = FileWriter::try_new(cursor, &schema).unwrap();
+        writer.write(&batch).unwrap();
+        writer.finish().unwrap();
+        writer.into_inner().unwrap().into_inner()
+    }
+
+    #[test]
+    fn open_remote_fetches_manifest_and_graph_before_not_supported() {
+        let store = Arc::new(InMemory::new());
+        let root = ObjectPath::from("dataset/root");
+        RT.block_on(async {
+            store
+                .put(
+                    &root.clone().join("manifest.json"),
+                    PutPayload::from(manifest_bytes()),
+                )
+                .await
+                .unwrap();
+            store
+                .put(
+                    &root.clone().join("graph.arrow"),
+                    PutPayload::from(graph_bytes()),
+                )
+                .await
+                .unwrap();
+        });
+        let url = Url::parse("s3://shed-test/dataset/root").unwrap();
+
+        let err = DatasetSession::open_remote(store.as_ref(), &root, &url).unwrap_err();
+
+        assert!(matches!(
+            err,
+            SessionError::RemoteDatasetNotSupported { .. }
+        ));
+    }
+
+    #[test]
+    fn open_remote_reports_missing_manifest() {
+        let store = Arc::new(InMemory::new());
+        let root = ObjectPath::from("dataset/root");
+        let url = Url::parse("s3://shed-test/dataset/root").unwrap();
+
+        let err = DatasetSession::open_remote(store.as_ref(), &root, &url).unwrap_err();
+
+        assert!(matches!(
+            err,
+            SessionError::RemoteArtifactRead {
+                artifact: "manifest.json",
+                ..
+            }
+        ));
     }
 }

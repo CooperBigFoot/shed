@@ -50,7 +50,22 @@ pub(crate) struct RawManifest {
 pub fn read_manifest(path: &Path) -> Result<Manifest, SessionError> {
     let bytes = std::fs::read(path).map_err(|e| SessionError::io("manifest.json", e))?;
 
-    let raw = serde_json::from_slice::<RawManifest>(&bytes)
+    read_manifest_from_bytes(&bytes)
+}
+
+/// Reads and validates `manifest.json` bytes, returning a typed [`Manifest`].
+///
+/// # Errors
+///
+/// | Variant | Condition |
+/// |---|---|
+/// | [`SessionError::ManifestJsonParse`] | Bytes are not valid JSON or do not match the expected shape |
+/// | [`SessionError::ManifestFieldMissing`] | A required field is absent from the JSON object |
+/// | [`SessionError::ManifestFieldInvalid`] | A field is present but its value is invalid |
+/// | [`SessionError::ManifestDomain`] | Parsed fields pass individual checks but `ManifestBuilder` rejects the combination |
+#[instrument(skip_all, fields(byte_len = bytes.len()))]
+pub fn read_manifest_from_bytes(bytes: &[u8]) -> Result<Manifest, SessionError> {
+    let raw = serde_json::from_slice::<RawManifest>(bytes)
         .map_err(|source| SessionError::ManifestJsonParse { source })?;
 
     build_manifest(raw)
@@ -273,6 +288,17 @@ mod tests {
         );
         assert_eq!(manifest.rasters(), hfx_core::RasterAvailability::Absent);
         assert_eq!(manifest.snap(), hfx_core::SnapAvailability::Absent);
+    }
+
+    #[test]
+    fn test_valid_minimal_manifest_from_bytes() {
+        let bytes = minimal_json().to_string();
+
+        let manifest = read_manifest_from_bytes(bytes.as_bytes()).unwrap();
+
+        assert_eq!(manifest.format_version(), FormatVersion::V0_1);
+        assert_eq!(manifest.fabric_name(), "testfabric");
+        assert_eq!(manifest.atom_count().get(), 100);
     }
 
     #[test]
