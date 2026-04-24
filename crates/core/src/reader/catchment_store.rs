@@ -6,6 +6,9 @@ use std::sync::Arc;
 
 use arrow::array::{Array, BinaryArray, Float32Array, Int64Array, LargeBinaryArray};
 use arrow::datatypes::{DataType, Schema};
+use geo::{Geometry, MultiPolygon};
+use geozero::ToGeo;
+use geozero::wkb::Wkb;
 use hfx_core::{AreaKm2, AtomId, BoundingBox, CatchmentAtom, WkbGeometry};
 use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjectPath;
@@ -15,34 +18,48 @@ use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStream
 use tracing::{debug, instrument};
 
 use super::{BboxColIndices, extract_row_group_bbox, require_column};
+use crate::algo::WkbDecodeError;
 use crate::error::SessionError;
 use crate::runtime::RT;
 
 const ARTIFACT: &str = "catchments.parquet";
 
-/// Geometry-only catchment row used on the assembly/refinement hot path.
+/// Decoded geometry-only catchment row used on the assembly/refinement hot path.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct CatchmentGeometryRow {
+pub(crate) struct DecodedCatchmentGeometryRow {
     id: AtomId,
-    geometry: WkbGeometry,
+    geometry: MultiPolygon<f64>,
 }
 
-impl CatchmentGeometryRow {
-    pub(crate) fn new(id: AtomId, geometry: WkbGeometry) -> Self {
+impl DecodedCatchmentGeometryRow {
+    pub(crate) fn new(id: AtomId, geometry: MultiPolygon<f64>) -> Self {
         Self { id, geometry }
     }
 
-    pub(crate) fn id(&self) -> AtomId {
-        self.id
-    }
-
-    pub(crate) fn geometry(&self) -> &WkbGeometry {
-        &self.geometry
-    }
-
-    pub(crate) fn into_parts(self) -> (AtomId, WkbGeometry) {
+    pub(crate) fn into_parts(self) -> (AtomId, MultiPolygon<f64>) {
         (self.id, self.geometry)
     }
+}
+
+/// Errors from geometry-only catchment queries.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum CatchmentGeometryQueryError {
+    /// Reading or validating the catchment store failed.
+    #[error("{source}")]
+    Read {
+        /// Underlying session error.
+        #[from]
+        source: SessionError,
+    },
+
+    /// A requested catchment geometry failed WKB decode or had the wrong type.
+    #[error("failed to decode geometry for atom {atom_id:?}: {source}")]
+    Decode {
+        /// Atom whose stored geometry failed decode.
+        atom_id: AtomId,
+        /// Underlying WKB decode error.
+        source: WkbDecodeError,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -409,14 +426,14 @@ impl CatchmentStore {
     pub(crate) fn query_geometries_by_ids(
         &self,
         ids: &[AtomId],
-    ) -> Result<Vec<CatchmentGeometryRow>, SessionError> {
+    ) -> Result<Vec<DecodedCatchmentGeometryRow>, CatchmentGeometryQueryError> {
         RT.block_on(self.query_geometries_by_ids_async(ids))
     }
 
     async fn query_geometries_by_ids_async(
         &self,
         ids: &[AtomId],
-    ) -> Result<Vec<CatchmentGeometryRow>, SessionError> {
+    ) -> Result<Vec<DecodedCatchmentGeometryRow>, CatchmentGeometryQueryError> {
         let id_set: HashSet<AtomId> = ids.iter().copied().collect();
         let selected_row_groups = self.selected_row_groups_for_ids(ids);
         if id_set.is_empty() || selected_row_groups.is_empty() {
@@ -472,13 +489,14 @@ impl CatchmentStore {
                     })?;
 
                     let absolute_row = rg_absolute_starts[sel_idx] + offset_in_group;
-                    let rows = extract_geometry_rows_from_batch(&batch, absolute_row, ARTIFACT)?;
+                    let rows = extract_decoded_geometries_from_batch(
+                        &batch,
+                        absolute_row,
+                        ARTIFACT,
+                        &id_set,
+                    )?;
 
-                    for row in rows {
-                        if id_set.contains(&row.id()) {
-                            results.push(row);
-                        }
-                    }
+                    results.extend(rows);
 
                     offset_in_group += batch.num_rows();
                 }
@@ -502,6 +520,11 @@ impl CatchmentStore {
     /// | Null value in id column | [`SessionError::InvalidRow`] |
     pub fn read_all_ids(&self) -> Result<Vec<AtomId>, SessionError> {
         Ok(self.all_ids.clone())
+    }
+
+    /// Return whether an atom ID is present in the cached catchment index.
+    pub(crate) fn contains_id(&self, id: AtomId) -> bool {
+        self.id_row_groups.contains_key(&id)
     }
 
     /// Return the total number of rows in the Parquet file.
@@ -672,11 +695,12 @@ fn extract_atoms_from_batch(
     Ok(atoms)
 }
 
-fn extract_geometry_rows_from_batch(
+fn extract_decoded_geometries_from_batch(
     batch: &arrow::record_batch::RecordBatch,
     row_offset: usize,
     artifact: &'static str,
-) -> Result<Vec<CatchmentGeometryRow>, SessionError> {
+    requested_ids: &HashSet<AtomId>,
+) -> Result<Vec<DecodedCatchmentGeometryRow>, CatchmentGeometryQueryError> {
     let schema = batch.schema();
     let id_col = col_as::<Int64Array>(batch, &schema, "id", artifact)?;
 
@@ -697,10 +721,14 @@ fn extract_geometry_rows_from_batch(
                 artifact,
                 global_i,
                 "null value in non-nullable column \"id\"",
-            ));
+            )
+            .into());
         }
         let atom_id = AtomId::new(id_col.value(i))
             .map_err(|e| SessionError::invalid_row(artifact, global_i, format!("id: {e}")))?;
+        if !requested_ids.contains(&atom_id) {
+            continue;
+        }
 
         let geom_is_null = if let Some(arr) = geom_array.as_any().downcast_ref::<BinaryArray>() {
             arr.is_null(i)
@@ -710,33 +738,65 @@ fn extract_geometry_rows_from_batch(
             return Err(SessionError::parquet_schema(
                 artifact,
                 "geometry column is not Binary or LargeBinary",
-            ));
+            )
+            .into());
         };
         if geom_is_null {
             return Err(SessionError::invalid_row(
                 artifact,
                 global_i,
                 "null value in non-nullable column \"geometry\"",
-            ));
+            )
+            .into());
         }
 
-        let geom_bytes = if let Some(arr) = geom_array.as_any().downcast_ref::<BinaryArray>() {
-            arr.value(i).to_vec()
+        let geometry = if let Some(arr) = geom_array.as_any().downcast_ref::<BinaryArray>() {
+            decode_wkb_multi_polygon_bytes(arr.value(i))
         } else if let Some(arr) = geom_array.as_any().downcast_ref::<LargeBinaryArray>() {
-            arr.value(i).to_vec()
+            decode_wkb_multi_polygon_bytes(arr.value(i))
         } else {
             return Err(SessionError::parquet_schema(
                 artifact,
                 "geometry column is not Binary or LargeBinary",
-            ));
-        };
-
-        let geometry = WkbGeometry::new(geom_bytes)
-            .map_err(|e| SessionError::invalid_row(artifact, global_i, format!("geometry: {e}")))?;
-        rows.push(CatchmentGeometryRow::new(atom_id, geometry));
+            )
+            .into());
+        }
+        .map_err(|source| CatchmentGeometryQueryError::Decode { atom_id, source })?;
+        rows.push(DecodedCatchmentGeometryRow::new(atom_id, geometry));
     }
 
     Ok(rows)
+}
+
+fn decode_wkb_multi_polygon_bytes(wkb: &[u8]) -> Result<MultiPolygon<f64>, WkbDecodeError> {
+    let geom = Wkb(wkb)
+        .to_geo()
+        .map_err(|e| WkbDecodeError::DecodeFailed {
+            reason: e.to_string(),
+        })?;
+    match geom {
+        Geometry::Polygon(p) => Ok(MultiPolygon::new(vec![p])),
+        Geometry::MultiPolygon(mp) => Ok(mp),
+        other => Err(WkbDecodeError::UnexpectedType {
+            expected: "Polygon or MultiPolygon",
+            actual: geometry_type_name(&other).to_owned(),
+        }),
+    }
+}
+
+fn geometry_type_name(geom: &Geometry<f64>) -> &'static str {
+    match geom {
+        Geometry::Point(_) => "Point",
+        Geometry::Line(_) => "Line",
+        Geometry::LineString(_) => "LineString",
+        Geometry::Polygon(_) => "Polygon",
+        Geometry::MultiPoint(_) => "MultiPoint",
+        Geometry::MultiLineString(_) => "MultiLineString",
+        Geometry::MultiPolygon(_) => "MultiPolygon",
+        Geometry::GeometryCollection(_) => "GeometryCollection",
+        Geometry::Rect(_) => "Rect",
+        Geometry::Triangle(_) => "Triangle",
+    }
 }
 
 async fn read_all_ids_with_row_groups_async(
@@ -1011,6 +1071,7 @@ mod tests {
 
     use arrow::array::{BinaryBuilder, Float32Builder, Int64Builder, RecordBatch};
     use arrow::datatypes::{DataType, Field, Schema};
+    use geo::Area;
     use parquet::arrow::ArrowWriter;
     use parquet::file::properties::{EnabledStatistics, WriterProperties};
     use tempfile::NamedTempFile;
@@ -1236,15 +1297,13 @@ mod tests {
         let results = store.query_geometries_by_ids(&ids).unwrap();
 
         assert_eq!(results.len(), 2);
-        let expected: HashMap<i64, Vec<u8>> = HashMap::from([
-            (1, minimal_wkb_polygon(0.0, 0.0, 1.0, 1.0)),
-            (3, minimal_wkb_polygon(4.0, 0.0, 5.0, 1.0)),
-        ]);
-        for row in &results {
-            let expected_wkb = expected
-                .get(&row.id().get())
+        let expected_area = HashMap::from([(1, 1.0), (3, 1.0)]);
+        for row in results {
+            let (atom_id, geometry) = row.into_parts();
+            let area = expected_area
+                .get(&atom_id.get())
                 .expect("queried IDs should be present");
-            assert_eq!(row.geometry().as_bytes(), expected_wkb);
+            assert!((geometry.unsigned_area() - *area).abs() < f64::EPSILON);
         }
     }
 
@@ -1262,7 +1321,10 @@ mod tests {
         let results = store.query_geometries_by_ids(&ids).unwrap();
 
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].id(), AtomId::new(1).unwrap());
+        assert_eq!(
+            results.into_iter().next().unwrap().into_parts().0,
+            AtomId::new(1).unwrap()
+        );
     }
 
     #[test]

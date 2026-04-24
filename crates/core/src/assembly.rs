@@ -9,11 +9,12 @@ use tracing::{debug, instrument};
 
 use crate::algo::{
     AreaKm2, CleanEpsilon, DissolveError, GeometryRepair, GeometryRepairError, HoleFillMode,
-    UpstreamAtoms, WatershedAreaError, WatershedGeometry, WkbDecodeError, decode_wkb_multi_polygon,
-    dissolve,
+    UpstreamAtoms, WatershedAreaError, WatershedGeometry, WkbDecodeError, dissolve,
 };
 use crate::error::SessionError;
-use crate::reader::catchment_store::{CatchmentGeometryRow, CatchmentStore};
+use crate::reader::catchment_store::{
+    CatchmentGeometryQueryError, CatchmentStore, DecodedCatchmentGeometryRow,
+};
 
 /// Result of a successful internal watershed assembly.
 #[derive(Debug, Clone)]
@@ -155,11 +156,32 @@ pub(crate) fn assemble_watershed(
     options: AssemblyOptions<'_>,
 ) -> Result<AssemblyResult, AssemblyError> {
     let terminal = upstream.terminal();
+    let query_ids: Vec<AtomId> = match refined_terminal_geometry {
+        Some(_) => upstream
+            .atom_ids()
+            .iter()
+            .copied()
+            .filter(|id| *id != terminal)
+            .collect(),
+        None => upstream.atom_ids().to_vec(),
+    };
     let fetched = catchments
-        .query_geometries_by_ids(upstream.atom_ids())
-        .map_err(|source| AssemblyError::CatchmentQuery { source })?;
+        .query_geometries_by_ids(&query_ids)
+        .map_err(map_geometry_query_error)?;
 
-    let mut atom_map = index_catchments_by_id(fetched, terminal, refined_terminal_geometry)?;
+    let mut atom_map = index_catchments_by_id(fetched)?;
+    if let Some(override_geometry) = refined_terminal_geometry
+        && catchments.contains_id(terminal)
+    {
+        match atom_map.entry(terminal) {
+            Entry::Occupied(_) => {
+                return Err(AssemblyError::DuplicateCatchment { atom_id: terminal });
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(override_geometry.clone());
+            }
+        }
+    }
     let missing_ids: Vec<AtomId> = upstream
         .atom_ids()
         .iter()
@@ -198,33 +220,30 @@ pub(crate) fn assemble_watershed(
 }
 
 fn index_catchments_by_id(
-    fetched: Vec<CatchmentGeometryRow>,
-    terminal: AtomId,
-    refined_terminal_geometry: Option<&MultiPolygon<f64>>,
+    fetched: Vec<DecodedCatchmentGeometryRow>,
 ) -> Result<HashMap<AtomId, MultiPolygon<f64>>, AssemblyError> {
     let mut atom_map = HashMap::with_capacity(fetched.len());
     for atom in fetched {
-        let (atom_id, geometry_wkb) = atom.into_parts();
+        let (atom_id, geometry) = atom.into_parts();
         match atom_map.entry(atom_id) {
             Entry::Occupied(_) => {
                 return Err(AssemblyError::DuplicateCatchment { atom_id });
             }
             Entry::Vacant(entry) => {
-                let geometry = if atom_id == terminal {
-                    match refined_terminal_geometry {
-                        Some(override_geometry) => override_geometry.clone(),
-                        None => decode_wkb_multi_polygon(&geometry_wkb)
-                            .map_err(|source| AssemblyError::GeometryDecode { atom_id, source })?,
-                    }
-                } else {
-                    decode_wkb_multi_polygon(&geometry_wkb)
-                        .map_err(|source| AssemblyError::GeometryDecode { atom_id, source })?
-                };
                 entry.insert(geometry);
             }
         }
     }
     Ok(atom_map)
+}
+
+fn map_geometry_query_error(source: CatchmentGeometryQueryError) -> AssemblyError {
+    match source {
+        CatchmentGeometryQueryError::Read { source } => AssemblyError::CatchmentQuery { source },
+        CatchmentGeometryQueryError::Decode { atom_id, source } => {
+            AssemblyError::GeometryDecode { atom_id, source }
+        }
+    }
 }
 
 fn assemble_from_geometries(
@@ -265,7 +284,7 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema};
     use geo::algorithm::winding_order::Winding;
     use geo::{Area, LineString, MultiPolygon, Polygon};
-    use hfx_core::{AdjacencyRow, DrainageGraph, WkbGeometry};
+    use hfx_core::{AdjacencyRow, DrainageGraph};
     use parquet::arrow::ArrowWriter;
     use parquet::file::properties::{EnabledStatistics, WriterProperties};
     use tempfile::NamedTempFile;
@@ -469,17 +488,17 @@ mod tests {
     #[test]
     fn duplicate_fetched_id_is_hard_failure() {
         let fetched = vec![
-            CatchmentGeometryRow::new(
+            DecodedCatchmentGeometryRow::new(
                 aid(1),
-                WkbGeometry::new(polygon_wkb(0.0, 0.0, 1.0, 1.0)).unwrap(),
+                MultiPolygon::new(vec![rect(0.0, 0.0, 1.0, 1.0)]),
             ),
-            CatchmentGeometryRow::new(
+            DecodedCatchmentGeometryRow::new(
                 aid(1),
-                WkbGeometry::new(polygon_wkb(1.0, 0.0, 2.0, 1.0)).unwrap(),
+                MultiPolygon::new(vec![rect(1.0, 0.0, 2.0, 1.0)]),
             ),
         ];
 
-        let err = index_catchments_by_id(fetched, aid(1), None).unwrap_err();
+        let err = index_catchments_by_id(fetched).unwrap_err();
 
         assert!(matches!(err, AssemblyError::DuplicateCatchment { atom_id } if atom_id == aid(1)));
     }

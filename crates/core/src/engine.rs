@@ -10,11 +10,11 @@ use crate::algo::coord::GeoCoord;
 use crate::algo::{
     AreaKm2, CleanEpsilon, DEFAULT_CLEANING_EPSILON, GeometryRepair, HoleFillMode, RasterSource,
     RefinementError, SnapThreshold, TraversalError, WkbDecodeError, WkbEncodeError,
-    collect_upstream, decode_wkb_multi_polygon, encode_wkb_multi_polygon,
-    refine_terminal_from_source,
+    collect_upstream, encode_wkb_multi_polygon, refine_terminal_from_source,
 };
 use crate::assembly::{AssemblyOptions, assemble_watershed};
 use crate::error::SessionError;
+use crate::reader::catchment_store::CatchmentGeometryQueryError;
 use crate::resolver::{
     OutletResolutionError, ResolutionMethod, ResolvedOutlet, ResolverConfig, resolve_outlet,
 };
@@ -494,9 +494,19 @@ impl Engine {
             .session
             .catchments()
             .query_geometries_by_ids(&[terminal])
-            .map_err(|source| EngineError::TerminalCatchmentFetch {
-                atom_id: terminal.get(),
-                source,
+            .map_err(|source| match source {
+                CatchmentGeometryQueryError::Read { source } => {
+                    EngineError::TerminalCatchmentFetch {
+                        atom_id: terminal.get(),
+                        source,
+                    }
+                }
+                CatchmentGeometryQueryError::Decode { source, .. } => {
+                    EngineError::TerminalCatchmentDecode {
+                        atom_id: terminal.get(),
+                        source,
+                    }
+                }
             })?;
         let terminal_atom = terminal_atoms.into_iter().next().ok_or_else(|| {
             EngineError::TerminalCatchmentFetch {
@@ -507,13 +517,7 @@ impl Engine {
                 )),
             }
         })?;
-        let terminal_polygon =
-            decode_wkb_multi_polygon(terminal_atom.geometry()).map_err(|source| {
-                EngineError::TerminalCatchmentDecode {
-                    atom_id: terminal.get(),
-                    source,
-                }
-            })?;
+        let terminal_polygon = terminal_atom.into_parts().1;
 
         // Refine
         let refinement_result = refine_terminal_from_source(
