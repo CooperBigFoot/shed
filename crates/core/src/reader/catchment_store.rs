@@ -3,6 +3,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::{LazyLock, Mutex};
 
 use arrow::array::{Array, BinaryArray, Float32Array, Int64Array, LargeBinaryArray};
 use arrow::datatypes::{DataType, Schema};
@@ -23,6 +25,10 @@ use crate::error::SessionError;
 use crate::runtime::RT;
 
 const ARTIFACT: &str = "catchments.parquet";
+
+#[cfg(test)]
+static GEOMETRY_DECODE_COUNTS_FOR_TEST: LazyLock<Mutex<HashMap<(String, AtomId), usize>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Decoded geometry-only catchment row used on the assembly/refinement hot path.
 #[derive(Debug, Clone, PartialEq)]
@@ -495,6 +501,10 @@ impl CatchmentStore {
                         ARTIFACT,
                         &id_set,
                     )?;
+                    #[cfg(test)]
+                    for row in &rows {
+                        record_geometry_decode_for_test(&self.path_display, row.id);
+                    }
 
                     results.extend(rows);
 
@@ -525,6 +535,18 @@ impl CatchmentStore {
     /// Return whether an atom ID is present in the cached catchment index.
     pub(crate) fn contains_id(&self, id: AtomId) -> bool {
         self.id_row_groups.contains_key(&id)
+    }
+
+    /// Return the successful geometry decode count for `id` in this store.
+    #[cfg(test)]
+    pub(crate) fn geometry_decode_count_for_test(&self, id: AtomId) -> usize {
+        let counts = GEOMETRY_DECODE_COUNTS_FOR_TEST
+            .lock()
+            .expect("geometry decode count mutex poisoned");
+        counts
+            .get(&(self.path_display.clone(), id))
+            .copied()
+            .unwrap_or_default()
     }
 
     /// Return the total number of rows in the Parquet file.
@@ -782,6 +804,22 @@ fn decode_wkb_multi_polygon_bytes(wkb: &[u8]) -> Result<MultiPolygon<f64>, WkbDe
             actual: geometry_type_name(&other).to_owned(),
         }),
     }
+}
+
+#[cfg(test)]
+fn record_geometry_decode_for_test(path: &str, atom_id: AtomId) {
+    let mut counts = GEOMETRY_DECODE_COUNTS_FOR_TEST
+        .lock()
+        .expect("geometry decode count mutex poisoned");
+    *counts.entry((path.to_owned(), atom_id)).or_default() += 1;
+}
+
+#[cfg(test)]
+pub(crate) fn reset_geometry_decode_counts_for_test() {
+    GEOMETRY_DECODE_COUNTS_FOR_TEST
+        .lock()
+        .expect("geometry decode count mutex poisoned")
+        .clear();
 }
 
 fn geometry_type_name(geom: &Geometry<f64>) -> &'static str {

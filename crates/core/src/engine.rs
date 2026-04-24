@@ -558,9 +558,17 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
+    use geo::Rect;
+    use hfx_core::FlowDirEncoding;
+
     use super::*;
+    use crate::algo::{
+        AccumulationTile, FlowDirectionTile, GeoTransform, GridCoord, GridDims, RasterSourceError,
+        RasterTile, Raw,
+    };
+    use crate::reader::catchment_store::reset_geometry_decode_counts_for_test;
     use crate::session::DatasetSession;
-    use crate::testutil::DatasetBuilder;
+    use crate::testutil::{DatasetBuilder, TestCatchment};
 
     // ── helpers ───────────────────────────────────────────────────────────────
 
@@ -585,6 +593,59 @@ mod tests {
     /// Coordinate far outside any catchment.
     fn coord_outside() -> GeoCoord {
         GeoCoord::new(999.0, 999.0)
+    }
+
+    fn test_raster_geo() -> GeoTransform {
+        GeoTransform::new(GeoCoord::new(0.0, 0.0), 1.0, -1.0)
+    }
+
+    fn make_flow_tile(values: &[u8]) -> FlowDirectionTile<Raw> {
+        let dims = GridDims::new(5, 5);
+        let mut tile = FlowDirectionTile::new(dims, test_raster_geo(), FlowDirEncoding::Esri)
+            .expect("flow direction tile should build");
+        for row in 0..5 {
+            for col in 0..5 {
+                tile.set_raw(GridCoord::new(row, col), values[row * 5 + col]);
+            }
+        }
+        tile
+    }
+
+    fn make_accumulation_tile(values: &[f32]) -> AccumulationTile<Raw> {
+        let dims = GridDims::new(5, 5);
+        let raw = RasterTile::from_vec(values.to_vec(), dims, f32::NAN, test_raster_geo())
+            .expect("accumulation tile should build");
+        AccumulationTile::from_raw(raw)
+    }
+
+    struct AppliedRefinementRasterSource;
+
+    impl RasterSource for AppliedRefinementRasterSource {
+        fn load_flow_direction(
+            &self,
+            _uri: &str,
+            _bbox: &Rect<f64>,
+        ) -> Result<FlowDirectionTile<Raw>, RasterSourceError> {
+            #[rustfmt::skip]
+            let values = [
+                2, 4, 4, 4, 8,
+                1, 2, 4, 8, 16,
+                1, 1, 4, 16, 16,
+                0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0,
+            ];
+            Ok(make_flow_tile(&values))
+        }
+
+        fn load_accumulation(
+            &self,
+            _uri: &str,
+            _bbox: &Rect<f64>,
+        ) -> Result<AccumulationTile<Raw>, RasterSourceError> {
+            let mut values = [1.0_f32; 25];
+            values[2 * 5 + 2] = 800.0;
+            Ok(make_accumulation_tile(&values))
+        }
     }
 
     // ── engine_single_outlet_no_rasters ──────────────────────────────────────
@@ -697,6 +758,53 @@ mod tests {
             result.refinement(),
             &RefinementOutcome::Disabled,
             "refinement disabled → Disabled outcome"
+        );
+    }
+
+    #[test]
+    fn applied_refinement_decodes_terminal_geometry_once() {
+        reset_geometry_decode_counts_for_test();
+        let (_dir, root) = DatasetBuilder::new(2)
+            .with_rasters()
+            .with_custom_catchments(vec![
+                TestCatchment {
+                    id: 1,
+                    area_km2: 1.0,
+                    up_area_km2: None,
+                    polygon: (-5.0, -5.0, -4.0, -4.0),
+                },
+                TestCatchment {
+                    id: 2,
+                    area_km2: 25.0,
+                    up_area_km2: Some(26.0),
+                    polygon: (0.0, -5.0, 5.0, 0.0),
+                },
+            ])
+            .build();
+        let session = DatasetSession::open_path(&root).expect("session should open");
+        let engine = Engine::builder(session)
+            .with_raster_source(AppliedRefinementRasterSource)
+            .build();
+        let terminal = AtomId::new(2).expect("valid atom id");
+
+        let result = engine
+            .delineate(
+                GeoCoord::new(2.5, -2.5),
+                &DelineationOptions::default().with_snap_threshold(SnapThreshold::new(500)),
+            )
+            .expect("delineation should succeed");
+
+        assert!(matches!(
+            result.refinement(),
+            RefinementOutcome::Applied { .. }
+        ));
+        assert_eq!(
+            engine
+                .session
+                .catchments()
+                .geometry_decode_count_for_test(terminal),
+            1,
+            "terminal geometry should be decoded for refinement only"
         );
     }
 
