@@ -48,6 +48,7 @@ pub struct DatasetBuilder {
     include_snap: bool,
     include_rasters: bool,
     row_group_size: usize,
+    polygon_complexity: usize,
     dag_diamond: bool,
     custom_catchments: Option<Vec<TestCatchment>>,
     custom_snap_targets: Option<Vec<TestSnapTarget>>,
@@ -63,6 +64,7 @@ impl DatasetBuilder {
             include_snap: false,
             include_rasters: false,
             row_group_size: 8192,
+            polygon_complexity: 5,
             dag_diamond: false,
             custom_catchments: None,
             custom_snap_targets: None,
@@ -84,6 +86,14 @@ impl DatasetBuilder {
     /// Set the Parquet row group size for catchments and snap files.
     pub fn with_row_group_size(mut self, size: usize) -> Self {
         self.row_group_size = size;
+        self
+    }
+
+    /// Set the number of coordinates in generated catchment polygon rings.
+    ///
+    /// Values up to the default rectangle ring size keep the existing rectangle fixture geometry.
+    pub fn with_polygon_complexity(mut self, coords_per_ring: usize) -> Self {
+        self.polygon_complexity = coords_per_ring;
         self
     }
 
@@ -257,7 +267,13 @@ impl DatasetBuilder {
                 maxx_b.append_value(maxx);
                 maxy_b.append_value(maxy);
 
-                let wkb = minimal_wkb_polygon(minx as f64, miny as f64, maxx as f64, maxy as f64);
+                let wkb = generated_wkb_polygon(
+                    minx as f64,
+                    miny as f64,
+                    maxx as f64,
+                    maxy as f64,
+                    self.polygon_complexity,
+                );
                 geom_b.append_value(&wkb);
             }
         }
@@ -487,6 +503,52 @@ fn minimal_wkb_polygon(minx: f64, miny: f64, maxx: f64, maxy: f64) -> Vec<u8> {
     wkb
 }
 
+fn generated_wkb_polygon(
+    minx: f64,
+    miny: f64,
+    maxx: f64,
+    maxy: f64,
+    coords_per_ring: usize,
+) -> Vec<u8> {
+    if coords_per_ring <= 5 {
+        return minimal_wkb_polygon(minx, miny, maxx, maxy);
+    }
+
+    regular_ngon_wkb_polygon(minx, miny, maxx, maxy, coords_per_ring)
+}
+
+fn regular_ngon_wkb_polygon(
+    minx: f64,
+    miny: f64,
+    maxx: f64,
+    maxy: f64,
+    coords_per_ring: usize,
+) -> Vec<u8> {
+    let side_count = coords_per_ring - 1;
+    let cx = (minx + maxx) / 2.0;
+    let cy = (miny + maxy) / 2.0;
+    let rx = (maxx - minx) / 2.0;
+    let ry = (maxy - miny) / 2.0;
+    let mut points = Vec::with_capacity(coords_per_ring);
+
+    for side in 0..side_count {
+        let theta = (side as f64) * std::f64::consts::TAU / (side_count as f64);
+        points.push((cx + rx * theta.cos(), cy + ry * theta.sin()));
+    }
+    points.push(points[0]);
+
+    let mut wkb = Vec::new();
+    wkb.push(1u8); // little-endian
+    wkb.extend_from_slice(&3u32.to_le_bytes()); // polygon type
+    wkb.extend_from_slice(&1u32.to_le_bytes()); // 1 ring
+    wkb.extend_from_slice(&(coords_per_ring as u32).to_le_bytes());
+    for (x, y) in points {
+        wkb.extend_from_slice(&x.to_le_bytes());
+        wkb.extend_from_slice(&y.to_le_bytes());
+    }
+    wkb
+}
+
 fn minimal_wkb_linestring(x1: f64, y1: f64, x2: f64, y2: f64) -> Vec<u8> {
     let mut wkb = Vec::new();
     wkb.push(1u8); // little-endian
@@ -565,6 +627,14 @@ mod tests {
     }
 
     #[test]
+    fn test_dataset_with_complex_generated_polygons_opens() {
+        let (_dir, root) = DatasetBuilder::new(6).with_polygon_complexity(12).build();
+        let session = DatasetSession::open(&root).expect("complex polygon dataset should open");
+        assert_eq!(session.manifest().atom_count().get(), 6);
+        assert_eq!(session.catchments().total_rows(), 6);
+    }
+
+    #[test]
     fn test_full_dataset_opens() {
         let (_dir, root) = DatasetBuilder::new(6)
             .with_snap()
@@ -638,5 +708,36 @@ mod tests {
             .build();
         let session = DatasetSession::open(&root).expect("custom snap targets dataset should open");
         assert!(session.snap().is_some());
+    }
+
+    #[test]
+    fn test_generated_polygon_complexity_controls_ring_point_count() {
+        let wkb = generated_wkb_polygon(0.0, 0.0, 2.0, 2.0, 1_500);
+        assert_eq!(wkb[0], 1);
+        assert_eq!(u32_at(&wkb, 1), 3);
+        assert_eq!(u32_at(&wkb, 5), 1);
+        assert_eq!(u32_at(&wkb, 9), 1_500);
+
+        let first = point_at(&wkb, 13);
+        let last = point_at(&wkb, 13 + (1_499 * 16));
+        assert_eq!(first, last);
+    }
+
+    #[test]
+    fn test_polygon_complexity_keeps_rectangle_until_above_default_ring_size() {
+        let wkb = generated_wkb_polygon(0.0, 0.0, 2.0, 2.0, 5);
+        assert_eq!(u32_at(&wkb, 9), 5);
+        assert_eq!(point_at(&wkb, 13), (0.0, 0.0));
+        assert_eq!(point_at(&wkb, 13 + (4 * 16)), (0.0, 0.0));
+    }
+
+    fn u32_at(wkb: &[u8], offset: usize) -> u32 {
+        u32::from_le_bytes(wkb[offset..offset + 4].try_into().unwrap())
+    }
+
+    fn point_at(wkb: &[u8], offset: usize) -> (f64, f64) {
+        let x = f64::from_le_bytes(wkb[offset..offset + 8].try_into().unwrap());
+        let y = f64::from_le_bytes(wkb[offset + 8..offset + 16].try_into().unwrap());
+        (x, y)
     }
 }
