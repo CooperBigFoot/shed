@@ -2,6 +2,15 @@
 
 All notable changes to `shed` (the CLI binary) and `shed-core` (the engine crate) are documented here.
 
+## Unreleased
+
+### Added
+
+- Documented remote HFX dataset locations backed by the object-store
+  integration, including local paths, `file://`, `s3://`, Cloudflare R2 HTTPS
+  URLs, manifest/graph cache behavior, `HFX_CACHE_DIR`, and parquet range
+  reads.
+
 ## 0.1.56 — 2026-04-20
 
 ### Changed

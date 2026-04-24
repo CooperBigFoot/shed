@@ -13,6 +13,9 @@ per-commit Rust crate versioning).
   that only need scalar delineation metadata and area.
 - Added `DelineationResult.geometry_bbox` and cached repeated
   `DelineationResult.geometry_wkb` property access.
+- Documented `pyshed.Engine(...)` dataset strings for local paths, `file://`,
+  `s3://`, and Cloudflare R2 HTTPS URLs, plus remote manifest/graph caching via
+  `HFX_CACHE_DIR` and parquet range-read behavior.
 
 ## [0.1.7] - 2026-04-21
 

@@ -28,6 +28,28 @@ result = engine.delineate(lat=47.3769, lon=8.5417)
 print(result.area_km2)
 ```
 
+`Engine` also accepts dataset root URLs backed by the object-store integration:
+
+```python
+local_engine = pyshed.Engine("/data/hfx/rhine")
+file_url_engine = pyshed.Engine("file:///data/hfx/rhine")
+s3_engine = pyshed.Engine("s3://bucket/path/to/hfx/rhine")
+r2_engine = pyshed.Engine(
+    "https://<account>.r2.cloudflarestorage.com/<bucket>/path/to/hfx/rhine"
+)
+```
+
+Remote dataset sessions cache `manifest.json` and `graph.arrow` under
+`~/.cache/hfx/<fabric_name>/<adapter_version>/` by default. Set
+`HFX_CACHE_DIR=/path/to/cache` before constructing `pyshed.Engine(...)` to use a
+different cache root. Parquet artifacts are read with object-store range reads;
+they are not copied into the cache wholesale.
+
+GDAL raster URI and configuration plumbing is wired through the Python engine,
+but public Cloudflare R2 raster access still depends on the target bucket,
+credentials, and GDAL driver behavior. Verify the specific remote raster dataset
+you plan to use.
+
 For batch delineation:
 
 ```python

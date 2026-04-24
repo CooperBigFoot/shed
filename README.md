@@ -36,6 +36,32 @@ See [`crates/python/README.md`](crates/python/README.md) for the Python
 quickstart and [`crates/python/API.md`](crates/python/API.md) for the full
 developer API reference.
 
+## Dataset locations
+
+`shed` accepts local HFX dataset directories and remote object-store URLs for
+the dataset root. The root must contain the HFX artifacts described by the
+manifest: `manifest.json`, `catchments.parquet`, `graph.arrow`, and optional
+`snap.parquet`, `flow_dir.tif`, and `flow_acc.tif`.
+
+Supported dataset path forms:
+
+| Form | Example |
+|---|---|
+| Local directory | `/data/hfx/rhine` |
+| Local file URL | `file:///data/hfx/rhine` |
+| Amazon S3 URL | `s3://bucket/path/to/hfx/rhine` |
+| Cloudflare R2 HTTPS URL | `https://<account>.r2.cloudflarestorage.com/<bucket>/path/to/hfx/rhine` |
+
+For remote datasets, `manifest.json` and `graph.arrow` are cached locally under
+`~/.cache/hfx/<fabric_name>/<adapter_version>/` by default. Set
+`HFX_CACHE_DIR=/path/to/cache` to override the cache root. Parquet artifacts are
+read through object-store range reads instead of being downloaded wholesale.
+
+Raster URI and GDAL configuration plumbing is present for remote dataset
+sessions. Treat public R2 raster access as environment-dependent until a
+dataset-specific smoke test has verified the target bucket, credentials, and
+GDAL driver behavior.
+
 ## Use it from the CLI
 
 ```bash
