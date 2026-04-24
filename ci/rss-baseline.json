@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "benchmark": "bench_delineation",
+  "description": "Synthetic large-fixture delineation RSS close-out baseline for Phase 3b.7.",
+  "recorded_at_utc": "2026-04-24T23:32:31Z",
+  "git": {
+    "tag": "v0.1.86",
+    "commit": "6bd30f524f012c0b64133762ad9aa95f9f618029"
+  },
+  "package_version": "0.1.86",
+  "platform": {
+    "os": "Darwin",
+    "arch": "arm64",
+    "uname": "Darwin nicolass-macbook-pro-2.home 24.6.0 Darwin Kernel Version 24.6.0: Wed Nov  5 21:30:44 PST 2025; root:xnu-11417.140.69.705.2~1/RELEASE_ARM64_T6041 arm64"
+  },
+  "command": "scripts/measure-rss.sh --bin target/debug/examples/bench_delineation",
+  "measured_command": "target/debug/examples/bench_delineation",
+  "bench_config": {
+    "atoms": 2500,
+    "coords_per_ring": 1500
+  },
+  "result": {
+    "exit_status": 0,
+    "elapsed_ms": 36872,
+    "area_km2": 1107499.9686472395,
+    "polygon_count": 2500,
+    "wkb_bytes": 60032509,
+    "max_rss_bytes": null
+  },
+  "caveat": "max_rss_bytes is null because /usr/bin/time -l completed without a parseable maximum resident set size in this macOS sandbox: time: sysctl kern.clockrate: Operation not permitted"
+}
