@@ -11,6 +11,7 @@ The `pyshed` package exports these names:
 
 - `Engine`
 - `DelineationResult`
+- `AreaOnlyResult`
 - `ShedError`
 - `DatasetError`
 - `ResolutionError`
@@ -56,7 +57,12 @@ Opens an HFX dataset and constructs a delineation engine.
 ### Methods
 
 ```python
-delineate(*, lat: float, lon: float) -> DelineationResult
+delineate(
+    *,
+    lat: float,
+    lon: float,
+    geometry: bool = True,
+) -> DelineationResult | AreaOnlyResult
 ```
 
 Delineates the watershed upstream of a single outlet.
@@ -65,6 +71,15 @@ Delineates the watershed upstream of a single outlet.
 |---|---|---|
 | `lat` | `float` | Outlet latitude in decimal degrees (EPSG:4326) |
 | `lon` | `float` | Outlet longitude in decimal degrees (EPSG:4326) |
+| `geometry` | `bool` | When `True`, return a full `DelineationResult`; when `False`, return `AreaOnlyResult` scalar metadata without geometry accessors |
+
+Type checkers see precise overloads:
+
+```python
+Engine.delineate(*, lat: float, lon: float) -> DelineationResult
+Engine.delineate(*, lat: float, lon: float, geometry=True) -> DelineationResult
+Engine.delineate(*, lat: float, lon: float, geometry=False) -> AreaOnlyResult
+```
 
 #### Exceptions
 
@@ -111,6 +126,7 @@ Returned by `Engine.delineate()` and `Engine.delineate_batch()`.
 | `resolution_method` | `str` | Debug/provenance string describing how outlet resolution happened |
 | `upstream_atom_ids` | `list[int]` | Upstream atom IDs including the terminal atom |
 | `area_km2` | `float` | Geodesic watershed area in square kilometres |
+| `geometry_bbox` | `tuple[float, float, float, float] \| None` | Geometry bounds as `(minx, miny, maxx, maxy)`, or `None` for empty geometry |
 | `geometry_wkb` | `bytes` | Watershed geometry encoded as OGC WKB bytes |
 
 ### Methods
@@ -127,6 +143,25 @@ __repr__() -> str
 
 Returns a concise debug representation including the terminal atom ID, area,
 and upstream atom count.
+
+## AreaOnlyResult
+
+Returned by `Engine.delineate(..., geometry=False)`.
+
+This result exposes scalar metadata and area only. It intentionally does not
+provide `geometry_wkb`, `geometry_bbox`, or `to_geojson()`.
+
+### Properties
+
+| Property | Type | Meaning |
+|---|---|---|
+| `terminal_atom_id` | `int` | Terminal HFX atom ID that the outlet resolved to |
+| `input_outlet` | `tuple[float, float]` | Original outlet as `(lon, lat)` |
+| `resolved_outlet` | `tuple[float, float]` | Outlet used for resolution as `(lon, lat)` |
+| `refined_outlet` | `tuple[float, float] \| None` | Raster-refined outlet as `(lon, lat)`, or `None` if refinement was not applied |
+| `resolution_method` | `str` | Debug/provenance string describing how outlet resolution happened |
+| `upstream_atom_ids` | `list[int]` | Upstream atom IDs including the terminal atom |
+| `area_km2` | `float` | Geodesic watershed area in square kilometres |
 
 ## Exceptions
 

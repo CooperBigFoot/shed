@@ -20,6 +20,7 @@ use pyo3::prelude::*;
 fn _pyshed(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<engine::PyEngine>()?;
     m.add_class::<result::PyDelineationResult>()?;
+    m.add_class::<result::PyAreaOnlyResult>()?;
     m.add("ShedError", m.py().get_type::<error::ShedError>())?;
     m.add("DatasetError", m.py().get_type::<error::DatasetError>())?;
     m.add(

@@ -37,6 +37,7 @@ _preseed_bundled_data()
 
 from pyshed import _pyshed
 from pyshed._pyshed import (
+    AreaOnlyResult,
     AssemblyError,
     DatasetError,
     DelineationResult,
@@ -46,6 +47,7 @@ from pyshed._pyshed import (
 )
 
 __all__ = [
+    "AreaOnlyResult",
     "AssemblyError",
     "DatasetError",
     "DelineationResult",

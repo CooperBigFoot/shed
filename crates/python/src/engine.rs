@@ -11,7 +11,7 @@ use shed_gdal::{GdalGeometryRepair, GdalRasterSource};
 
 use crate::config::EngineConfig;
 use crate::error::engine_err_to_py;
-use crate::result::PyDelineationResult;
+use crate::result::{PyAreaOnlyResult, PyDelineationResult};
 
 /// Validate that `lat` is in [-90, 90] and `lon` is in [-180, 180].
 fn validate_coord(lat: f64, lon: f64) -> PyResult<()> {
@@ -26,6 +26,11 @@ fn validate_coord(lat: f64, lon: f64) -> PyResult<()> {
         )));
     }
     Ok(())
+}
+
+enum PyDelineateOutput {
+    Geometry(PyDelineationResult),
+    AreaOnly(PyAreaOnlyResult),
 }
 
 /// Watershed delineation engine exposed to Python.
@@ -100,24 +105,41 @@ impl PyEngine {
     ///     Outlet latitude in decimal degrees (EPSG:4326).
     /// lon:
     ///     Outlet longitude in decimal degrees (EPSG:4326).
+    /// geometry:
+    ///     When `True`, return a full `DelineationResult`. When `False`,
+    ///     return scalar metadata and area without retaining geometry.
     ///
     /// Returns
     /// -------
-    /// DelineationResult
-    #[pyo3(signature = (*, lat, lon))]
-    fn delineate(&self, py: Python<'_>, lat: f64, lon: f64) -> PyResult<PyDelineationResult> {
+    /// DelineationResult | AreaOnlyResult
+    #[pyo3(signature = (*, lat, lon, geometry=true))]
+    fn delineate(&self, py: Python<'_>, lat: f64, lon: f64, geometry: bool) -> PyResult<Py<PyAny>> {
         validate_coord(lat, lon)?;
 
         let engine = self.engine.clone();
         let options = self.config.to_delineation_options()?;
 
-        py.allow_threads(move || {
+        let output = py.allow_threads(move || {
             let coord = GeoCoord::new(lon, lat);
-            engine
-                .delineate(coord, &options)
-                .map(PyDelineationResult::from_result)
-                .map_err(engine_err_to_py)
-        })
+            if geometry {
+                engine
+                    .delineate(coord, &options)
+                    .map(PyDelineationResult::from_result)
+                    .map(PyDelineateOutput::Geometry)
+                    .map_err(engine_err_to_py)
+            } else {
+                engine
+                    .delineate_area_only(coord, &options)
+                    .map(PyAreaOnlyResult::from_result)
+                    .map(PyDelineateOutput::AreaOnly)
+                    .map_err(engine_err_to_py)
+            }
+        })?;
+
+        match output {
+            PyDelineateOutput::Geometry(result) => Ok(Py::new(py, result)?.into_any()),
+            PyDelineateOutput::AreaOnly(result) => Ok(Py::new(py, result)?.into_any()),
+        }
     }
 
     /// Delineate watersheds for a batch of outlets sharing the same options.

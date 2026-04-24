@@ -111,6 +111,70 @@ impl DelineationResult {
     }
 }
 
+// ── DelineationAreaOnlyResult ────────────────────────────────────────────────
+
+/// The scalar output of a successful [`Engine::delineate_area_only`] call.
+#[derive(Debug, Clone)]
+pub struct DelineationAreaOnlyResult {
+    terminal_atom_id: AtomId,
+    input_outlet: GeoCoord,
+    resolved_outlet: GeoCoord,
+    resolution_method: ResolutionMethod,
+    upstream_atom_ids: Vec<AtomId>,
+    refinement: RefinementOutcome,
+    area_km2: AreaKm2,
+}
+
+impl DelineationAreaOnlyResult {
+    /// Consume a full delineation result while dropping the watershed geometry.
+    pub fn from_delineation_result(result: DelineationResult) -> Self {
+        Self {
+            terminal_atom_id: result.terminal_atom_id,
+            input_outlet: result.input_outlet,
+            resolved_outlet: result.resolved_outlet,
+            resolution_method: result.resolution_method,
+            upstream_atom_ids: result.upstream_atom_ids,
+            refinement: result.refinement,
+            area_km2: result.area_km2,
+        }
+    }
+
+    /// Return the terminal atom ID that the outlet resolved to.
+    pub fn terminal_atom_id(&self) -> AtomId {
+        self.terminal_atom_id
+    }
+
+    /// Return the original input outlet coordinate.
+    pub fn input_outlet(&self) -> GeoCoord {
+        self.input_outlet
+    }
+
+    /// Return the resolved outlet coordinate (may differ after snapping).
+    pub fn resolved_outlet(&self) -> GeoCoord {
+        self.resolved_outlet
+    }
+
+    /// Return a reference to the resolution provenance.
+    pub fn resolution_method(&self) -> &ResolutionMethod {
+        &self.resolution_method
+    }
+
+    /// Return the slice of all upstream atom IDs (including the terminal).
+    pub fn upstream_atom_ids(&self) -> &[AtomId] {
+        &self.upstream_atom_ids
+    }
+
+    /// Return a reference to the refinement outcome.
+    pub fn refinement(&self) -> &RefinementOutcome {
+        &self.refinement
+    }
+
+    /// Return the geodesic watershed area in km².
+    pub fn area_km2(&self) -> AreaKm2 {
+        self.area_km2
+    }
+}
+
 // ── DelineationOptions ────────────────────────────────────────────────────────
 
 /// Per-call configuration knobs for [`Engine::delineate`].
@@ -347,6 +411,31 @@ impl Engine {
             geometry,
             area_km2,
         })
+    }
+
+    /// Delineate the watershed upstream of `outlet` and return scalar metadata only.
+    ///
+    /// This conservative implementation reuses [`Engine::delineate`] for the
+    /// hydrologic work, then drops the assembled geometry before returning.
+    ///
+    /// # Errors
+    ///
+    /// | Variant | When |
+    /// |---|---|
+    /// | [`EngineError::Resolution`] | Outlet cannot be resolved to an atom |
+    /// | [`EngineError::Traversal`] | Upstream graph traversal fails |
+    /// | [`EngineError::TerminalCatchmentFetch`] | Terminal catchment row is missing (refinement only) |
+    /// | [`EngineError::TerminalCatchmentDecode`] | Terminal catchment WKB is invalid (refinement only) |
+    /// | [`EngineError::Refinement`] | Raster snap fails (refinement only) |
+    /// | [`EngineError::Assembly`] | Watershed geometry assembly fails |
+    #[instrument(skip(self, options), fields(outlet = %outlet))]
+    pub fn delineate_area_only(
+        &self,
+        outlet: GeoCoord,
+        options: &DelineationOptions,
+    ) -> Result<DelineationAreaOnlyResult, EngineError> {
+        self.delineate(outlet, options)
+            .map(DelineationAreaOnlyResult::from_delineation_result)
     }
 
     /// Delineate watersheds for a heterogeneous batch of (outlet, options) pairs.

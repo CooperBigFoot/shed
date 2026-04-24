@@ -5,6 +5,15 @@ All notable changes to `pyshed` are documented in this file. The format is based
 [PEP 440](https://peps.python.org/pep-0440/) versioning (decoupled from the workspace's
 per-commit Rust crate versioning).
 
+## [Unreleased]
+
+### Added
+
+- Added `AreaOnlyResult` via `Engine.delineate(..., geometry=False)` for callers
+  that only need scalar delineation metadata and area.
+- Added `DelineationResult.geometry_bbox` and cached repeated
+  `DelineationResult.geometry_wkb` property access.
+
 ## [0.1.7] - 2026-04-21
 
 ### Changed
