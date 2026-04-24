@@ -1,8 +1,8 @@
 //! Python exception types for pyshed.
 
+use pyo3::PyErr;
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
-use pyo3::PyErr;
 
 // The first argument to `create_exception!` sets the `__module__` attribute
 // that appears in Python tracebacks. We use `pyshed` (not `_pyshed`) so that

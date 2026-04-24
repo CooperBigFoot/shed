@@ -9,7 +9,7 @@ use hfx_core::{AreaKm2, AtomId, BoundingBox, CatchmentAtom, WkbGeometry};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use tracing::{debug, instrument};
 
-use super::{extract_row_group_bbox, require_column, BboxColIndices};
+use super::{BboxColIndices, extract_row_group_bbox, require_column};
 use crate::error::SessionError;
 
 const ARTIFACT: &str = "catchments.parquet";

@@ -1,8 +1,8 @@
 //! Engine configuration bridged from Python keyword arguments.
 
-use shed_core::algo::{CleanEpsilon, SnapThreshold, DEFAULT_CLEANING_EPSILON};
-use shed_core::resolver::{ResolverConfig, SearchRadiusMetres, SnapStrategy};
 use shed_core::DelineationOptions;
+use shed_core::algo::{CleanEpsilon, DEFAULT_CLEANING_EPSILON, SnapThreshold};
+use shed_core::resolver::{ResolverConfig, SearchRadiusMetres, SnapStrategy};
 
 /// Holds validated per-engine configuration supplied at construction time.
 #[derive(Clone)]

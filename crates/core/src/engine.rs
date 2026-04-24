@@ -8,15 +8,15 @@ use tracing::instrument;
 
 use crate::algo::coord::GeoCoord;
 use crate::algo::{
-    collect_upstream, decode_wkb_multi_polygon, encode_wkb_multi_polygon,
-    refine_terminal_from_source, AreaKm2, CleanEpsilon, GeometryRepair, HoleFillMode, RasterSource,
+    AreaKm2, CleanEpsilon, DEFAULT_CLEANING_EPSILON, GeometryRepair, HoleFillMode, RasterSource,
     RefinementError, SnapThreshold, TraversalError, WkbDecodeError, WkbEncodeError,
-    DEFAULT_CLEANING_EPSILON,
+    collect_upstream, decode_wkb_multi_polygon, encode_wkb_multi_polygon,
+    refine_terminal_from_source,
 };
-use crate::assembly::{assemble_watershed, AssemblyOptions};
+use crate::assembly::{AssemblyOptions, assemble_watershed};
 use crate::error::SessionError;
 use crate::resolver::{
-    resolve_outlet, OutletResolutionError, ResolutionMethod, ResolvedOutlet, ResolverConfig,
+    OutletResolutionError, ResolutionMethod, ResolvedOutlet, ResolverConfig, resolve_outlet,
 };
 use crate::session::DatasetSession;
 

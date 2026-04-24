@@ -7,9 +7,9 @@ use hfx_core::{AtomId, WkbGeometry};
 use tracing::{debug, instrument};
 
 use crate::algo::{
-    decode_wkb_multi_polygon, dissolve, AreaKm2, CleanEpsilon, DissolveError, GeometryRepair,
-    GeometryRepairError, HoleFillMode, UpstreamAtoms, WatershedAreaError, WatershedGeometry,
-    WkbDecodeError,
+    AreaKm2, CleanEpsilon, DissolveError, GeometryRepair, GeometryRepairError, HoleFillMode,
+    UpstreamAtoms, WatershedAreaError, WatershedGeometry, WkbDecodeError, decode_wkb_multi_polygon,
+    dissolve,
 };
 use crate::error::SessionError;
 use crate::reader::catchment_store::{CatchmentGeometryRow, CatchmentStore};
@@ -172,14 +172,14 @@ pub(crate) fn assemble_watershed(
     let mut geometries = Vec::with_capacity(upstream.len());
 
     for atom_id in upstream.atom_ids() {
-        if *atom_id == terminal {
-            if let Some(override_geometry) = refined_terminal_geometry {
-                if override_geometry.0.is_empty() {
-                    return Err(AssemblyError::EmptyRefinedTerminalGeometry { atom_id: terminal });
-                }
-                geometries.push(override_geometry.clone());
-                continue;
+        if *atom_id == terminal
+            && let Some(override_geometry) = refined_terminal_geometry
+        {
+            if override_geometry.0.is_empty() {
+                return Err(AssemblyError::EmptyRefinedTerminalGeometry { atom_id: terminal });
             }
+            geometries.push(override_geometry.clone());
+            continue;
         }
 
         let geometry_wkb =
@@ -265,7 +265,7 @@ mod tests {
 
     use super::*;
     use crate::algo::{
-        collect_upstream, GeometryRepairError, HoleFillMode, DEFAULT_CLEANING_EPSILON,
+        DEFAULT_CLEANING_EPSILON, GeometryRepairError, HoleFillMode, collect_upstream,
     };
 
     #[derive(Clone)]

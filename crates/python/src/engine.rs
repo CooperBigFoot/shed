@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
+use shed_core::Engine;
 use shed_core::algo::GeoCoord;
 use shed_core::session::DatasetSession;
-use shed_core::Engine;
 use shed_gdal::{GdalGeometryRepair, GdalRasterSource};
 
 use crate::config::EngineConfig;

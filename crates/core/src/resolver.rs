@@ -784,16 +784,20 @@ mod tests {
 
     #[test]
     fn config_tolerance_rejects_nan() {
-        assert!(ResolverConfig::new()
-            .with_distance_tolerance(f64::NAN)
-            .is_err());
+        assert!(
+            ResolverConfig::new()
+                .with_distance_tolerance(f64::NAN)
+                .is_err()
+        );
     }
 
     #[test]
     fn config_tolerance_rejects_infinity() {
-        assert!(ResolverConfig::new()
-            .with_distance_tolerance(f64::INFINITY)
-            .is_err());
+        assert!(
+            ResolverConfig::new()
+                .with_distance_tolerance(f64::INFINITY)
+                .is_err()
+        );
     }
 
     // ── Group C: search_bbox ──────────────────────────────────────────────────
