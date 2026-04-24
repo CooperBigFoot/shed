@@ -8,6 +8,7 @@ use object_store::{ObjectStore, ObjectStoreExt};
 use tracing::{debug, info, instrument};
 use url::Url;
 
+use crate::cache::RemoteArtifactCache;
 use crate::error::SessionError;
 use crate::reader;
 use crate::reader::catchment_store::CatchmentStore;
@@ -244,6 +245,20 @@ impl DatasetSession {
         root: &ObjectPath,
         url: &Url,
     ) -> Result<Self, SessionError> {
+        let cache = RemoteArtifactCache::configured()?;
+        if let Some(cached) = cache.read_entry_for_source(url, root)? {
+            debug!(
+                fabric = cached.manifest.fabric_name(),
+                atoms = cached.manifest.atom_count().get(),
+                graph_atoms = cached.graph.len(),
+                "remote manifest and graph parsed from cache"
+            );
+
+            return Err(SessionError::RemoteDatasetNotSupported {
+                url: url.as_str().to_string(),
+            });
+        }
+
         let manifest_path = remote_artifact_path(root, "manifest.json");
         let graph_path = remote_artifact_path(root, "graph.arrow");
 
@@ -251,7 +266,8 @@ impl DatasetSession {
         let manifest = reader::manifest::read_manifest_from_bytes(&manifest_bytes)?;
 
         let graph_bytes = read_remote_artifact(store, graph_path, "graph.arrow")?;
-        let graph = reader::graph::load_graph_from_bytes(graph_bytes)?;
+        let graph = reader::graph::load_graph_from_bytes(graph_bytes.clone())?;
+        cache.write_manifest_graph(url, root, &manifest, &manifest_bytes, &graph_bytes)?;
 
         debug!(
             fabric = manifest.fabric_name(),
@@ -325,8 +341,10 @@ fn read_remote_artifact(
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::io::Cursor;
-    use std::sync::Arc;
+    use std::path::Path;
+    use std::sync::{Arc, Mutex, MutexGuard};
 
     use arrow::array::{Int64Array, Int64Builder, ListBuilder};
     use arrow::datatypes::{DataType, Field, Schema};
@@ -340,6 +358,42 @@ mod tests {
     use super::DatasetSession;
     use crate::error::SessionError;
     use crate::runtime::RT;
+
+    static CACHE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct CacheEnv {
+        _guard: MutexGuard<'static, ()>,
+        previous: Option<OsString>,
+    }
+
+    impl CacheEnv {
+        fn set(path: &Path) -> Self {
+            let guard = CACHE_ENV_LOCK.lock().unwrap();
+            let previous = std::env::var_os("HFX_CACHE_DIR");
+            // SAFETY: these tests serialize all HFX_CACHE_DIR mutations with
+            // CACHE_ENV_LOCK and restore the prior value before unlocking.
+            unsafe {
+                std::env::set_var("HFX_CACHE_DIR", path);
+            }
+            Self {
+                _guard: guard,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for CacheEnv {
+        fn drop(&mut self) {
+            // SAFETY: CACHE_ENV_LOCK is still held while the prior environment
+            // value is restored.
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var("HFX_CACHE_DIR", value),
+                    None => std::env::remove_var("HFX_CACHE_DIR"),
+                }
+            }
+        }
+    }
 
     fn manifest_bytes() -> String {
         serde_json::json!({
@@ -386,10 +440,7 @@ mod tests {
         writer.into_inner().unwrap().into_inner()
     }
 
-    #[test]
-    fn open_remote_fetches_manifest_and_graph_before_not_supported() {
-        let store = Arc::new(InMemory::new());
-        let root = ObjectPath::from("dataset/root");
+    fn put_remote_manifest_and_graph(store: &Arc<InMemory>, root: &ObjectPath) {
         RT.block_on(async {
             store
                 .put(
@@ -406,6 +457,15 @@ mod tests {
                 .await
                 .unwrap();
         });
+    }
+
+    #[test]
+    fn open_remote_fetches_manifest_and_graph_before_not_supported() {
+        let cache_dir = tempfile::TempDir::new().unwrap();
+        let _cache_env = CacheEnv::set(cache_dir.path());
+        let store = Arc::new(InMemory::new());
+        let root = ObjectPath::from("dataset/root");
+        put_remote_manifest_and_graph(&store, &root);
         let url = Url::parse("s3://shed-test/dataset/root").unwrap();
 
         let err = DatasetSession::open_remote(store.as_ref(), &root, &url).unwrap_err();
@@ -414,10 +474,98 @@ mod tests {
             err,
             SessionError::RemoteDatasetNotSupported { .. }
         ));
+        assert!(
+            cache_dir
+                .path()
+                .join("testfabric")
+                .join("test-v1")
+                .join("manifest.json")
+                .is_file()
+        );
+        assert!(
+            cache_dir
+                .path()
+                .join("testfabric")
+                .join("test-v1")
+                .join("graph.arrow")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn open_remote_uses_cached_manifest_and_graph_when_remote_is_empty() {
+        let cache_dir = tempfile::TempDir::new().unwrap();
+        let _cache_env = CacheEnv::set(cache_dir.path());
+        let store = Arc::new(InMemory::new());
+        let root = ObjectPath::from("dataset/root");
+        put_remote_manifest_and_graph(&store, &root);
+        let url = Url::parse("s3://shed-test/dataset/root").unwrap();
+
+        let first_err = DatasetSession::open_remote(store.as_ref(), &root, &url).unwrap_err();
+        assert!(matches!(
+            first_err,
+            SessionError::RemoteDatasetNotSupported { .. }
+        ));
+
+        let empty_store = Arc::new(InMemory::new());
+        let second_err =
+            DatasetSession::open_remote(empty_store.as_ref(), &root, &url).unwrap_err();
+
+        assert!(matches!(
+            second_err,
+            SessionError::RemoteDatasetNotSupported { .. }
+        ));
+    }
+
+    #[test]
+    fn open_remote_does_not_use_cache_entry_from_different_source() {
+        let cache_dir = tempfile::TempDir::new().unwrap();
+        let _cache_env = CacheEnv::set(cache_dir.path());
+        let root_a = ObjectPath::from("dataset/a");
+        let url_a = Url::parse("s3://shed-test/dataset/a").unwrap();
+        let store_a = Arc::new(InMemory::new());
+        put_remote_manifest_and_graph(&store_a, &root_a);
+
+        let first_err = DatasetSession::open_remote(store_a.as_ref(), &root_a, &url_a).unwrap_err();
+        assert!(matches!(
+            first_err,
+            SessionError::RemoteDatasetNotSupported { .. }
+        ));
+
+        let root_b = ObjectPath::from("dataset/b");
+        let url_b = Url::parse("s3://shed-test/dataset/b").unwrap();
+        let empty_store = Arc::new(InMemory::new());
+        let unmapped_err =
+            DatasetSession::open_remote(empty_store.as_ref(), &root_b, &url_b).unwrap_err();
+        assert!(matches!(
+            unmapped_err,
+            SessionError::RemoteArtifactRead {
+                artifact: "manifest.json",
+                ..
+            }
+        ));
+
+        let store_b = Arc::new(InMemory::new());
+        put_remote_manifest_and_graph(&store_b, &root_b);
+        let mapped_err =
+            DatasetSession::open_remote(store_b.as_ref(), &root_b, &url_b).unwrap_err();
+        assert!(matches!(
+            mapped_err,
+            SessionError::RemoteDatasetNotSupported { .. }
+        ));
+
+        let cached_b_err =
+            DatasetSession::open_remote(empty_store.as_ref(), &root_b, &url_b).unwrap_err();
+        assert!(matches!(
+            cached_b_err,
+            SessionError::RemoteDatasetNotSupported { .. }
+        ));
     }
 
     #[test]
     fn open_remote_reports_missing_manifest() {
+        let cache_dir = tempfile::TempDir::new().unwrap();
+        let _cache_env = CacheEnv::set(cache_dir.path());
         let store = Arc::new(InMemory::new());
         let root = ObjectPath::from("dataset/root");
         let url = Url::parse("s3://shed-test/dataset/root").unwrap();

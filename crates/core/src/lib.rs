@@ -3,6 +3,7 @@
 pub mod algo;
 #[allow(dead_code)]
 pub(crate) mod assembly;
+pub(crate) mod cache;
 pub mod engine;
 pub mod error;
 pub mod reader;

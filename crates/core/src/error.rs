@@ -216,6 +216,32 @@ pub enum SessionError {
         source: Box<object_store::Error>,
     },
 
+    /// Fired when the default user cache directory cannot be located.
+    #[error("could not locate user cache directory for remote artifact cache")]
+    CacheRootUnavailable,
+
+    /// Fired when reading from or writing to the remote artifact cache fails.
+    #[error("cache {operation} failed at {path}: {source}")]
+    CacheIo {
+        /// Filesystem operation that failed.
+        operation: &'static str,
+        /// Cache path involved in the operation.
+        path: String,
+        /// Underlying I/O error.
+        source: std::io::Error,
+    },
+
+    /// Fired when serializing cache metadata fails.
+    #[error("cache metadata {operation} failed at {path}: {source}")]
+    CacheJson {
+        /// Metadata operation that failed.
+        operation: &'static str,
+        /// Cache metadata path involved in the operation.
+        path: String,
+        /// Underlying JSON error.
+        source: serde_json::Error,
+    },
+
     /// Fired when a remote dataset source parses successfully but the session
     /// reader does not yet support loading remote artifacts.
     #[error("remote dataset opening is not yet supported for {url}")]
@@ -300,6 +326,32 @@ impl SessionError {
             artifact,
             path: path.into(),
             source: Box::new(source),
+        }
+    }
+
+    /// Construct a [`SessionError::CacheIo`] variant.
+    pub(crate) fn cache_io(
+        operation: &'static str,
+        path: &std::path::Path,
+        source: std::io::Error,
+    ) -> Self {
+        Self::CacheIo {
+            operation,
+            path: path.display().to_string(),
+            source,
+        }
+    }
+
+    /// Construct a [`SessionError::CacheJson`] variant.
+    pub(crate) fn cache_json(
+        operation: &'static str,
+        path: &std::path::Path,
+        source: serde_json::Error,
+    ) -> Self {
+        Self::CacheJson {
+            operation,
+            path: path.display().to_string(),
+            source,
         }
     }
 }
