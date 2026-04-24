@@ -18,22 +18,32 @@ use crate::source::DatasetSource;
 
 /// Validated paths to the optional raster pair.
 ///
-/// Stores paths only — no reading, no GDAL.
+/// Stores raster URIs only — no reading, no GDAL.
 #[derive(Debug, Clone)]
 pub struct RasterPaths {
-    flow_dir: PathBuf,
-    flow_acc: PathBuf,
+    flow_dir: String,
+    flow_acc: String,
 }
 
 impl RasterPaths {
-    /// Return the path to the flow direction raster.
-    pub fn flow_dir(&self) -> &Path {
+    /// Return the URI string for the flow direction raster.
+    pub fn flow_dir_uri(&self) -> &str {
         &self.flow_dir
     }
 
-    /// Return the path to the flow accumulation raster.
-    pub fn flow_acc(&self) -> &Path {
+    /// Return the URI string for the flow accumulation raster.
+    pub fn flow_acc_uri(&self) -> &str {
         &self.flow_acc
+    }
+
+    /// Return the path view of the flow direction raster.
+    pub fn flow_dir(&self) -> &Path {
+        Path::new(&self.flow_dir)
+    }
+
+    /// Return the path view of the flow accumulation raster.
+    pub fn flow_acc(&self) -> &Path {
+        Path::new(&self.flow_acc)
     }
 }
 
@@ -216,8 +226,8 @@ impl DatasetSession {
 
         let raster_paths = if matches!(manifest.rasters(), RasterAvailability::Present(_)) {
             Some(RasterPaths {
-                flow_dir: root.join("flow_dir.tif"),
-                flow_acc: root.join("flow_acc.tif"),
+                flow_dir: raster_uri_string(&root.join("flow_dir.tif")),
+                flow_acc: raster_uri_string(&root.join("flow_acc.tif")),
             })
         } else {
             None
@@ -319,6 +329,10 @@ impl DatasetSession {
 
 fn remote_artifact_path(root: &ObjectPath, artifact: &'static str) -> ObjectPath {
     root.clone().join(artifact)
+}
+
+fn raster_uri_string(path: &Path) -> String {
+    path.display().to_string()
 }
 
 fn read_remote_artifact(

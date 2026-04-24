@@ -518,8 +518,8 @@ impl Engine {
         // Refine
         let refinement_result = refine_terminal_from_source(
             raster_source,
-            raster_paths.flow_dir(),
-            raster_paths.flow_acc(),
+            raster_paths.flow_dir_uri(),
+            raster_paths.flow_acc_uri(),
             &terminal_polygon,
             resolved.resolved_coord,
             options.snap_threshold,

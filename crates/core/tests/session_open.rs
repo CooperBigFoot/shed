@@ -501,6 +501,14 @@ fn test_open_valid_full_dataset() {
     let rp = session.raster_paths().expect("raster_paths should be Some");
     assert_eq!(rp.flow_dir(), root.join("flow_dir.tif").as_path());
     assert_eq!(rp.flow_acc(), root.join("flow_acc.tif").as_path());
+    assert_eq!(
+        rp.flow_dir_uri(),
+        root.join("flow_dir.tif").display().to_string()
+    );
+    assert_eq!(
+        rp.flow_acc_uri(),
+        root.join("flow_acc.tif").display().to_string()
+    );
 }
 
 #[test]

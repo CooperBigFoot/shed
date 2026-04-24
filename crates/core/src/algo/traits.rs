@@ -2,8 +2,6 @@
 //!
 //! These traits are defined in `shed-core` and implemented by `shed-gdal`.
 
-use std::path::Path;
-
 use geo::{MultiPolygon, Rect};
 
 use crate::algo::accumulation_tile::AccumulationTile;
@@ -76,41 +74,41 @@ pub enum GeometryRepairError {
     StillInvalid,
 }
 
-/// Load windowed raster tiles from GeoTIFF files.
+/// Load windowed raster tiles from GeoTIFF files or GDAL virtual paths.
 ///
 /// The canonical implementation uses GDAL and lives in `shed-gdal`.
 pub trait RasterSource {
-    /// Load flow direction values within `bbox` from the GeoTIFF at `path`.
+    /// Load flow direction values within `bbox` from the raster URI at `uri`.
     ///
     /// # Errors
     ///
     /// | Variant | When |
     /// |---|---|
-    /// | [`RasterSourceError::FileNotFound`] | File does not exist on disk |
+    /// | [`RasterSourceError::FileNotFound`] | Local file does not exist on disk |
     /// | [`RasterSourceError::OpenFailed`] | Backend cannot open the dataset |
     /// | [`RasterSourceError::ReadFailed`] | Backend cannot read the window |
     /// | [`RasterSourceError::EmptyWindow`] | Bbox maps to zero pixels |
     /// | [`RasterSourceError::TileConstruction`] | Tile construction fails after read |
     fn load_flow_direction(
         &self,
-        path: &Path,
+        uri: &str,
         bbox: &Rect<f64>,
     ) -> Result<FlowDirectionTile<Raw>, RasterSourceError>;
 
-    /// Load flow accumulation values within `bbox` from the GeoTIFF at `path`.
+    /// Load flow accumulation values within `bbox` from the raster URI at `uri`.
     ///
     /// # Errors
     ///
     /// | Variant | When |
     /// |---|---|
-    /// | [`RasterSourceError::FileNotFound`] | File does not exist on disk |
+    /// | [`RasterSourceError::FileNotFound`] | Local file does not exist on disk |
     /// | [`RasterSourceError::OpenFailed`] | Backend cannot open the dataset |
     /// | [`RasterSourceError::ReadFailed`] | Backend cannot read the window |
     /// | [`RasterSourceError::EmptyWindow`] | Bbox maps to zero pixels |
     /// | [`RasterSourceError::TileConstruction`] | Tile construction fails after read |
     fn load_accumulation(
         &self,
-        path: &Path,
+        uri: &str,
         bbox: &Rect<f64>,
     ) -> Result<AccumulationTile<Raw>, RasterSourceError>;
 }

@@ -20,8 +20,6 @@
 //! outside the coarse boundary is lost — if the coarse polygon is too tight,
 //! refinement can only shrink, never correct outward.
 
-use std::path::Path;
-
 use geo::{BoundingRect, MultiPolygon};
 use tracing::{debug, info, instrument};
 
@@ -279,8 +277,8 @@ pub fn refine_terminal(
 #[instrument(skip(source, terminal_polygon))]
 pub fn refine_terminal_from_source(
     source: &dyn RasterSource,
-    flow_dir_path: &Path,
-    flow_acc_path: &Path,
+    flow_dir_uri: &str,
+    flow_acc_uri: &str,
     terminal_polygon: &MultiPolygon<f64>,
     outlet: GeoCoord,
     threshold: SnapThreshold,
@@ -289,8 +287,8 @@ pub fn refine_terminal_from_source(
         .bounding_rect()
         .ok_or(RefinementError::DegenerateTerminalPolygon)?;
 
-    let flow_dir = source.load_flow_direction(flow_dir_path, &bbox)?;
-    let accumulation = source.load_accumulation(flow_acc_path, &bbox)?;
+    let flow_dir = source.load_flow_direction(flow_dir_uri, &bbox)?;
+    let accumulation = source.load_accumulation(flow_acc_uri, &bbox)?;
 
     refine_terminal(terminal_polygon, outlet, flow_dir, accumulation, threshold)
 }
@@ -982,7 +980,7 @@ mod tests {
         impl RasterSource for MockRasterSource {
             fn load_flow_direction(
                 &self,
-                _path: &Path,
+                _uri: &str,
                 _bbox: &Rect<f64>,
             ) -> Result<FlowDirectionTile<Raw>, RasterSourceError> {
                 Ok(self.flow_dir.clone())
@@ -990,7 +988,7 @@ mod tests {
 
             fn load_accumulation(
                 &self,
-                _path: &Path,
+                _uri: &str,
                 _bbox: &Rect<f64>,
             ) -> Result<AccumulationTile<Raw>, RasterSourceError> {
                 Ok(self.accumulation.clone())
@@ -1004,8 +1002,8 @@ mod tests {
 
         let loader_result = refine_terminal_from_source(
             &source,
-            Path::new("flow.tif"),
-            Path::new("acc.tif"),
+            "flow.tif",
+            "acc.tif",
             &terminal_polygon,
             outlet,
             threshold,
@@ -1043,7 +1041,7 @@ mod tests {
         impl RasterSource for FailingRasterSource {
             fn load_flow_direction(
                 &self,
-                _path: &Path,
+                _uri: &str,
                 _bbox: &Rect<f64>,
             ) -> Result<FlowDirectionTile<Raw>, RasterSourceError> {
                 Err(RasterSourceError::FileNotFound {
@@ -1053,7 +1051,7 @@ mod tests {
 
             fn load_accumulation(
                 &self,
-                _path: &Path,
+                _uri: &str,
                 _bbox: &Rect<f64>,
             ) -> Result<AccumulationTile<Raw>, RasterSourceError> {
                 Err(RasterSourceError::FileNotFound {
@@ -1068,8 +1066,8 @@ mod tests {
 
         let err = refine_terminal_from_source(
             &FailingRasterSource,
-            Path::new("flow.tif"),
-            Path::new("acc.tif"),
+            "flow.tif",
+            "acc.tif",
             &terminal_polygon,
             outlet,
             threshold,
@@ -1105,7 +1103,7 @@ mod tests {
         impl RasterSource for BboxCapturingSource {
             fn load_flow_direction(
                 &self,
-                _path: &Path,
+                _uri: &str,
                 bbox: &Rect<f64>,
             ) -> Result<FlowDirectionTile<Raw>, RasterSourceError> {
                 *self.captured_bbox.lock().unwrap() = Some(*bbox);
@@ -1114,7 +1112,7 @@ mod tests {
 
             fn load_accumulation(
                 &self,
-                _path: &Path,
+                _uri: &str,
                 _bbox: &Rect<f64>,
             ) -> Result<AccumulationTile<Raw>, RasterSourceError> {
                 Ok(self.accumulation.clone())
@@ -1136,8 +1134,8 @@ mod tests {
         // just that the bbox was computed correctly from the polygon geometry.
         let _ = refine_terminal_from_source(
             &source,
-            Path::new("flow.tif"),
-            Path::new("acc.tif"),
+            "flow.tif",
+            "acc.tif",
             &terminal_polygon,
             outlet,
             threshold,

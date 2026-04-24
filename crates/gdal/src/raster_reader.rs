@@ -4,8 +4,6 @@
 //! sub-region specified by a bounding box, reducing memory pressure for large
 //! basins.
 
-use std::path::Path;
-
 use gdal::Dataset;
 use geo::Rect;
 use hfx_core::FlowDirEncoding;
@@ -19,6 +17,7 @@ use shed_core::algo::raster_tile::RasterTile;
 use shed_core::algo::tile_state::Raw;
 use shed_core::algo::traits::{RasterSource, RasterSourceError};
 
+use crate::config::{GdalConfig, ensure_gdal_configured};
 use crate::error::RasterReadError;
 
 /// GDAL-backed implementation of [`RasterSource`].
@@ -29,6 +28,7 @@ use crate::error::RasterReadError;
 #[derive(Debug, Clone)]
 pub struct GdalRasterSource {
     encoding: FlowDirEncoding,
+    config: GdalConfig,
 }
 
 impl GdalRasterSource {
@@ -36,12 +36,22 @@ impl GdalRasterSource {
     pub fn new() -> Self {
         Self {
             encoding: FlowDirEncoding::Esri,
+            config: GdalConfig::new(),
         }
     }
 
     /// Set the flow direction encoding for this source (builder method).
     pub fn with_encoding(encoding: FlowDirEncoding) -> Self {
-        Self { encoding }
+        Self {
+            encoding,
+            config: GdalConfig::new(),
+        }
+    }
+
+    /// Set process-wide GDAL configuration inputs for this source.
+    pub fn with_gdal_config(mut self, config: GdalConfig) -> Self {
+        self.config = config;
+        self
     }
 }
 
@@ -52,15 +62,16 @@ impl Default for GdalRasterSource {
 }
 
 impl RasterSource for GdalRasterSource {
-    #[instrument(skip(self, path, bbox), fields(path = %path.display()))]
+    #[instrument(skip(self, uri, bbox), fields(uri = %uri))]
     fn load_flow_direction(
         &self,
-        path: &Path,
+        uri: &str,
         bbox: &Rect<f64>,
     ) -> Result<FlowDirectionTile<Raw>, RasterSourceError> {
-        let path_str = path.display().to_string();
+        let path_str = uri.to_string();
 
-        let ds = open_dataset(path).map_err(|e| map_raster_read_error(e, &path_str))?;
+        let ds =
+            open_dataset(uri, &self.config).map_err(|e| map_raster_read_error(e, &path_str))?;
 
         let raw_gt = ds
             .geo_transform()
@@ -107,15 +118,16 @@ impl RasterSource for GdalRasterSource {
         Ok(FlowDirectionTile::from_raw(tile, self.encoding))
     }
 
-    #[instrument(skip(self, path, bbox), fields(path = %path.display()))]
+    #[instrument(skip(self, uri, bbox), fields(uri = %uri))]
     fn load_accumulation(
         &self,
-        path: &Path,
+        uri: &str,
         bbox: &Rect<f64>,
     ) -> Result<AccumulationTile<Raw>, RasterSourceError> {
-        let path_str = path.display().to_string();
+        let path_str = uri.to_string();
 
-        let ds = open_dataset(path).map_err(|e| map_raster_read_error(e, &path_str))?;
+        let ds =
+            open_dataset(uri, &self.config).map_err(|e| map_raster_read_error(e, &path_str))?;
 
         let raw_gt = ds
             .geo_transform()
@@ -168,14 +180,14 @@ impl RasterSource for GdalRasterSource {
 // ── Private helpers ───────────────────────────────────────────────────────────
 
 /// Open a GDAL dataset, returning a typed error on failure.
-fn open_dataset(path: &Path) -> Result<Dataset, RasterReadError> {
-    if !path.exists() {
-        return Err(RasterReadError::FileNotFound {
-            path: path.display().to_string(),
-        });
-    }
-    Dataset::open(path).map_err(|e| RasterReadError::GdalOpen {
-        path: path.display().to_string(),
+fn open_dataset(uri: &str, config: &GdalConfig) -> Result<Dataset, RasterReadError> {
+    ensure_gdal_configured(config).map_err(|reason| RasterReadError::GdalOpen {
+        path: uri.to_string(),
+        reason,
+    })?;
+
+    Dataset::open(std::path::Path::new(uri)).map_err(|e| RasterReadError::GdalOpen {
+        path: uri.to_string(),
         reason: e.to_string(),
     })
 }
@@ -295,6 +307,8 @@ fn map_raster_read_error(e: RasterReadError, path: &str) -> RasterSourceError {
 
 #[cfg(test)]
 mod tests {
+    use gdal::DriverManager;
+    use gdal::raster::Buffer;
     use geo::coord;
 
     use super::*;
@@ -458,37 +472,73 @@ mod tests {
         assert_eq!(result, data);
     }
 
-    // ── File-not-found error path ────────────────────────────────────────────
+    // ── GDAL open behavior ──────────────────────────────────────────────────
 
     #[test]
-    fn load_flow_direction_file_not_found() {
+    fn load_flow_direction_opens_existing_local_raster_from_string_uri() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("flow_dir.tif");
+        let driver = DriverManager::get_driver_by_name("GTiff").expect("GTiff driver exists");
+        let mut dataset = driver
+            .create_with_band_type::<u8, _>(&path, 2, 2, 1)
+            .expect("test raster should be created");
+        dataset
+            .set_geo_transform(&[0.0, 1.0, 0.0, 2.0, 0.0, -1.0])
+            .expect("geo transform should be set");
+        let mut band = dataset.rasterband(1).expect("band should exist");
+        let mut buffer = Buffer::new((2, 2), vec![1_u8, 2, 4, 8]);
+        band.write((0, 0), (2, 2), &mut buffer)
+            .expect("raster data should be written");
+        drop(band);
+        drop(dataset);
+
         let src = GdalRasterSource::new();
-        let bbox = Rect::new(coord! { x: 0.0, y: 0.0 }, coord! { x: 1.0, y: 1.0 });
-        let err = src
-            .load_flow_direction(
-                std::path::Path::new("/nonexistent/path/that/will/never/exist.tif"),
-                &bbox,
-            )
-            .expect_err("expected FileNotFound error");
+        let bbox = Rect::new(coord! { x: 0.0, y: 0.0 }, coord! { x: 2.0, y: 2.0 });
+        let uri = path.display().to_string();
+        let tile = src
+            .load_flow_direction(&uri, &bbox)
+            .expect("local raster should load by string URI");
+
+        assert_eq!(tile.dims(), GridDims::new(2, 2));
+    }
+
+    #[test]
+    fn vsi_like_uri_is_passed_to_gdal_without_pre_exists_rejection() {
+        let err = open_dataset(
+            "/vsimem/shed_missing_virtual_raster.tif",
+            &GdalConfig::new(),
+        )
+        .expect_err("missing virtual raster should fail in GDAL open");
+
         assert!(
-            matches!(err, RasterSourceError::FileNotFound { .. }),
-            "expected FileNotFound, got: {err}"
+            matches!(err, RasterReadError::GdalOpen { .. }),
+            "expected GdalOpen, got: {err}"
         );
     }
 
     #[test]
-    fn load_accumulation_file_not_found() {
+    fn load_flow_direction_missing_local_raster_reports_open_failed() {
         let src = GdalRasterSource::new();
         let bbox = Rect::new(coord! { x: 0.0, y: 0.0 }, coord! { x: 1.0, y: 1.0 });
         let err = src
-            .load_accumulation(
-                std::path::Path::new("/nonexistent/path/that/will/never/exist.tif"),
-                &bbox,
-            )
-            .expect_err("expected FileNotFound error");
+            .load_flow_direction("/nonexistent/path/that/will/never/exist.tif", &bbox)
+            .expect_err("expected open error");
         assert!(
-            matches!(err, RasterSourceError::FileNotFound { .. }),
-            "expected FileNotFound, got: {err}"
+            matches!(err, RasterSourceError::OpenFailed { .. }),
+            "expected OpenFailed, got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_accumulation_missing_local_raster_reports_open_failed() {
+        let src = GdalRasterSource::new();
+        let bbox = Rect::new(coord! { x: 0.0, y: 0.0 }, coord! { x: 1.0, y: 1.0 });
+        let err = src
+            .load_accumulation("/nonexistent/path/that/will/never/exist.tif", &bbox)
+            .expect_err("expected open error");
+        assert!(
+            matches!(err, RasterSourceError::OpenFailed { .. }),
+            "expected OpenFailed, got: {err}"
         );
     }
 }

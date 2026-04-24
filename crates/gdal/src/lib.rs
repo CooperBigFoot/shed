@@ -1,11 +1,13 @@
 //! GDAL-backed raster I/O and geometry operations for the shed engine.
 
+pub mod config;
 pub mod convert;
 pub mod error;
 pub mod geometry_repair;
 pub mod raster_reader;
 pub mod wkb;
 
+pub use config::{GdalConfig, ensure_gdal_configured};
 pub use error::{GdalRepairError, RasterReadError};
 pub use geometry_repair::GdalGeometryRepair;
 pub use raster_reader::GdalRasterSource;
