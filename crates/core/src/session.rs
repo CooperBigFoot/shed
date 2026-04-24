@@ -270,6 +270,16 @@ impl DatasetSession {
         })
     }
 
+    /// Open a remote HFX dataset with an already-constructed object store.
+    #[doc(hidden)]
+    pub fn open_remote_with_store(
+        store: Arc<dyn ObjectStore>,
+        root: &ObjectPath,
+        url: &Url,
+    ) -> Result<Self, SessionError> {
+        Self::open_remote(store, root, url)
+    }
+
     /// Return a reference to the parsed manifest.
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
