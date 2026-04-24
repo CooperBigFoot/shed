@@ -1,16 +1,21 @@
 //! SnapStore — lazy parquet reader for snap targets.
 
-use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::sync::Arc;
 
 use arrow::array::{Array, BinaryArray, BooleanArray, Float32Array, Int64Array, LargeBinaryArray};
 use arrow::datatypes::DataType;
 use hfx_core::{AtomId, BoundingBox, MainstemStatus, SnapId, SnapTarget, Weight, WkbGeometry};
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use object_store::local::LocalFileSystem;
+use object_store::path::Path as ObjectPath;
+use object_store::{ObjectStore, ObjectStoreExt};
+use parquet::arrow::ProjectionMask;
+use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
 use tracing::{debug, instrument};
 
 use crate::error::SessionError;
 use crate::reader::{BboxColIndices, extract_row_group_bbox, require_column};
+use crate::runtime::RT;
 
 /// Advance a `f32` value to the next representable float strictly greater than `v`.
 ///
@@ -77,7 +82,10 @@ struct RowGroupBbox {
 /// Lazy reader for snap.parquet with row-group bbox pruning.
 #[derive(Debug)]
 pub struct SnapStore {
-    path: PathBuf,
+    store: Arc<dyn ObjectStore>,
+    path: ObjectPath,
+    path_display: String,
+    file_size: u64,
     row_groups: Vec<RowGroupBbox>,
     groups_without_stats: Vec<usize>,
     total_rows: u64,
@@ -98,14 +106,36 @@ impl SnapStore {
     /// | Required column missing or wrong type | [`SessionError::ParquetSchema`] |
     #[instrument(skip_all, fields(path = %path.display()))]
     pub fn open(path: &Path) -> Result<Self, SessionError> {
-        let file = File::open(path).map_err(|e| SessionError::io(ARTIFACT, e))?;
+        let (store, object_path, path_display) = local_object_artifact(path)?;
+        Self::open_object(store, object_path, path_display, HeadErrorMode::LocalIo)
+    }
 
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
-            SessionError::ParquetParse {
+    /// Open an object-store-backed `snap.parquet` artifact.
+    #[instrument(skip_all, fields(path = %path_display))]
+    pub(crate) fn open_remote(
+        store: Arc<dyn ObjectStore>,
+        path: ObjectPath,
+        path_display: String,
+    ) -> Result<Self, SessionError> {
+        Self::open_object(store, path, path_display, HeadErrorMode::RemoteArtifact)
+    }
+
+    fn open_object(
+        store: Arc<dyn ObjectStore>,
+        path: ObjectPath,
+        path_display: String,
+        head_error_mode: HeadErrorMode,
+    ) -> Result<Self, SessionError> {
+        let file_size = head_file_size(store.as_ref(), &path, &path_display, head_error_mode)?;
+
+        let builder = RT
+            .block_on(async {
+                ParquetRecordBatchStreamBuilder::new(object_reader(&store, &path, file_size)).await
+            })
+            .map_err(|e| SessionError::ParquetParse {
                 artifact: ARTIFACT,
                 source: e,
-            }
-        })?;
+            })?;
 
         let metadata = builder.metadata().clone();
         let schema = builder.schema();
@@ -154,7 +184,10 @@ impl SnapStore {
         );
 
         Ok(Self {
-            path: path.to_path_buf(),
+            store,
+            path,
+            path_display,
+            file_size,
             row_groups,
             groups_without_stats,
             total_rows,
@@ -174,8 +207,15 @@ impl SnapStore {
     /// | File cannot be re-opened | [`SessionError::Io`] |
     /// | Row group read fails | [`SessionError::RowGroupReadError`] |
     /// | Row fails domain validation | [`SessionError::InvalidRow`] |
-    #[instrument(skip_all, fields(path = %self.path.display()))]
+    #[instrument(skip_all, fields(path = %self.path_display))]
     pub fn query_by_bbox(&self, query_bbox: &BoundingBox) -> Result<Vec<SnapTarget>, SessionError> {
+        RT.block_on(self.query_by_bbox_async(query_bbox))
+    }
+
+    async fn query_by_bbox_async(
+        &self,
+        query_bbox: &BoundingBox,
+    ) -> Result<Vec<SnapTarget>, SessionError> {
         // Collect row group indices that might contain matching rows.
         let mut candidate_indices: Vec<usize> = self
             .row_groups
@@ -197,14 +237,12 @@ impl SnapStore {
             "reading candidate row groups"
         );
 
-        let file = File::open(&self.path).map_err(|e| SessionError::io(ARTIFACT, e))?;
-
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
-            SessionError::ParquetParse {
+        let builder = ParquetRecordBatchStreamBuilder::new(self.object_reader())
+            .await
+            .map_err(|e| SessionError::ParquetParse {
                 artifact: ARTIFACT,
                 source: e,
-            }
-        })?;
+            })?;
 
         // Pre-compute the absolute start row of each selected row group so that
         // error messages report the correct row index in the file, even after
@@ -223,7 +261,7 @@ impl SnapStore {
             .map(|&rg| metadata.row_group(rg).num_rows() as usize)
             .collect();
 
-        let reader = builder
+        let mut stream = builder
             .with_row_groups(candidate_indices.clone())
             .build()
             .map_err(|e| SessionError::ParquetParse {
@@ -237,157 +275,175 @@ impl SnapStore {
         let mut sel_idx = 0usize;
         let mut offset_in_group = 0usize;
 
-        for batch_result in reader {
-            let batch = batch_result.map_err(|e| SessionError::RowGroupReadError {
-                artifact: ARTIFACT,
-                row_group: candidate_indices[sel_idx],
-                source: e.into(),
-            })?;
-
-            let num_rows = batch.num_rows();
-
-            let id_col = batch
-                .column_by_name("id")
-                .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
-                .ok_or_else(|| {
-                    SessionError::parquet_schema(ARTIFACT, "column 'id' missing or wrong type")
+        while let Some(reader) =
+            stream
+                .next_row_group()
+                .await
+                .map_err(|e| SessionError::RowGroupReadError {
+                    artifact: ARTIFACT,
+                    row_group: candidate_indices[sel_idx],
+                    source: e,
+                })?
+        {
+            for batch_result in reader {
+                let batch = batch_result.map_err(|e| SessionError::RowGroupReadError {
+                    artifact: ARTIFACT,
+                    row_group: candidate_indices[sel_idx],
+                    source: parquet::errors::ParquetError::ArrowError(e.to_string()),
                 })?;
 
-            let catchment_id_col = batch
-                .column_by_name("catchment_id")
-                .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
-                .ok_or_else(|| {
-                    SessionError::parquet_schema(
-                        ARTIFACT,
-                        "column 'catchment_id' missing or wrong type",
-                    )
+                let num_rows = batch.num_rows();
+
+                let id_col = batch
+                    .column_by_name("id")
+                    .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
+                    .ok_or_else(|| {
+                        SessionError::parquet_schema(ARTIFACT, "column 'id' missing or wrong type")
+                    })?;
+
+                let catchment_id_col = batch
+                    .column_by_name("catchment_id")
+                    .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
+                    .ok_or_else(|| {
+                        SessionError::parquet_schema(
+                            ARTIFACT,
+                            "column 'catchment_id' missing or wrong type",
+                        )
+                    })?;
+
+                let weight_col = batch
+                    .column_by_name("weight")
+                    .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
+                    .ok_or_else(|| {
+                        SessionError::parquet_schema(
+                            ARTIFACT,
+                            "column 'weight' missing or wrong type",
+                        )
+                    })?;
+
+                let is_mainstem_col = batch
+                    .column_by_name("is_mainstem")
+                    .and_then(|c| c.as_any().downcast_ref::<BooleanArray>())
+                    .ok_or_else(|| {
+                        SessionError::parquet_schema(
+                            ARTIFACT,
+                            "column 'is_mainstem' missing or wrong type",
+                        )
+                    })?;
+
+                let bbox_minx_col = batch
+                    .column_by_name("bbox_minx")
+                    .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
+                    .ok_or_else(|| {
+                        SessionError::parquet_schema(
+                            ARTIFACT,
+                            "column 'bbox_minx' missing or wrong type",
+                        )
+                    })?;
+
+                let bbox_miny_col = batch
+                    .column_by_name("bbox_miny")
+                    .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
+                    .ok_or_else(|| {
+                        SessionError::parquet_schema(
+                            ARTIFACT,
+                            "column 'bbox_miny' missing or wrong type",
+                        )
+                    })?;
+
+                let bbox_maxx_col = batch
+                    .column_by_name("bbox_maxx")
+                    .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
+                    .ok_or_else(|| {
+                        SessionError::parquet_schema(
+                            ARTIFACT,
+                            "column 'bbox_maxx' missing or wrong type",
+                        )
+                    })?;
+
+                let bbox_maxy_col = batch
+                    .column_by_name("bbox_maxy")
+                    .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
+                    .ok_or_else(|| {
+                        SessionError::parquet_schema(
+                            ARTIFACT,
+                            "column 'bbox_maxy' missing or wrong type",
+                        )
+                    })?;
+
+                let geometry_col_array = batch.column_by_name("geometry").ok_or_else(|| {
+                    SessionError::parquet_schema(ARTIFACT, "column 'geometry' missing")
                 })?;
 
-            let weight_col = batch
-                .column_by_name("weight")
-                .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
-                .ok_or_else(|| {
-                    SessionError::parquet_schema(ARTIFACT, "column 'weight' missing or wrong type")
-                })?;
+                for i in 0..num_rows {
+                    let absolute_row = rg_absolute_starts[sel_idx] + offset_in_group;
+                    offset_in_group += 1;
 
-            let is_mainstem_col = batch
-                .column_by_name("is_mainstem")
-                .and_then(|c| c.as_any().downcast_ref::<BooleanArray>())
-                .ok_or_else(|| {
-                    SessionError::parquet_schema(
-                        ARTIFACT,
-                        "column 'is_mainstem' missing or wrong type",
-                    )
-                })?;
+                    // Null checks on all non-nullable columns.
+                    macro_rules! check_null {
+                        ($col:expr, $name:expr) => {
+                            if $col.is_null(i) {
+                                return Err(SessionError::invalid_row(
+                                    ARTIFACT,
+                                    absolute_row,
+                                    format!("null value in non-nullable column \"{}\"", $name),
+                                ));
+                            }
+                        };
+                    }
+                    check_null!(id_col, "id");
+                    check_null!(catchment_id_col, "catchment_id");
+                    check_null!(weight_col, "weight");
+                    check_null!(is_mainstem_col, "is_mainstem");
+                    check_null!(bbox_minx_col, "bbox_minx");
+                    check_null!(bbox_miny_col, "bbox_miny");
+                    check_null!(bbox_maxx_col, "bbox_maxx");
+                    check_null!(bbox_maxy_col, "bbox_maxy");
+                    check_null!(geometry_col_array, "geometry");
 
-            let bbox_minx_col = batch
-                .column_by_name("bbox_minx")
-                .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
-                .ok_or_else(|| {
-                    SessionError::parquet_schema(
-                        ARTIFACT,
-                        "column 'bbox_minx' missing or wrong type",
-                    )
-                })?;
-
-            let bbox_miny_col = batch
-                .column_by_name("bbox_miny")
-                .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
-                .ok_or_else(|| {
-                    SessionError::parquet_schema(
-                        ARTIFACT,
-                        "column 'bbox_miny' missing or wrong type",
-                    )
-                })?;
-
-            let bbox_maxx_col = batch
-                .column_by_name("bbox_maxx")
-                .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
-                .ok_or_else(|| {
-                    SessionError::parquet_schema(
-                        ARTIFACT,
-                        "column 'bbox_maxx' missing or wrong type",
-                    )
-                })?;
-
-            let bbox_maxy_col = batch
-                .column_by_name("bbox_maxy")
-                .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
-                .ok_or_else(|| {
-                    SessionError::parquet_schema(
-                        ARTIFACT,
-                        "column 'bbox_maxy' missing or wrong type",
-                    )
-                })?;
-
-            let geometry_col_array = batch.column_by_name("geometry").ok_or_else(|| {
-                SessionError::parquet_schema(ARTIFACT, "column 'geometry' missing")
-            })?;
-
-            for i in 0..num_rows {
-                let absolute_row = rg_absolute_starts[sel_idx] + offset_in_group;
-                offset_in_group += 1;
-
-                // Null checks on all non-nullable columns.
-                macro_rules! check_null {
-                    ($col:expr, $name:expr) => {
-                        if $col.is_null(i) {
-                            return Err(SessionError::invalid_row(
-                                ARTIFACT,
-                                absolute_row,
-                                format!("null value in non-nullable column \"{}\"", $name),
-                            ));
-                        }
-                    };
-                }
-                check_null!(id_col, "id");
-                check_null!(catchment_id_col, "catchment_id");
-                check_null!(weight_col, "weight");
-                check_null!(is_mainstem_col, "is_mainstem");
-                check_null!(bbox_minx_col, "bbox_minx");
-                check_null!(bbox_miny_col, "bbox_miny");
-                check_null!(bbox_maxx_col, "bbox_maxx");
-                check_null!(bbox_maxy_col, "bbox_maxy");
-                check_null!(geometry_col_array, "geometry");
-
-                // Build per-row bbox for post-filtering. Uses epsilon padding for
-                // degenerate bboxes (Points, axis-aligned LineStrings) per the spec.
-                let row_bbox = snap_bbox(
-                    bbox_minx_col.value(i),
-                    bbox_miny_col.value(i),
-                    bbox_maxx_col.value(i),
-                    bbox_maxy_col.value(i),
-                    absolute_row,
-                )?;
-
-                if !row_bbox.intersects(query_bbox) {
-                    continue;
-                }
-
-                let id = SnapId::new(id_col.value(i)).map_err(|e| {
-                    SessionError::invalid_row(ARTIFACT, absolute_row, format!("id error: {e}"))
-                })?;
-
-                let catchment_id = AtomId::new(catchment_id_col.value(i)).map_err(|e| {
-                    SessionError::invalid_row(
-                        ARTIFACT,
+                    // Build per-row bbox for post-filtering. Uses epsilon padding for
+                    // degenerate bboxes (Points, axis-aligned LineStrings) per the spec.
+                    let row_bbox = snap_bbox(
+                        bbox_minx_col.value(i),
+                        bbox_miny_col.value(i),
+                        bbox_maxx_col.value(i),
+                        bbox_maxy_col.value(i),
                         absolute_row,
-                        format!("catchment_id error: {e}"),
-                    )
-                })?;
+                    )?;
 
-                let weight = Weight::new(weight_col.value(i)).map_err(|e| {
-                    SessionError::invalid_row(ARTIFACT, absolute_row, format!("weight error: {e}"))
-                })?;
+                    if !row_bbox.intersects(query_bbox) {
+                        continue;
+                    }
 
-                let mainstem_status = if is_mainstem_col.value(i) {
-                    MainstemStatus::Mainstem
-                } else {
-                    MainstemStatus::Tributary
-                };
+                    let id = SnapId::new(id_col.value(i)).map_err(|e| {
+                        SessionError::invalid_row(ARTIFACT, absolute_row, format!("id error: {e}"))
+                    })?;
 
-                let geom_bytes: Vec<u8> =
-                    if let Some(arr) = geometry_col_array.as_any().downcast_ref::<BinaryArray>() {
+                    let catchment_id = AtomId::new(catchment_id_col.value(i)).map_err(|e| {
+                        SessionError::invalid_row(
+                            ARTIFACT,
+                            absolute_row,
+                            format!("catchment_id error: {e}"),
+                        )
+                    })?;
+
+                    let weight = Weight::new(weight_col.value(i)).map_err(|e| {
+                        SessionError::invalid_row(
+                            ARTIFACT,
+                            absolute_row,
+                            format!("weight error: {e}"),
+                        )
+                    })?;
+
+                    let mainstem_status = if is_mainstem_col.value(i) {
+                        MainstemStatus::Mainstem
+                    } else {
+                        MainstemStatus::Tributary
+                    };
+
+                    let geom_bytes: Vec<u8> = if let Some(arr) =
+                        geometry_col_array.as_any().downcast_ref::<BinaryArray>()
+                    {
                         arr.value(i).to_vec()
                     } else if let Some(arr) = geometry_col_array
                         .as_any()
@@ -401,29 +457,25 @@ impl SnapStore {
                         ));
                     };
 
-                let geometry = WkbGeometry::new(geom_bytes).map_err(|e| {
-                    SessionError::invalid_row(
-                        ARTIFACT,
-                        absolute_row,
-                        format!("geometry error: {e}"),
-                    )
-                })?;
+                    let geometry = WkbGeometry::new(geom_bytes).map_err(|e| {
+                        SessionError::invalid_row(
+                            ARTIFACT,
+                            absolute_row,
+                            format!("geometry error: {e}"),
+                        )
+                    })?;
 
-                results.push(SnapTarget::new(
-                    id,
-                    catchment_id,
-                    weight,
-                    mainstem_status,
-                    row_bbox,
-                    geometry,
-                ));
+                    results.push(SnapTarget::new(
+                        id,
+                        catchment_id,
+                        weight,
+                        mainstem_status,
+                        row_bbox,
+                        geometry,
+                    ));
+                }
             }
-
-            // Advance the selected-group tracker after exhausting this batch.
-            if !selected_sizes.is_empty()
-                && offset_in_group >= selected_sizes[sel_idx]
-                && sel_idx + 1 < candidate_indices.len()
-            {
+            if !selected_sizes.is_empty() && sel_idx + 1 < candidate_indices.len() {
                 offset_in_group = 0;
                 sel_idx += 1;
             }
@@ -447,8 +499,12 @@ impl SnapStore {
     /// | Row contains a null `catchment_id` | [`SessionError::InvalidRow`] |
     /// | `catchment_id` value fails domain validation | [`SessionError::InvalidRow`] |
     pub fn read_all_catchment_ids(&self) -> Result<Vec<hfx_core::AtomId>, SessionError> {
-        let file = std::fs::File::open(&self.path).map_err(|e| SessionError::io(ARTIFACT, e))?;
-        let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
+        RT.block_on(self.read_all_catchment_ids_async())
+    }
+
+    async fn read_all_catchment_ids_async(&self) -> Result<Vec<hfx_core::AtomId>, SessionError> {
+        let builder = ParquetRecordBatchStreamBuilder::new(self.object_reader())
+            .await
             .map_err(|e| SessionError::ParquetParse {
                 artifact: ARTIFACT,
                 source: e,
@@ -463,8 +519,8 @@ impl SnapStore {
                 SessionError::parquet_schema(ARTIFACT, "missing column \"catchment_id\"")
             })?;
 
-        let mask = parquet::arrow::ProjectionMask::roots(parquet_schema, [col_idx]);
-        let reader = builder
+        let mask = ProjectionMask::roots(parquet_schema, [col_idx]);
+        let mut stream = builder
             .with_projection(mask)
             .with_batch_size(8192)
             .build()
@@ -475,36 +531,50 @@ impl SnapStore {
 
         let mut ids = Vec::new();
         let mut global_row = 0usize;
-        for batch_result in reader {
-            let batch = batch_result.map_err(|e| SessionError::ParquetParse {
-                artifact: ARTIFACT,
-                source: e.into(),
-            })?;
-            let col = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<arrow::array::Int64Array>()
-                .ok_or_else(|| {
-                    SessionError::parquet_schema(ARTIFACT, "catchment_id column is not Int64")
+        let mut row_group = 0usize;
+        while let Some(reader) =
+            stream
+                .next_row_group()
+                .await
+                .map_err(|e| SessionError::RowGroupReadError {
+                    artifact: ARTIFACT,
+                    row_group,
+                    source: e,
+                })?
+        {
+            for batch_result in reader {
+                let batch = batch_result.map_err(|e| SessionError::RowGroupReadError {
+                    artifact: ARTIFACT,
+                    row_group,
+                    source: parquet::errors::ParquetError::ArrowError(e.to_string()),
                 })?;
-            for i in 0..batch.num_rows() {
-                if col.is_null(i) {
-                    return Err(SessionError::invalid_row(
-                        ARTIFACT,
-                        global_row + i,
-                        "null catchment_id",
-                    ));
+                let col = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<arrow::array::Int64Array>()
+                    .ok_or_else(|| {
+                        SessionError::parquet_schema(ARTIFACT, "catchment_id column is not Int64")
+                    })?;
+                for i in 0..batch.num_rows() {
+                    if col.is_null(i) {
+                        return Err(SessionError::invalid_row(
+                            ARTIFACT,
+                            global_row + i,
+                            "null catchment_id",
+                        ));
+                    }
+                    let atom_id = hfx_core::AtomId::new(col.value(i)).map_err(|e| {
+                        SessionError::invalid_row(
+                            ARTIFACT,
+                            global_row + i,
+                            format!("invalid catchment_id: {e}"),
+                        )
+                    })?;
+                    ids.push(atom_id);
                 }
-                let atom_id = hfx_core::AtomId::new(col.value(i)).map_err(|e| {
-                    SessionError::invalid_row(
-                        ARTIFACT,
-                        global_row + i,
-                        format!("invalid catchment_id: {e}"),
-                    )
-                })?;
-                ids.push(atom_id);
+                global_row += batch.num_rows();
             }
-            global_row += batch.num_rows();
+            row_group += 1;
         }
         Ok(ids)
     }
@@ -513,6 +583,79 @@ impl SnapStore {
     pub fn total_rows(&self) -> u64 {
         self.total_rows
     }
+
+    fn object_reader(&self) -> ParquetObjectReader {
+        object_reader(&self.store, &self.path, self.file_size)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum HeadErrorMode {
+    LocalIo,
+    RemoteArtifact,
+}
+
+fn object_reader(
+    store: &Arc<dyn ObjectStore>,
+    path: &ObjectPath,
+    file_size: u64,
+) -> ParquetObjectReader {
+    ParquetObjectReader::new(store.clone(), path.clone()).with_file_size(file_size)
+}
+
+fn head_file_size(
+    store: &dyn ObjectStore,
+    path: &ObjectPath,
+    path_display: &str,
+    error_mode: HeadErrorMode,
+) -> Result<u64, SessionError> {
+    RT.block_on(async {
+        store
+            .head(path)
+            .await
+            .map(|meta| meta.size)
+            .map_err(|source| match error_mode {
+                HeadErrorMode::LocalIo => object_store_error_as_io(source),
+                HeadErrorMode::RemoteArtifact => {
+                    SessionError::remote_artifact_read(ARTIFACT, path_display, source)
+                }
+            })
+    })
+}
+
+fn local_object_artifact(
+    path: &Path,
+) -> Result<(Arc<dyn ObjectStore>, ObjectPath, String), SessionError> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let file_name = path.file_name().ok_or_else(|| {
+        SessionError::io(
+            ARTIFACT,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "path does not name a parquet file",
+            ),
+        )
+    })?;
+    let file_name = file_name.to_str().ok_or_else(|| {
+        SessionError::io(
+            ARTIFACT,
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "path is not valid UTF-8"),
+        )
+    })?;
+    let store = LocalFileSystem::new_with_prefix(parent).map_err(object_store_error_as_io)?;
+
+    Ok((
+        Arc::new(store),
+        ObjectPath::from(file_name),
+        path.display().to_string(),
+    ))
+}
+
+fn object_store_error_as_io(source: object_store::Error) -> SessionError {
+    SessionError::io(ARTIFACT, std::io::Error::other(source.to_string()))
 }
 
 #[cfg(test)]

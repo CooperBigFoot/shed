@@ -1,8 +1,9 @@
 //! Dataset session — loads an HFX dataset for repeated queries.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use hfx_core::{Manifest, RasterAvailability, SnapAvailability, Topology};
+use hfx_core::{AtomId, DrainageGraph, Manifest, RasterAvailability, SnapAvailability, Topology};
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt};
 use tracing::{debug, info, instrument};
@@ -66,22 +67,19 @@ impl DatasetSession {
     /// Open an HFX dataset source and return a ready-to-query session.
     ///
     /// Local paths and `file://` URLs are opened from the local filesystem.
-    /// Remote sources are parsed but not yet readable in this phase.
+    /// Remote sources are opened through object-store-backed parquet readers.
     ///
     /// # Errors
     ///
     /// | Variant | Condition |
     /// |---|---|
     /// | Source parsing errors | The dataset source string is malformed or unsupported |
-    /// | [`SessionError::RemoteDatasetNotSupported`] | The source is remote |
     /// | Local session errors | Propagated from [`DatasetSession::open_path`] |
     #[instrument(skip_all, fields(input = %input))]
     pub fn open(input: &str) -> Result<Self, SessionError> {
         match DatasetSource::parse(input)? {
             DatasetSource::Local(root) => Self::open_path(&root),
-            DatasetSource::Remote { store, root, url } => {
-                Self::open_remote(store.as_ref(), &root, &url)
-            }
+            DatasetSource::Remote { store, root, url } => Self::open_remote(store, &root, &url),
         }
     }
 
@@ -150,56 +148,7 @@ impl DatasetSession {
 
         let catchments = CatchmentStore::open(&root.join("catchments.parquet"))?;
 
-        let expected = manifest.atom_count().get();
-        let actual = catchments.total_rows();
-        if expected != actual {
-            return Err(SessionError::AtomCountMismatch {
-                manifest_count: expected,
-                actual_count: actual,
-            });
-        }
-
-        // --- Referential integrity: graph ↔ catchments ---
-        debug!("verifying graph ↔ catchment referential integrity");
-        let catchment_ids = catchments.read_all_ids()?;
-        let catchment_id_set: std::collections::HashSet<hfx_core::AtomId> =
-            catchment_ids.iter().copied().collect();
-
-        // Every graph atom must have a catchment row
-        for row in graph.rows() {
-            if !catchment_id_set.contains(&row.id()) {
-                return Err(SessionError::integrity(format!(
-                    "graph atom {} has no corresponding catchment row",
-                    row.id().get(),
-                )));
-            }
-            // Every upstream reference must point to an existing catchment
-            for &upstream_id in row.upstream_ids() {
-                if !catchment_id_set.contains(&upstream_id) {
-                    return Err(SessionError::integrity(format!(
-                        "graph atom {} references upstream atom {} which has no catchment row",
-                        row.id().get(),
-                        upstream_id.get(),
-                    )));
-                }
-            }
-        }
-
-        // Every catchment must have a graph row
-        for &catchment_id in &catchment_ids {
-            if graph.get(catchment_id).is_none() {
-                return Err(SessionError::integrity(format!(
-                    "catchment atom {} has no corresponding graph row",
-                    catchment_id.get(),
-                )));
-            }
-        }
-
-        debug!(
-            graph_atoms = graph.len(),
-            catchment_atoms = catchment_ids.len(),
-            "integrity checks passed"
-        );
+        let catchment_id_set = validate_graph_catchments(&manifest, &graph, &catchments)?;
 
         let snap = if manifest.snap() == SnapAvailability::Present {
             Some(SnapStore::open(&root.join("snap.parquet"))?)
@@ -209,19 +158,7 @@ impl DatasetSession {
 
         // If snap is present, verify all snap catchment_id references exist
         if let Some(ref snap_store) = snap {
-            let snap_catchment_ids = snap_store.read_all_catchment_ids()?;
-            for &snap_cid in &snap_catchment_ids {
-                if !catchment_id_set.contains(&snap_cid) {
-                    return Err(SessionError::integrity(format!(
-                        "snap target references catchment {} which has no catchment row",
-                        snap_cid.get(),
-                    )));
-                }
-            }
-            debug!(
-                snap_refs = snap_catchment_ids.len(),
-                "snap catchment_id integrity verified"
-            );
+            validate_snap_refs(snap_store, &catchment_id_set)?;
         }
 
         let raster_paths = if matches!(manifest.rasters(), RasterAvailability::Present(_)) {
@@ -251,43 +188,85 @@ impl DatasetSession {
     }
 
     fn open_remote(
-        store: &dyn ObjectStore,
+        store: Arc<dyn ObjectStore>,
         root: &ObjectPath,
         url: &Url,
     ) -> Result<Self, SessionError> {
         let cache = RemoteArtifactCache::configured()?;
-        if let Some(cached) = cache.read_entry_for_source(url, root)? {
+        let (manifest, graph) = if let Some(cached) = cache.read_entry_for_source(url, root)? {
             debug!(
                 fabric = cached.manifest.fabric_name(),
                 atoms = cached.manifest.atom_count().get(),
                 graph_atoms = cached.graph.len(),
                 "remote manifest and graph parsed from cache"
             );
+            (cached.manifest, cached.graph)
+        } else {
+            let manifest_path = remote_artifact_path(root, "manifest.json");
+            let graph_path = remote_artifact_path(root, "graph.arrow");
 
-            return Err(SessionError::RemoteDatasetNotSupported {
-                url: url.as_str().to_string(),
-            });
+            let manifest_bytes =
+                read_remote_artifact(store.as_ref(), manifest_path, "manifest.json")?;
+            let manifest = reader::manifest::read_manifest_from_bytes(&manifest_bytes)?;
+
+            let graph_bytes = read_remote_artifact(store.as_ref(), graph_path, "graph.arrow")?;
+            let graph = reader::graph::load_graph_from_bytes(graph_bytes.clone())?;
+            cache.write_manifest_graph(url, root, &manifest, &manifest_bytes, &graph_bytes)?;
+
+            debug!(
+                fabric = manifest.fabric_name(),
+                atoms = manifest.atom_count().get(),
+                graph_atoms = graph.len(),
+                "remote manifest and graph parsed"
+            );
+            (manifest, graph)
+        };
+
+        let catchments_path = remote_artifact_path(root, "catchments.parquet");
+        let catchments = CatchmentStore::open_remote(
+            store.clone(),
+            catchments_path.clone(),
+            catchments_path.as_ref().to_string(),
+        )?;
+        let catchment_id_set = validate_graph_catchments(&manifest, &graph, &catchments)?;
+
+        let snap = if manifest.snap() == SnapAvailability::Present {
+            let snap_path = remote_artifact_path(root, "snap.parquet");
+            Some(SnapStore::open_remote(
+                store,
+                snap_path.clone(),
+                snap_path.as_ref().to_string(),
+            )?)
+        } else {
+            None
+        };
+        if let Some(ref snap_store) = snap {
+            validate_snap_refs(snap_store, &catchment_id_set)?;
         }
 
-        let manifest_path = remote_artifact_path(root, "manifest.json");
-        let graph_path = remote_artifact_path(root, "graph.arrow");
+        let raster_paths = if matches!(manifest.rasters(), RasterAvailability::Present(_)) {
+            Some(RasterPaths {
+                flow_dir: remote_artifact_url_string(url, "flow_dir.tif"),
+                flow_acc: remote_artifact_url_string(url, "flow_acc.tif"),
+            })
+        } else {
+            None
+        };
 
-        let manifest_bytes = read_remote_artifact(store, manifest_path, "manifest.json")?;
-        let manifest = reader::manifest::read_manifest_from_bytes(&manifest_bytes)?;
-
-        let graph_bytes = read_remote_artifact(store, graph_path, "graph.arrow")?;
-        let graph = reader::graph::load_graph_from_bytes(graph_bytes.clone())?;
-        cache.write_manifest_graph(url, root, &manifest, &manifest_bytes, &graph_bytes)?;
-
-        debug!(
+        info!(
             fabric = manifest.fabric_name(),
             atoms = manifest.atom_count().get(),
-            graph_atoms = graph.len(),
-            "remote manifest and graph parsed"
+            topology = %manifest.topology(),
+            "remote dataset session opened"
         );
 
-        Err(SessionError::RemoteDatasetNotSupported {
-            url: url.as_str().to_string(),
+        Ok(DatasetSession {
+            root: PathBuf::from(url.as_str()),
+            manifest,
+            graph,
+            catchments,
+            snap,
+            raster_paths,
         })
     }
 
@@ -335,6 +314,85 @@ fn raster_uri_string(path: &Path) -> String {
     path.display().to_string()
 }
 
+fn remote_artifact_url_string(url: &Url, artifact: &'static str) -> String {
+    format!("{}/{}", url.as_str().trim_end_matches('/'), artifact)
+}
+
+fn validate_graph_catchments(
+    manifest: &Manifest,
+    graph: &DrainageGraph,
+    catchments: &CatchmentStore,
+) -> Result<std::collections::HashSet<AtomId>, SessionError> {
+    let expected = manifest.atom_count().get();
+    let actual = catchments.total_rows();
+    if expected != actual {
+        return Err(SessionError::AtomCountMismatch {
+            manifest_count: expected,
+            actual_count: actual,
+        });
+    }
+
+    debug!("verifying graph ↔ catchment referential integrity");
+    let catchment_ids = catchments.read_all_ids()?;
+    let catchment_id_set: std::collections::HashSet<AtomId> =
+        catchment_ids.iter().copied().collect();
+
+    for row in graph.rows() {
+        if !catchment_id_set.contains(&row.id()) {
+            return Err(SessionError::integrity(format!(
+                "graph atom {} has no corresponding catchment row",
+                row.id().get(),
+            )));
+        }
+        for &upstream_id in row.upstream_ids() {
+            if !catchment_id_set.contains(&upstream_id) {
+                return Err(SessionError::integrity(format!(
+                    "graph atom {} references upstream atom {} which has no catchment row",
+                    row.id().get(),
+                    upstream_id.get(),
+                )));
+            }
+        }
+    }
+
+    for &catchment_id in &catchment_ids {
+        if graph.get(catchment_id).is_none() {
+            return Err(SessionError::integrity(format!(
+                "catchment atom {} has no corresponding graph row",
+                catchment_id.get(),
+            )));
+        }
+    }
+
+    debug!(
+        graph_atoms = graph.len(),
+        catchment_atoms = catchment_ids.len(),
+        "integrity checks passed"
+    );
+
+    Ok(catchment_id_set)
+}
+
+fn validate_snap_refs(
+    snap_store: &SnapStore,
+    catchment_id_set: &std::collections::HashSet<AtomId>,
+) -> Result<(), SessionError> {
+    let snap_catchment_ids = snap_store.read_all_catchment_ids()?;
+    for &snap_cid in &snap_catchment_ids {
+        if !catchment_id_set.contains(&snap_cid) {
+            return Err(SessionError::integrity(format!(
+                "snap target references catchment {} which has no catchment row",
+                snap_cid.get(),
+            )));
+        }
+    }
+    debug!(
+        snap_refs = snap_catchment_ids.len(),
+        "snap catchment_id integrity verified"
+    );
+    Ok(())
+}
+
 fn read_remote_artifact(
     store: &dyn ObjectStore,
     path: ObjectPath,
@@ -360,18 +418,22 @@ mod tests {
     use std::path::Path;
     use std::sync::{Arc, Mutex, MutexGuard};
 
-    use arrow::array::{Int64Array, Int64Builder, ListBuilder};
+    use arrow::array::{
+        BinaryBuilder, BooleanBuilder, Float32Builder, Int64Array, Int64Builder, ListBuilder,
+    };
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::ipc::writer::FileWriter;
     use arrow::record_batch::RecordBatch;
     use object_store::memory::InMemory;
     use object_store::path::Path as ObjectPath;
     use object_store::{ObjectStoreExt, PutPayload};
+    use parquet::arrow::ArrowWriter;
     use url::Url;
 
     use super::DatasetSession;
     use crate::error::SessionError;
     use crate::runtime::RT;
+    use hfx_core::{BoundingBox, SnapId};
 
     static CACHE_ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -382,7 +444,7 @@ mod tests {
 
     impl CacheEnv {
         fn set(path: &Path) -> Self {
-            let guard = CACHE_ENV_LOCK.lock().unwrap();
+            let guard = CACHE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let previous = std::env::var_os("HFX_CACHE_DIR");
             // SAFETY: these tests serialize all HFX_CACHE_DIR mutations with
             // CACHE_ENV_LOCK and restore the prior value before unlocking.
@@ -409,8 +471,8 @@ mod tests {
         }
     }
 
-    fn manifest_bytes() -> String {
-        serde_json::json!({
+    fn manifest_bytes(snap: bool) -> String {
+        let mut manifest = serde_json::json!({
             "format_version": "0.1",
             "fabric_name": "testfabric",
             "crs": "EPSG:4326",
@@ -420,8 +482,11 @@ mod tests {
             "atom_count": 2,
             "created_at": "2026-01-01T00:00:00Z",
             "adapter_version": "test-v1"
-        })
-        .to_string()
+        });
+        if snap {
+            manifest["has_snap"] = serde_json::json!(true);
+        }
+        manifest.to_string()
     }
 
     fn graph_bytes() -> Vec<u8> {
@@ -454,12 +519,147 @@ mod tests {
         writer.into_inner().unwrap().into_inner()
     }
 
-    fn put_remote_manifest_and_graph(store: &Arc<InMemory>, root: &ObjectPath) {
+    fn minimal_wkb_polygon(minx: f64, miny: f64, maxx: f64, maxy: f64) -> Vec<u8> {
+        let mut w = Vec::new();
+        w.push(1u8);
+        w.extend_from_slice(&3u32.to_le_bytes());
+        w.extend_from_slice(&1u32.to_le_bytes());
+        w.extend_from_slice(&5u32.to_le_bytes());
+        for (x, y) in [
+            (minx, miny),
+            (maxx, miny),
+            (maxx, maxy),
+            (minx, maxy),
+            (minx, miny),
+        ] {
+            w.extend_from_slice(&x.to_le_bytes());
+            w.extend_from_slice(&y.to_le_bytes());
+        }
+        w
+    }
+
+    fn minimal_wkb_linestring(x1: f64, y1: f64, x2: f64, y2: f64) -> Vec<u8> {
+        let mut w = Vec::new();
+        w.push(1u8);
+        w.extend_from_slice(&2u32.to_le_bytes());
+        w.extend_from_slice(&2u32.to_le_bytes());
+        for (x, y) in [(x1, y1), (x2, y2)] {
+            w.extend_from_slice(&x.to_le_bytes());
+            w.extend_from_slice(&y.to_le_bytes());
+        }
+        w
+    }
+
+    fn catchments_bytes() -> Vec<u8> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("area_km2", DataType::Float32, false),
+            Field::new("up_area_km2", DataType::Float32, true),
+            Field::new("bbox_minx", DataType::Float32, false),
+            Field::new("bbox_miny", DataType::Float32, false),
+            Field::new("bbox_maxx", DataType::Float32, false),
+            Field::new("bbox_maxy", DataType::Float32, false),
+            Field::new("geometry", DataType::Binary, false),
+        ]));
+
+        let mut id_b = Int64Builder::new();
+        let mut area_b = Float32Builder::new();
+        let mut up_area_b = Float32Builder::new();
+        let mut minx_b = Float32Builder::new();
+        let mut miny_b = Float32Builder::new();
+        let mut maxx_b = Float32Builder::new();
+        let mut maxy_b = Float32Builder::new();
+        let mut geom_b = BinaryBuilder::new();
+        for i in 1..=2_i64 {
+            let minx = i as f32;
+            let maxx = minx + 0.5;
+            id_b.append_value(i);
+            area_b.append_value(1.0);
+            up_area_b.append_null();
+            minx_b.append_value(minx);
+            miny_b.append_value(0.0);
+            maxx_b.append_value(maxx);
+            maxy_b.append_value(0.5);
+            geom_b.append_value(&minimal_wkb_polygon(minx as f64, 0.0, maxx as f64, 0.5));
+        }
+
+        parquet_bytes(
+            schema,
+            vec![
+                Arc::new(id_b.finish()),
+                Arc::new(area_b.finish()),
+                Arc::new(up_area_b.finish()),
+                Arc::new(minx_b.finish()),
+                Arc::new(miny_b.finish()),
+                Arc::new(maxx_b.finish()),
+                Arc::new(maxy_b.finish()),
+                Arc::new(geom_b.finish()),
+            ],
+        )
+    }
+
+    fn snap_bytes() -> Vec<u8> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("catchment_id", DataType::Int64, false),
+            Field::new("weight", DataType::Float32, false),
+            Field::new("is_mainstem", DataType::Boolean, false),
+            Field::new("bbox_minx", DataType::Float32, false),
+            Field::new("bbox_miny", DataType::Float32, false),
+            Field::new("bbox_maxx", DataType::Float32, false),
+            Field::new("bbox_maxy", DataType::Float32, false),
+            Field::new("geometry", DataType::Binary, false),
+        ]));
+
+        let mut id_b = Int64Builder::new();
+        let mut catchment_id_b = Int64Builder::new();
+        let mut weight_b = Float32Builder::new();
+        let mut mainstem_b = BooleanBuilder::new();
+        let mut minx_b = Float32Builder::new();
+        let mut miny_b = Float32Builder::new();
+        let mut maxx_b = Float32Builder::new();
+        let mut maxy_b = Float32Builder::new();
+        let mut geom_b = BinaryBuilder::new();
+        id_b.append_value(1);
+        catchment_id_b.append_value(1);
+        weight_b.append_value(1.0);
+        mainstem_b.append_value(true);
+        minx_b.append_value(1.1);
+        miny_b.append_value(0.1);
+        maxx_b.append_value(1.4);
+        maxy_b.append_value(0.4);
+        geom_b.append_value(&minimal_wkb_linestring(1.1, 0.25, 1.4, 0.25));
+
+        parquet_bytes(
+            schema,
+            vec![
+                Arc::new(id_b.finish()),
+                Arc::new(catchment_id_b.finish()),
+                Arc::new(weight_b.finish()),
+                Arc::new(mainstem_b.finish()),
+                Arc::new(minx_b.finish()),
+                Arc::new(miny_b.finish()),
+                Arc::new(maxx_b.finish()),
+                Arc::new(maxy_b.finish()),
+                Arc::new(geom_b.finish()),
+            ],
+        )
+    }
+
+    fn parquet_bytes(schema: Arc<Schema>, columns: Vec<Arc<dyn arrow::array::Array>>) -> Vec<u8> {
+        let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+        let cursor = Cursor::new(Vec::new());
+        let mut writer = ArrowWriter::try_new(cursor, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.into_inner().unwrap().into_inner()
+    }
+
+    fn put_remote_manifest_and_graph(store: &Arc<InMemory>, root: &ObjectPath, snap: bool) {
         RT.block_on(async {
             store
                 .put(
                     &root.clone().join("manifest.json"),
-                    PutPayload::from(manifest_bytes()),
+                    PutPayload::from(manifest_bytes(snap)),
                 )
                 .await
                 .unwrap();
@@ -474,20 +674,20 @@ mod tests {
     }
 
     #[test]
-    fn open_remote_fetches_manifest_and_graph_before_not_supported() {
+    fn open_remote_fetches_manifest_graph_and_opens_catchments() {
         let cache_dir = tempfile::TempDir::new().unwrap();
         let _cache_env = CacheEnv::set(cache_dir.path());
         let store = Arc::new(InMemory::new());
         let root = ObjectPath::from("dataset/root");
-        put_remote_manifest_and_graph(&store, &root);
+        put_remote_manifest_and_graph(&store, &root, false);
+        put_remote_catchments(&store, &root);
         let url = Url::parse("s3://shed-test/dataset/root").unwrap();
 
-        let err = DatasetSession::open_remote(store.as_ref(), &root, &url).unwrap_err();
+        let session = DatasetSession::open_remote(store, &root, &url).unwrap();
 
-        assert!(matches!(
-            err,
-            SessionError::RemoteDatasetNotSupported { .. }
-        ));
+        assert_eq!(session.catchments().total_rows(), 2);
+        let bbox = BoundingBox::new(0.75, 0.0, 1.75, 1.0).unwrap();
+        assert_eq!(session.catchments().query_by_bbox(&bbox).unwrap().len(), 1);
         assert!(
             cache_dir
                 .path()
@@ -512,23 +712,18 @@ mod tests {
         let _cache_env = CacheEnv::set(cache_dir.path());
         let store = Arc::new(InMemory::new());
         let root = ObjectPath::from("dataset/root");
-        put_remote_manifest_and_graph(&store, &root);
+        put_remote_manifest_and_graph(&store, &root, false);
+        put_remote_catchments(&store, &root);
         let url = Url::parse("s3://shed-test/dataset/root").unwrap();
 
-        let first_err = DatasetSession::open_remote(store.as_ref(), &root, &url).unwrap_err();
-        assert!(matches!(
-            first_err,
-            SessionError::RemoteDatasetNotSupported { .. }
-        ));
+        DatasetSession::open_remote(store, &root, &url).unwrap();
 
-        let empty_store = Arc::new(InMemory::new());
-        let second_err =
-            DatasetSession::open_remote(empty_store.as_ref(), &root, &url).unwrap_err();
+        let catchments_only_store = Arc::new(InMemory::new());
+        put_remote_catchments(&catchments_only_store, &root);
+        let session = DatasetSession::open_remote(catchments_only_store, &root, &url).unwrap();
 
-        assert!(matches!(
-            second_err,
-            SessionError::RemoteDatasetNotSupported { .. }
-        ));
+        assert_eq!(session.graph().len(), 2);
+        assert_eq!(session.catchments().total_rows(), 2);
     }
 
     #[test]
@@ -538,19 +733,15 @@ mod tests {
         let root_a = ObjectPath::from("dataset/a");
         let url_a = Url::parse("s3://shed-test/dataset/a").unwrap();
         let store_a = Arc::new(InMemory::new());
-        put_remote_manifest_and_graph(&store_a, &root_a);
+        put_remote_manifest_and_graph(&store_a, &root_a, false);
+        put_remote_catchments(&store_a, &root_a);
 
-        let first_err = DatasetSession::open_remote(store_a.as_ref(), &root_a, &url_a).unwrap_err();
-        assert!(matches!(
-            first_err,
-            SessionError::RemoteDatasetNotSupported { .. }
-        ));
+        DatasetSession::open_remote(store_a, &root_a, &url_a).unwrap();
 
         let root_b = ObjectPath::from("dataset/b");
         let url_b = Url::parse("s3://shed-test/dataset/b").unwrap();
         let empty_store = Arc::new(InMemory::new());
-        let unmapped_err =
-            DatasetSession::open_remote(empty_store.as_ref(), &root_b, &url_b).unwrap_err();
+        let unmapped_err = DatasetSession::open_remote(empty_store, &root_b, &url_b).unwrap_err();
         assert!(matches!(
             unmapped_err,
             SessionError::RemoteArtifactRead {
@@ -560,20 +751,13 @@ mod tests {
         ));
 
         let store_b = Arc::new(InMemory::new());
-        put_remote_manifest_and_graph(&store_b, &root_b);
-        let mapped_err =
-            DatasetSession::open_remote(store_b.as_ref(), &root_b, &url_b).unwrap_err();
-        assert!(matches!(
-            mapped_err,
-            SessionError::RemoteDatasetNotSupported { .. }
-        ));
+        put_remote_manifest_and_graph(&store_b, &root_b, false);
+        put_remote_catchments(&store_b, &root_b);
+        DatasetSession::open_remote(store_b, &root_b, &url_b).unwrap();
 
-        let cached_b_err =
-            DatasetSession::open_remote(empty_store.as_ref(), &root_b, &url_b).unwrap_err();
-        assert!(matches!(
-            cached_b_err,
-            SessionError::RemoteDatasetNotSupported { .. }
-        ));
+        let catchments_only_store = Arc::new(InMemory::new());
+        put_remote_catchments(&catchments_only_store, &root_b);
+        DatasetSession::open_remote(catchments_only_store, &root_b, &url_b).unwrap();
     }
 
     #[test]
@@ -584,7 +768,7 @@ mod tests {
         let root = ObjectPath::from("dataset/root");
         let url = Url::parse("s3://shed-test/dataset/root").unwrap();
 
-        let err = DatasetSession::open_remote(store.as_ref(), &root, &url).unwrap_err();
+        let err = DatasetSession::open_remote(store, &root, &url).unwrap_err();
 
         assert!(matches!(
             err,
@@ -593,5 +777,45 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn open_remote_with_snap_opens_and_queries_snap_store() {
+        let cache_dir = tempfile::TempDir::new().unwrap();
+        let _cache_env = CacheEnv::set(cache_dir.path());
+        let store = Arc::new(InMemory::new());
+        let root = ObjectPath::from("dataset/root");
+        put_remote_manifest_and_graph(&store, &root, true);
+        put_remote_catchments(&store, &root);
+        RT.block_on(async {
+            store
+                .put(
+                    &root.clone().join("snap.parquet"),
+                    PutPayload::from(snap_bytes()),
+                )
+                .await
+                .unwrap();
+        });
+        let url = Url::parse("s3://shed-test/dataset/root").unwrap();
+
+        let session = DatasetSession::open_remote(store, &root, &url).unwrap();
+        let snap = session.snap().expect("snap store should be present");
+        let bbox = BoundingBox::new(1.0, 0.0, 1.5, 0.5).unwrap();
+        let results = snap.query_by_bbox(&bbox).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id(), SnapId::new(1).unwrap());
+    }
+
+    fn put_remote_catchments(store: &Arc<InMemory>, root: &ObjectPath) {
+        RT.block_on(async {
+            store
+                .put(
+                    &root.clone().join("catchments.parquet"),
+                    PutPayload::from(catchments_bytes()),
+                )
+                .await
+                .unwrap();
+        });
     }
 }

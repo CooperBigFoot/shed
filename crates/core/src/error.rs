@@ -241,14 +241,6 @@ pub enum SessionError {
         /// Underlying JSON error.
         source: serde_json::Error,
     },
-
-    /// Fired when a remote dataset source parses successfully but the session
-    /// reader does not yet support loading remote artifacts.
-    #[error("remote dataset opening is not yet supported for {url}")]
-    RemoteDatasetNotSupported {
-        /// The remote dataset URL supplied by the caller.
-        url: String,
-    },
 }
 
 impl SessionError {
