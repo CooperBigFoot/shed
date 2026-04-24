@@ -15,8 +15,10 @@ serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
 tempfile = { version = "3", optional = true }
+dhat = { version = "0.3", optional = true }
 
 [features]
+dhat-heap = ["dep:dhat"]
 test-fixtures = ["tempfile"]
 
 [dev-dependencies]
