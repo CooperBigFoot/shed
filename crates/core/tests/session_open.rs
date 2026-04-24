@@ -477,7 +477,7 @@ fn write_dag_graph(root: &Path) {
 #[test]
 fn test_open_valid_minimal_dataset() {
     let (_dir, root) = build_dataset(3, false, false, "tree");
-    let session = DatasetSession::open(&root).expect("minimal dataset should open");
+    let session = DatasetSession::open_path(&root).expect("minimal dataset should open");
 
     assert_eq!(session.manifest().atom_count().get(), 3);
     assert_eq!(session.manifest().fabric_name(), "testfabric");
@@ -492,7 +492,7 @@ fn test_open_valid_minimal_dataset() {
 #[test]
 fn test_open_valid_full_dataset() {
     let (_dir, root) = build_dataset(5, true, true, "tree");
-    let session = DatasetSession::open(&root).expect("full dataset should open");
+    let session = DatasetSession::open_path(&root).expect("full dataset should open");
 
     assert_eq!(session.manifest().atom_count().get(), 5);
     assert!(session.snap().is_some());
@@ -513,6 +513,16 @@ fn test_open_missing_root() {
 }
 
 #[test]
+fn test_open_remote_source_not_yet_supported() {
+    let err = DatasetSession::open("s3://shed-test/example/root").unwrap_err();
+
+    assert!(matches!(
+        err,
+        SessionError::RemoteDatasetNotSupported { .. }
+    ));
+}
+
+#[test]
 fn test_open_missing_manifest() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
@@ -520,7 +530,7 @@ fn test_open_missing_manifest() {
     write_graph(root, 2);
     write_catchments(root, 2, 8192);
 
-    let result = DatasetSession::open(root);
+    let result = DatasetSession::open_path(root);
     assert!(
         matches!(
             result,
@@ -541,7 +551,7 @@ fn test_open_missing_graph() {
     write_manifest(root, 2, false, false, "tree");
     write_catchments(root, 2, 8192);
 
-    let result = DatasetSession::open(root);
+    let result = DatasetSession::open_path(root);
     assert!(
         matches!(
             result,
@@ -562,7 +572,7 @@ fn test_open_missing_catchments() {
     write_manifest(root, 2, false, false, "tree");
     write_graph(root, 2);
 
-    let result = DatasetSession::open(root);
+    let result = DatasetSession::open_path(root);
     assert!(
         matches!(
             result,
@@ -585,7 +595,7 @@ fn test_open_snap_declared_but_missing() {
     write_catchments(root, 3, 8192);
     // snap.parquet intentionally absent
 
-    let result = DatasetSession::open(root);
+    let result = DatasetSession::open_path(root);
     assert!(
         matches!(
             result,
@@ -607,7 +617,7 @@ fn test_open_atom_count_mismatch() {
     write_graph(root, 3);
     write_catchments(root, 3, 8192);
 
-    let result = DatasetSession::open(root);
+    let result = DatasetSession::open_path(root);
     assert!(
         matches!(
             result,
@@ -625,7 +635,7 @@ fn test_graph_traversal_from_session() {
     // 5-atom linear chain: 1 <- 2 <- 3 <- 4 <- 5
     // Starting at atom 5, walk upstream to the headwater.
     let (_dir, root) = build_dataset(5, false, false, "tree");
-    let session = DatasetSession::open(&root).unwrap();
+    let session = DatasetSession::open_path(&root).unwrap();
     let graph = session.graph();
 
     let mut current_id = AtomId::new(5).unwrap();
@@ -668,7 +678,7 @@ fn test_catchment_bbox_query() {
     //   atom 4: [2.0, 0.0, 2.4, 0.4]
     //   atom 5: [2.5, 0.0, 2.9, 0.4]
     let (_dir, root) = build_dataset(5, false, false, "tree");
-    let session = DatasetSession::open(&root).unwrap();
+    let session = DatasetSession::open_path(&root).unwrap();
 
     // Query bbox strictly inside atom 3's region, not touching atom 2 (ends at 1.4)
     // or atom 4 (starts at 2.0). BoundingBox uses f32 values.
@@ -690,7 +700,7 @@ fn test_snap_bbox_query() {
     //   atom 2 snap bbox: [1.0, 0.0, 1.4, 0.4]
     //   atom 3 snap bbox: [1.5, 0.0, 1.9, 0.4]
     let (_dir, root) = build_dataset(5, true, false, "tree");
-    let session = DatasetSession::open(&root).unwrap();
+    let session = DatasetSession::open_path(&root).unwrap();
 
     let snap = session.snap().expect("snap should be present");
 
@@ -725,7 +735,7 @@ fn test_dag_topology() {
     write_dag_graph(&root);
     write_catchments(&root, 4, 8192);
 
-    let session = DatasetSession::open(&root).expect("DAG dataset should open");
+    let session = DatasetSession::open_path(&root).expect("DAG dataset should open");
 
     assert_eq!(session.topology(), Topology::Dag, "topology should be DAG");
 
@@ -788,7 +798,7 @@ fn test_graph_catchment_id_mismatch() {
     // Graph: atoms 1, 2, 4 — atom 4 is absent from catchments, atom 3 is absent from graph
     write_graph_custom(root, &[1, 2, 4], &[vec![], vec![1], vec![2]]);
 
-    let err = DatasetSession::open(root).unwrap_err();
+    let err = DatasetSession::open_path(root).unwrap_err();
     assert!(
         matches!(err, SessionError::IntegrityViolation { .. }),
         "expected IntegrityViolation, got: {err}"
@@ -807,7 +817,7 @@ fn test_graph_upstream_id_missing_from_catchments() {
     // Atom 3 references upstream atom 99 — not in catchments
     write_graph_custom(root, &[1, 2, 3], &[vec![], vec![1], vec![99]]);
 
-    let err = DatasetSession::open(root).unwrap_err();
+    let err = DatasetSession::open_path(root).unwrap_err();
     assert!(
         matches!(err, SessionError::IntegrityViolation { .. }),
         "expected IntegrityViolation, got: {err}"
@@ -830,7 +840,7 @@ fn test_degenerate_snap_bbox_opens_and_queries() {
     write_catchments(root, 3, 8192);
     write_snap_with_degenerate_bbox(root, 3);
 
-    let session = DatasetSession::open(root)
+    let session = DatasetSession::open_path(root)
         .expect("session with degenerate snap bboxes should open successfully");
 
     let snap = session.snap().expect("snap store should be present");
@@ -858,7 +868,7 @@ fn test_snap_catchment_id_missing_from_catchments() {
     write_catchments(root, 3, 8192);
     write_snap_with_custom_catchment_ids(root, &[1, 99, 3]);
 
-    let err = DatasetSession::open(root).unwrap_err();
+    let err = DatasetSession::open_path(root).unwrap_err();
     assert!(
         matches!(err, SessionError::IntegrityViolation { .. }),
         "expected IntegrityViolation, got: {err}"

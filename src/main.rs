@@ -45,7 +45,7 @@ enum Command {
 #[derive(Debug, Args)]
 struct DelineateArgs {
     #[arg(long, short = 'd')]
-    dataset: PathBuf,
+    dataset: String,
 
     #[arg(long, requires = "lon", conflicts_with = "outlets")]
     lat: Option<f64>,

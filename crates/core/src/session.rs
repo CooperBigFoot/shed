@@ -4,11 +4,13 @@ use std::path::{Path, PathBuf};
 
 use hfx_core::{Manifest, RasterAvailability, SnapAvailability, Topology};
 use tracing::{debug, info, instrument};
+use url::Url;
 
 use crate::error::SessionError;
 use crate::reader;
 use crate::reader::catchment_store::CatchmentStore;
 use crate::reader::snap_store::SnapStore;
+use crate::source::DatasetSource;
 
 /// Validated paths to the optional raster pair.
 ///
@@ -47,7 +49,27 @@ pub struct DatasetSession {
 }
 
 impl DatasetSession {
-    /// Open an HFX dataset rooted at `root` and return a ready-to-query session.
+    /// Open an HFX dataset source and return a ready-to-query session.
+    ///
+    /// Local paths and `file://` URLs are opened from the local filesystem.
+    /// Remote sources are parsed but not yet readable in this phase.
+    ///
+    /// # Errors
+    ///
+    /// | Variant | Condition |
+    /// |---|---|
+    /// | Source parsing errors | The dataset source string is malformed or unsupported |
+    /// | [`SessionError::RemoteDatasetNotSupported`] | The source is remote |
+    /// | Local session errors | Propagated from [`DatasetSession::open_path`] |
+    #[instrument(skip_all, fields(input = %input))]
+    pub fn open(input: &str) -> Result<Self, SessionError> {
+        match DatasetSource::parse(input)? {
+            DatasetSource::Local(root) => Self::open_path(&root),
+            DatasetSource::Remote { url, .. } => Self::open_remote(&url),
+        }
+    }
+
+    /// Open an HFX dataset rooted at a local filesystem path.
     ///
     /// Validates the directory layout against the manifest, loads the drainage
     /// graph into memory, and prepares lazy readers for catchment and snap data.
@@ -61,10 +83,8 @@ impl DatasetSession {
     /// | [`SessionError::OptionalArtifactMissing`] | Manifest declares an optional artifact that is missing |
     /// | [`SessionError::AtomCountMismatch`] | Row count in catchments.parquet differs from manifest |
     /// | Manifest/graph/Parquet errors | Propagated from sub-readers |
-    #[instrument(skip_all, fields(root = %root.as_ref().display()))]
-    pub fn open(root: impl AsRef<Path>) -> Result<Self, SessionError> {
-        let root = root.as_ref();
-
+    #[instrument(skip_all, fields(root = %root.display()))]
+    pub fn open_path(root: &Path) -> Result<Self, SessionError> {
         if !root.is_dir() {
             return Err(SessionError::RootNotFound {
                 path: root.display().to_string(),
@@ -211,6 +231,12 @@ impl DatasetSession {
             catchments,
             snap,
             raster_paths,
+        })
+    }
+
+    fn open_remote(url: &Url) -> Result<Self, SessionError> {
+        Err(SessionError::RemoteDatasetNotSupported {
+            url: url.as_str().to_string(),
         })
     }
 

@@ -70,7 +70,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         .generated_terminal_atom_center()
         .ok_or("bench fixture must have at least one generated atom")?;
     let (_dir, root) = builder.build();
-    let session = DatasetSession::open(&root)?;
+    let session = DatasetSession::open_path(&root)?;
     let engine = Engine::builder(session).build();
     let options = DelineationOptions::default().with_refine(false);
 

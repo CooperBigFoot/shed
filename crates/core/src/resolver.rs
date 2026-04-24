@@ -949,7 +949,7 @@ mod tests {
             .with_custom_catchments(catchments)
             .with_custom_snap_targets(targets)
             .build();
-        let session = DatasetSession::open(&root).unwrap();
+        let session = DatasetSession::open_path(&root).unwrap();
 
         let result = resolve_outlet(
             &session,
@@ -1004,7 +1004,7 @@ mod tests {
             .with_custom_catchments(catchments)
             .with_custom_snap_targets(targets)
             .build();
-        let session = DatasetSession::open(&root).unwrap();
+        let session = DatasetSession::open_path(&root).unwrap();
         let config = ResolverConfig::new().with_snap_strategy(SnapStrategy::WeightFirst);
 
         let result = resolve_outlet(&session, GeoCoord::new(0.2, 0.2), &config).unwrap();
@@ -1055,7 +1055,7 @@ mod tests {
             .with_custom_catchments(catchments)
             .with_custom_snap_targets(targets)
             .build();
-        let session = DatasetSession::open(&root).unwrap();
+        let session = DatasetSession::open_path(&root).unwrap();
         let config = ResolverConfig::new().with_snap_strategy(SnapStrategy::WeightFirst);
 
         let result = resolve_outlet(&session, GeoCoord::new(0.2, 0.2), &config).unwrap();
@@ -1098,7 +1098,7 @@ mod tests {
             .with_custom_catchments(catchments)
             .with_custom_snap_targets(targets)
             .build();
-        let session = DatasetSession::open(&root).unwrap();
+        let session = DatasetSession::open_path(&root).unwrap();
         let config = ResolverConfig::new()
             .with_snap_strategy(SnapStrategy::DistanceFirst)
             .with_distance_tolerance(0.0)
@@ -1159,7 +1159,7 @@ mod tests {
             .with_custom_catchments(catchments)
             .with_custom_snap_targets(targets)
             .build();
-        let session = DatasetSession::open(&root).unwrap();
+        let session = DatasetSession::open_path(&root).unwrap();
 
         let result =
             resolve_outlet(&session, GeoCoord::new(10.0, 45.0), &ResolverConfig::new()).unwrap();

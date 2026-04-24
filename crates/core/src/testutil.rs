@@ -624,7 +624,7 @@ mod tests {
     #[test]
     fn test_minimal_dataset_opens() {
         let (_dir, root) = DatasetBuilder::new(3).build();
-        let session = DatasetSession::open(&root).expect("minimal dataset should open");
+        let session = DatasetSession::open_path(&root).expect("minimal dataset should open");
         assert_eq!(session.manifest().atom_count().get(), 3);
         assert!(session.snap().is_none());
         assert!(session.raster_paths().is_none());
@@ -633,14 +633,14 @@ mod tests {
     #[test]
     fn test_dataset_with_snap_opens() {
         let (_dir, root) = DatasetBuilder::new(5).with_snap().build();
-        let session = DatasetSession::open(&root).expect("dataset with snap should open");
+        let session = DatasetSession::open_path(&root).expect("dataset with snap should open");
         assert!(session.snap().is_some());
     }
 
     #[test]
     fn test_dataset_with_rasters_opens() {
         let (_dir, root) = DatasetBuilder::new(4).with_rasters().build();
-        let session = DatasetSession::open(&root).expect("dataset with rasters should open");
+        let session = DatasetSession::open_path(&root).expect("dataset with rasters should open");
         assert!(session.raster_paths().is_some());
         let rp = session.raster_paths().unwrap();
         assert!(rp.flow_dir().exists());
@@ -650,14 +650,15 @@ mod tests {
     #[test]
     fn test_dataset_with_small_row_groups() {
         let (_dir, root) = DatasetBuilder::new(10).with_row_group_size(3).build();
-        let session = DatasetSession::open(&root).expect("small row group dataset should open");
+        let session =
+            DatasetSession::open_path(&root).expect("small row group dataset should open");
         assert_eq!(session.manifest().atom_count().get(), 10);
     }
 
     #[test]
     fn test_dag_dataset_opens() {
         let (_dir, root) = DatasetBuilder::new(3).with_dag().build();
-        let session = DatasetSession::open(&root).expect("dag dataset should open");
+        let session = DatasetSession::open_path(&root).expect("dag dataset should open");
         // DAG mode adds 4 extra atoms
         assert_eq!(session.manifest().atom_count().get(), 7);
         assert_eq!(session.topology(), hfx_core::Topology::Dag);
@@ -666,21 +667,22 @@ mod tests {
     #[test]
     fn test_graph_has_correct_row_count() {
         let (_dir, root) = DatasetBuilder::new(5).build();
-        let session = DatasetSession::open(&root).unwrap();
+        let session = DatasetSession::open_path(&root).unwrap();
         assert_eq!(session.graph().len(), 5);
     }
 
     #[test]
     fn test_catchments_have_correct_count() {
         let (_dir, root) = DatasetBuilder::new(4).build();
-        let session = DatasetSession::open(&root).unwrap();
+        let session = DatasetSession::open_path(&root).unwrap();
         assert_eq!(session.catchments().total_rows(), 4);
     }
 
     #[test]
     fn test_dataset_with_complex_generated_polygons_opens() {
         let (_dir, root) = DatasetBuilder::new(6).with_polygon_complexity(12).build();
-        let session = DatasetSession::open(&root).expect("complex polygon dataset should open");
+        let session =
+            DatasetSession::open_path(&root).expect("complex polygon dataset should open");
         assert_eq!(session.manifest().atom_count().get(), 6);
         assert_eq!(session.catchments().total_rows(), 6);
     }
@@ -697,7 +699,8 @@ mod tests {
         assert!((-90.0..=90.0).contains(&terminal.lat));
 
         let (_dir, root) = builder.build();
-        let session = DatasetSession::open(&root).expect("large generated dataset should open");
+        let session =
+            DatasetSession::open_path(&root).expect("large generated dataset should open");
         assert_eq!(session.manifest().atom_count().get(), 2_500);
         assert_eq!(session.catchments().total_rows(), 2_500);
     }
@@ -709,7 +712,7 @@ mod tests {
             .with_rasters()
             .with_row_group_size(2)
             .build();
-        let session = DatasetSession::open(&root).expect("full dataset should open");
+        let session = DatasetSession::open_path(&root).expect("full dataset should open");
         assert_eq!(session.manifest().atom_count().get(), 6);
         assert!(session.snap().is_some());
         assert!(session.raster_paths().is_some());
@@ -734,7 +737,8 @@ mod tests {
         let (_dir, root) = DatasetBuilder::new(2)
             .with_custom_catchments(catchments)
             .build();
-        let session = DatasetSession::open(&root).expect("custom catchments dataset should open");
+        let session =
+            DatasetSession::open_path(&root).expect("custom catchments dataset should open");
         assert_eq!(session.manifest().atom_count().get(), 2);
     }
 
@@ -774,7 +778,8 @@ mod tests {
             .with_custom_catchments(catchments)
             .with_custom_snap_targets(targets)
             .build();
-        let session = DatasetSession::open(&root).expect("custom snap targets dataset should open");
+        let session =
+            DatasetSession::open_path(&root).expect("custom snap targets dataset should open");
         assert!(session.snap().is_some());
     }
 

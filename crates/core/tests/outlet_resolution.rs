@@ -346,7 +346,7 @@ fn build_3c_pip_dataset() -> (TempDir, std::path::PathBuf) {
 #[test]
 fn snap_happy_path() {
     let (_dir, root) = build_3c_snap_dataset();
-    let session = DatasetSession::open(&root).unwrap();
+    let session = DatasetSession::open_path(&root).unwrap();
 
     // Outlet exactly on snap target 2
     let outlet = GeoCoord::new(1.2, 0.2);
@@ -370,7 +370,7 @@ fn snap_happy_path() {
 #[test]
 fn snap_nearest_wins() {
     let (_dir, root) = build_3c_snap_dataset();
-    let session = DatasetSession::open(&root).unwrap();
+    let session = DatasetSession::open_path(&root).unwrap();
 
     // Outlet at (1.19, 0.2) — nearest to target 2 at (1.2, 0.2)
     // Target 1 is at (0.7, 0.2) — much further away
@@ -411,7 +411,7 @@ fn snap_weight_tie_break() {
     let snaps: &[SnapSpec<'_>] = &[(1, 1, 50.0, true, &g1), (2, 2, 100.0, true, &g2)];
     write_snap(&root, snaps);
 
-    let session = DatasetSession::open(&root).unwrap();
+    let session = DatasetSession::open_path(&root).unwrap();
     let outlet = GeoCoord::new(0.25, 0.2);
     let config =
         ResolverConfig::new().with_search_radius(SearchRadiusMetres::new(5_000.0).unwrap());
@@ -454,7 +454,7 @@ fn snap_mainstem_tie_break() {
     ];
     write_snap(&root, snaps);
 
-    let session = DatasetSession::open(&root).unwrap();
+    let session = DatasetSession::open_path(&root).unwrap();
     let outlet = GeoCoord::new(0.25, 0.2);
     let config =
         ResolverConfig::new().with_search_radius(SearchRadiusMetres::new(5_000.0).unwrap());
@@ -475,7 +475,7 @@ fn snap_mainstem_tie_break() {
 #[test]
 fn snap_no_candidates() {
     let (_dir, root) = build_3c_snap_dataset();
-    let session = DatasetSession::open(&root).unwrap();
+    let session = DatasetSession::open_path(&root).unwrap();
 
     // Outlet far from all targets, tiny search radius
     let outlet = GeoCoord::new(50.0, 50.0);
@@ -497,7 +497,7 @@ fn snap_no_candidates() {
 #[test]
 fn pip_happy_path() {
     let (_dir, root) = build_3c_pip_dataset();
-    let session = DatasetSession::open(&root).unwrap();
+    let session = DatasetSession::open_path(&root).unwrap();
 
     // Outlet inside atom 2's polygon [1.0, 0.0, 1.4, 0.4]
     let outlet = GeoCoord::new(1.2, 0.2);
@@ -535,7 +535,7 @@ fn pip_upstream_area_tie_break() {
     write_graph(&root, &ids);
     write_catchments(&root, catchments);
 
-    let session = DatasetSession::open(&root).unwrap();
+    let session = DatasetSession::open_path(&root).unwrap();
     // Outlet on the shared edge — triggers intersects fallback + tie-break
     let outlet = GeoCoord::new(1.0, 0.2);
     let config = ResolverConfig::new();
@@ -563,7 +563,7 @@ fn pip_upstream_area_tie_break() {
 #[test]
 fn pip_outside_all() {
     let (_dir, root) = build_3c_pip_dataset();
-    let session = DatasetSession::open(&root).unwrap();
+    let session = DatasetSession::open_path(&root).unwrap();
 
     let outlet = GeoCoord::new(50.0, 50.0);
     let config = ResolverConfig::new();
@@ -604,7 +604,7 @@ fn dispatch_snap_over_pip() {
     ];
     write_snap(&root, snaps);
 
-    let session = DatasetSession::open(&root).unwrap();
+    let session = DatasetSession::open_path(&root).unwrap();
     // Outlet at (1.2, 0.2) — inside atom 2 by PiP, but snap wins with atom 1
     let outlet = GeoCoord::new(1.2, 0.2);
     let config =
@@ -630,7 +630,7 @@ fn dispatch_snap_over_pip() {
 #[test]
 fn dispatch_pip_when_no_snap() {
     let (_dir, root) = build_3c_pip_dataset();
-    let session = DatasetSession::open(&root).unwrap();
+    let session = DatasetSession::open_path(&root).unwrap();
 
     assert!(session.snap().is_none(), "dataset must have no snap file");
 
@@ -673,7 +673,7 @@ fn snap_linestring_target() {
     let snaps: &[SnapSpec<'_>] = &[(1, 1, 100.0, true, &g1), (2, 2, 100.0, true, &g2)];
     write_snap(&root, snaps);
 
-    let session = DatasetSession::open(&root).unwrap();
+    let session = DatasetSession::open_path(&root).unwrap();
     // Outlet above target 2's line — perpendicular projection should snap to the line
     let outlet = GeoCoord::new(1.15, 0.25);
     let config =

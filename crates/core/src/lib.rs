@@ -10,6 +10,7 @@ pub mod resolver;
 #[allow(dead_code)]
 pub(crate) mod runtime;
 pub mod session;
+pub mod source;
 
 #[cfg(any(test, feature = "test-fixtures"))]
 #[allow(deprecated)]
@@ -23,3 +24,4 @@ pub use resolver::{
     OutletResolutionError, PipTieBreak, ResolutionMethod, ResolvedOutlet, ResolverConfig,
     SearchRadiusMetres, SnapStrategy, resolve_outlet,
 };
+pub use source::DatasetSource;

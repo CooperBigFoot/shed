@@ -163,6 +163,54 @@ pub enum SessionError {
         /// Human-readable description of the integrity failure.
         detail: String,
     },
+
+    /// Fired when a dataset source string looks like a URL but is malformed,
+    /// or a URL lacks source-specific required pieces.
+    #[error("invalid dataset source {input:?}: {reason}")]
+    InvalidDatasetSource {
+        /// The dataset source string supplied by the caller.
+        input: String,
+        /// Human-readable description of why parsing failed.
+        reason: String,
+    },
+
+    /// Fired when a dataset source URL is well-formed but not supported by
+    /// the current runtime.
+    #[error("unsupported dataset source {input:?}: {reason}")]
+    UnsupportedDatasetSource {
+        /// The dataset source string supplied by the caller.
+        input: String,
+        /// Human-readable description of the unsupported capability.
+        reason: String,
+    },
+
+    /// Fired when a remote dataset URL path cannot be represented as an
+    /// object-store path prefix.
+    #[error("invalid remote dataset path in {input:?}: {source}")]
+    DatasetSourcePath {
+        /// The dataset source string supplied by the caller.
+        input: String,
+        /// Underlying object-store path error.
+        source: object_store::path::Error,
+    },
+
+    /// Fired when object-store configuration derived from a supported dataset
+    /// source cannot be built.
+    #[error("failed to configure object store for dataset source {input:?}: {source}")]
+    ObjectStoreConfig {
+        /// The dataset source string supplied by the caller.
+        input: String,
+        /// Underlying object-store configuration error.
+        source: object_store::Error,
+    },
+
+    /// Fired when a remote dataset source parses successfully but the session
+    /// reader does not yet support loading remote artifacts.
+    #[error("remote dataset opening is not yet supported for {url}")]
+    RemoteDatasetNotSupported {
+        /// The remote dataset URL supplied by the caller.
+        url: String,
+    },
 }
 
 impl SessionError {

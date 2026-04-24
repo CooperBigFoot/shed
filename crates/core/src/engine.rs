@@ -480,7 +480,7 @@ mod tests {
     ///   atom 3: (1.50, 0.00, 1.90, 0.40)
     fn three_atom_session() -> (tempfile::TempDir, DatasetSession) {
         let (dir, root) = DatasetBuilder::new(3).build();
-        let session = DatasetSession::open(&root).expect("session should open");
+        let session = DatasetSession::open_path(&root).expect("session should open");
         (dir, session)
     }
 
@@ -560,7 +560,7 @@ mod tests {
     fn engine_single_headwater_atom() {
         // Atom 1 is the headwater (no upstream). Use a coordinate inside atom 1.
         let (_dir, root) = DatasetBuilder::new(3).build();
-        let session = DatasetSession::open(&root).expect("session should open");
+        let session = DatasetSession::open_path(&root).expect("session should open");
         let engine = Engine::builder(session).build();
 
         // Atom 1 bbox: (0.50, 0.00, 0.90, 0.40), centre at ~(0.70, 0.20)
