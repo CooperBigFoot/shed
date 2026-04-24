@@ -14,6 +14,8 @@ use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use serde_json::json;
 use tempfile::TempDir;
 
+use crate::algo::GeoCoord;
+
 /// Custom catchment specification for outlet resolution tests.
 pub struct TestCatchment {
     pub id: i64,
@@ -49,6 +51,7 @@ pub struct DatasetBuilder {
     include_rasters: bool,
     row_group_size: usize,
     polygon_complexity: usize,
+    generated_longitude_span: Option<(f64, f64)>,
     dag_diamond: bool,
     custom_catchments: Option<Vec<TestCatchment>>,
     custom_snap_targets: Option<Vec<TestSnapTarget>>,
@@ -65,6 +68,7 @@ impl DatasetBuilder {
             include_rasters: false,
             row_group_size: 8192,
             polygon_complexity: 5,
+            generated_longitude_span: None,
             dag_diamond: false,
             custom_catchments: None,
             custom_snap_targets: None,
@@ -95,6 +99,38 @@ impl DatasetBuilder {
     pub fn with_polygon_complexity(mut self, coords_per_ring: usize) -> Self {
         self.polygon_complexity = coords_per_ring;
         self
+    }
+
+    /// Compress auto-generated catchments into the provided longitude span.
+    ///
+    /// This only affects generated catchments and generated snap targets. Custom
+    /// catchments keep their caller-provided coordinates unchanged.
+    pub fn with_longitude_span(mut self, min_lon: f64, max_lon: f64) -> Self {
+        assert!(
+            min_lon.is_finite() && max_lon.is_finite(),
+            "longitude span bounds must be finite"
+        );
+        assert!(
+            (-180.0..=180.0).contains(&min_lon) && (-180.0..=180.0).contains(&max_lon),
+            "longitude span must fit EPSG:4326 bounds"
+        );
+        assert!(min_lon < max_lon, "longitude span must be non-empty");
+        self.generated_longitude_span = Some((min_lon, max_lon));
+        self
+    }
+
+    /// Return the center of the terminal generated atom, if this builder uses generated catchments.
+    pub fn generated_terminal_atom_center(&self) -> Option<GeoCoord> {
+        if self.custom_catchments.is_some() || self.atom_count == 0 {
+            return None;
+        }
+
+        let atom_count = self.generated_atom_count();
+        let (minx, miny, maxx, maxy) = self.generated_atom_bbox(atom_count - 1, atom_count);
+        Some(GeoCoord::new(
+            ((minx + maxx) / 2.0) as f64,
+            ((miny + maxy) / 2.0) as f64,
+        ))
     }
 
     /// Add a diamond bifurcation pattern and mark the topology as DAG.
@@ -145,11 +181,7 @@ impl DatasetBuilder {
     // -----------------------------------------------------------------------
 
     fn write_manifest(&self, root: &Path) {
-        let atom_count = if self.dag_diamond {
-            self.atom_count + 4
-        } else {
-            self.atom_count
-        };
+        let atom_count = self.generated_atom_count();
         let mut manifest = json!({
             "format_version": "0.1",
             "fabric_name": "testfabric",
@@ -252,12 +284,9 @@ impl DatasetBuilder {
             }
         } else {
             let (ids, _) = self.build_graph_data();
+            let generated_atom_count = ids.len();
             for (idx, &id) in ids.iter().enumerate() {
-                let i = idx + 1; // 1-based for bbox spacing
-                let minx = (i as f32) * 0.5;
-                let miny = 0.0f32;
-                let maxx = (i as f32) * 0.5 + 0.4;
-                let maxy = 0.4f32;
+                let (minx, miny, maxx, maxy) = self.generated_atom_bbox(idx, generated_atom_count);
 
                 id_b.append_value(id);
                 area_b.append_value(10.0f32);
@@ -357,12 +386,9 @@ impl DatasetBuilder {
             }
         } else {
             let (ids, _) = self.build_graph_data();
+            let generated_atom_count = ids.len();
             for (idx, &atom_id) in ids.iter().enumerate() {
-                let i = idx + 1;
-                let minx = (i as f32) * 0.5;
-                let miny = 0.0f32;
-                let maxx = (i as f32) * 0.5 + 0.4;
-                let maxy = 0.4f32;
+                let (minx, miny, maxx, maxy) = self.generated_atom_bbox(idx, generated_atom_count);
 
                 // Center of the bbox for the linestring
                 let cx = ((minx + maxx) / 2.0) as f64;
@@ -468,6 +494,31 @@ impl DatasetBuilder {
         }
 
         (ids, upstream)
+    }
+
+    fn generated_atom_count(&self) -> usize {
+        if self.dag_diamond {
+            self.atom_count + 4
+        } else {
+            self.atom_count
+        }
+    }
+
+    fn generated_atom_bbox(&self, idx: usize, atom_count: usize) -> (f32, f32, f32, f32) {
+        let miny = 0.0f32;
+        let maxy = 0.4f32;
+
+        if let Some((min_lon, max_lon)) = self.generated_longitude_span {
+            let slot_width = (max_lon - min_lon) / atom_count as f64;
+            let minx = min_lon + idx as f64 * slot_width;
+            let maxx = minx + slot_width * 0.8;
+            return (minx as f32, miny, maxx as f32, maxy);
+        }
+
+        let i = idx + 1; // 1-based for legacy bbox spacing.
+        let minx = (i as f32) * 0.5;
+        let maxx = (i as f32) * 0.5 + 0.4;
+        (minx, miny, maxx, maxy)
     }
 }
 
@@ -632,6 +683,23 @@ mod tests {
         let session = DatasetSession::open(&root).expect("complex polygon dataset should open");
         assert_eq!(session.manifest().atom_count().get(), 6);
         assert_eq!(session.catchments().total_rows(), 6);
+    }
+
+    #[test]
+    fn test_large_generated_fixture_fits_longitude_span() {
+        let builder = DatasetBuilder::new(2_500)
+            .with_longitude_span(-179.0, 179.0)
+            .with_polygon_complexity(1_500);
+        let terminal = builder
+            .generated_terminal_atom_center()
+            .expect("generated fixture should have a terminal atom");
+        assert!((-180.0..=180.0).contains(&terminal.lon));
+        assert!((-90.0..=90.0).contains(&terminal.lat));
+
+        let (_dir, root) = builder.build();
+        let session = DatasetSession::open(&root).expect("large generated dataset should open");
+        assert_eq!(session.manifest().atom_count().get(), 2_500);
+        assert_eq!(session.catchments().total_rows(), 2_500);
     }
 
     #[test]

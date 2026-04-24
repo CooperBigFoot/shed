@@ -8,13 +8,14 @@ use std::env;
 use std::error::Error;
 use std::time::Instant;
 
-use shed_core::algo::GeoCoord;
 use shed_core::session::DatasetSession;
 use shed_core::testutil::DatasetBuilder;
 use shed_core::{DelineationOptions, Engine};
 
 const DEFAULT_ATOMS: usize = 2_500;
 const DEFAULT_COORDS_PER_RING: usize = 1_500;
+const BENCH_MIN_LON: f64 = -179.0;
+const BENCH_MAX_LON: f64 = 179.0;
 
 #[derive(Debug, Clone, Copy)]
 struct BenchConfig {
@@ -62,13 +63,16 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn run() -> Result<(), Box<dyn Error>> {
     let config = BenchConfig::from_env_and_args()?;
-    let (_dir, root) = DatasetBuilder::new(config.atoms)
-        .with_polygon_complexity(config.coords_per_ring)
-        .build();
+    let builder = DatasetBuilder::new(config.atoms)
+        .with_longitude_span(BENCH_MIN_LON, BENCH_MAX_LON)
+        .with_polygon_complexity(config.coords_per_ring);
+    let outlet = builder
+        .generated_terminal_atom_center()
+        .ok_or("bench fixture must have at least one generated atom")?;
+    let (_dir, root) = builder.build();
     let session = DatasetSession::open(&root)?;
     let engine = Engine::builder(session).build();
     let options = DelineationOptions::default().with_refine(false);
-    let outlet = terminal_atom_center(config.atoms);
 
     let start = Instant::now();
     let result = engine.delineate(outlet, &options)?;
@@ -86,11 +90,6 @@ fn run() -> Result<(), Box<dyn Error>> {
     );
 
     Ok(())
-}
-
-fn terminal_atom_center(atoms: usize) -> GeoCoord {
-    let i = atoms as f64;
-    GeoCoord::new(i * 0.5 + 0.2, 0.2)
 }
 
 fn read_env_usize(name: &str) -> Result<Option<usize>, Box<dyn Error>> {
