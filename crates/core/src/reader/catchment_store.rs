@@ -33,6 +33,10 @@ impl CatchmentGeometryRow {
     pub(crate) fn geometry(&self) -> &WkbGeometry {
         &self.geometry
     }
+
+    pub(crate) fn into_parts(self) -> (AtomId, WkbGeometry) {
+        (self.id, self.geometry)
+    }
 }
 
 // ---------------------------------------------------------------------------

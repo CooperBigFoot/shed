@@ -212,8 +212,8 @@ fn index_catchments_by_id(
 ) -> Result<HashMap<AtomId, WkbGeometry>, AssemblyError> {
     let mut atom_map = HashMap::with_capacity(fetched.len());
     for atom in fetched {
-        let atom_id = atom.id();
-        if atom_map.insert(atom_id, atom.geometry().clone()).is_some() {
+        let (atom_id, geometry) = atom.into_parts();
+        if atom_map.insert(atom_id, geometry).is_some() {
             return Err(AssemblyError::DuplicateCatchment { atom_id });
         }
     }
@@ -226,7 +226,7 @@ fn assemble_from_geometries(
 ) -> Result<AssemblyResult, AssemblyError> {
     let polygons: Vec<Polygon<f64>> = geometries.into_iter().flat_map(|mp| mp.0).collect();
 
-    let dissolved = dissolve(&polygons).map_err(|source| AssemblyError::Dissolve { source })?;
+    let dissolved = dissolve(polygons).map_err(|source| AssemblyError::Dissolve { source })?;
 
     let filled = match options.geometry_repair {
         Some(repairer) => WatershedGeometry::from_dissolved(dissolved)

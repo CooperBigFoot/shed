@@ -12,7 +12,7 @@ pub enum DissolveError {
     EmptyInput,
 }
 
-/// Dissolve a slice of polygons into a unified multi-polygon.
+/// Dissolve polygons into a unified multi-polygon.
 ///
 /// Performs an iterative boolean union: seeds the accumulator with the first
 /// polygon, then folds each subsequent polygon into the result via
@@ -24,7 +24,7 @@ pub enum DissolveError {
 /// |-----------|-------|
 /// | `polygons` is empty | [`DissolveError::EmptyInput`] |
 #[instrument(skip(polygons))]
-pub fn dissolve(polygons: &[Polygon<f64>]) -> Result<MultiPolygon<f64>, DissolveError> {
+pub fn dissolve(polygons: Vec<Polygon<f64>>) -> Result<MultiPolygon<f64>, DissolveError> {
     if polygons.is_empty() {
         return Err(DissolveError::EmptyInput);
     }
@@ -32,8 +32,8 @@ pub fn dissolve(polygons: &[Polygon<f64>]) -> Result<MultiPolygon<f64>, Dissolve
     debug!(count = polygons.len(), "dissolving polygons");
 
     let result = polygons
-        .par_iter()
-        .map(|p| MultiPolygon::new(vec![p.clone()]))
+        .into_par_iter()
+        .map(|p| MultiPolygon::new(vec![p]))
         .reduce(|| MultiPolygon::new(vec![]), |a, b| a.union(&b));
 
     debug!(polygon_count = result.0.len(), "dissolve complete");
@@ -55,14 +55,14 @@ mod tests {
 
     #[test]
     fn empty_input_returns_error() {
-        let result = dissolve(&[]);
+        let result = dissolve(Vec::new());
         assert!(matches!(result, Err(DissolveError::EmptyInput)));
     }
 
     #[test]
     fn single_polygon() {
         let poly = rect(0.0, 0.0, 1.0, 1.0);
-        let result = dissolve(&[poly]).unwrap();
+        let result = dissolve(vec![poly]).unwrap();
         assert_eq!(result.0.len(), 1);
     }
 
@@ -70,7 +70,7 @@ mod tests {
     fn two_overlapping_polygons() {
         let a = rect(0.0, 0.0, 2.0, 2.0);
         let b = rect(1.0, 1.0, 3.0, 3.0);
-        let result = dissolve(&[a, b]).unwrap();
+        let result = dissolve(vec![a, b]).unwrap();
         assert_eq!(result.0.len(), 1);
     }
 
@@ -78,7 +78,7 @@ mod tests {
     fn two_disjoint_polygons() {
         let a = rect(0.0, 0.0, 1.0, 1.0);
         let b = rect(2.0, 2.0, 3.0, 3.0);
-        let result = dissolve(&[a, b]).unwrap();
+        let result = dissolve(vec![a, b]).unwrap();
         assert_eq!(result.0.len(), 2);
     }
 
@@ -87,7 +87,7 @@ mod tests {
         let a = rect(0.0, 0.0, 2.0, 1.0);
         let b = rect(1.0, 0.0, 3.0, 1.0);
         let c = rect(2.0, 0.0, 4.0, 1.0);
-        let result = dissolve(&[a, b, c]).unwrap();
+        let result = dissolve(vec![a, b, c]).unwrap();
         assert_eq!(result.0.len(), 1);
     }
 }

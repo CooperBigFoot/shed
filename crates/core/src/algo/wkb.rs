@@ -3,9 +3,10 @@
 //! Converts opaque [`WkbGeometry`] bytes into `geo` types using `geozero`.
 //! This is pure Rust with no GDAL dependency.
 
-use geo::{Geometry, MultiPolygon, Polygon};
+use geo::{Geometry, LineString, MultiPolygon, Polygon};
 use geozero::ToGeo;
 use geozero::wkb::Wkb;
+use geozero::{GeomProcessor, GeozeroGeometry};
 use hfx_core::WkbGeometry;
 
 /// Errors from WKB decoding.
@@ -36,7 +37,7 @@ pub enum WkbDecodeError {
 /// |---|---|
 /// | [`WkbDecodeError::DecodeFailed`] | The geozero WKB decoder fails |
 pub fn decode_wkb(wkb: &WkbGeometry) -> Result<Geometry<f64>, WkbDecodeError> {
-    Wkb(wkb.as_bytes().to_vec())
+    Wkb(wkb.as_bytes())
         .to_geo()
         .map_err(|e| WkbDecodeError::DecodeFailed {
             reason: e.to_string(),
@@ -98,11 +99,55 @@ pub enum WkbEncodeError {
 /// Encode a [`MultiPolygon`] to OGC WKB bytes (little-endian, 2D).
 pub fn encode_wkb_multi_polygon(mp: &MultiPolygon<f64>) -> Result<Vec<u8>, WkbEncodeError> {
     use geozero::{CoordDimensions, ToWkb};
-    let geom: geo::Geometry<f64> = mp.clone().into();
-    geom.to_wkb(CoordDimensions::xy())
+    MultiPolygonRef(mp)
+        .to_wkb(CoordDimensions::xy())
         .map_err(|e| WkbEncodeError::EncodeFailed {
             reason: e.to_string(),
         })
+}
+
+struct MultiPolygonRef<'a>(&'a MultiPolygon<f64>);
+
+impl GeozeroGeometry for MultiPolygonRef<'_> {
+    fn process_geom<P: GeomProcessor>(&self, processor: &mut P) -> geozero::error::Result<()> {
+        processor.multipolygon_begin(self.0.0.len(), 0)?;
+        for (idx, polygon) in self.0.0.iter().enumerate() {
+            process_polygon_ref(polygon, false, idx, processor)?;
+        }
+        processor.multipolygon_end(0)
+    }
+}
+
+fn process_polygon_ref<P: GeomProcessor>(
+    polygon: &Polygon<f64>,
+    tagged: bool,
+    idx: usize,
+    processor: &mut P,
+) -> geozero::error::Result<()> {
+    processor.polygon_begin(tagged, polygon.interiors().len() + 1, idx)?;
+    process_line_string_ref(polygon.exterior(), false, 0, processor)?;
+    for (ring_idx, ring) in polygon.interiors().iter().enumerate() {
+        process_line_string_ref(ring, false, ring_idx + 1, processor)?;
+    }
+    processor.polygon_end(tagged, idx)
+}
+
+fn process_line_string_ref<P: GeomProcessor>(
+    line: &LineString<f64>,
+    tagged: bool,
+    idx: usize,
+    processor: &mut P,
+) -> geozero::error::Result<()> {
+    let multi = processor.multi_dim();
+    processor.linestring_begin(tagged, line.0.len(), idx)?;
+    for (coord_idx, coord) in line.0.iter().enumerate() {
+        if multi {
+            processor.coordinate(coord.x, coord.y, None, None, None, None, coord_idx)?;
+        } else {
+            processor.xy(coord.x, coord.y, coord_idx)?;
+        }
+    }
+    processor.linestring_end(tagged, idx)
 }
 
 /// Return a static name string for a [`Geometry`] variant.
