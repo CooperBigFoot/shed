@@ -1,9 +1,10 @@
 //! Component 6 orchestration: fetch catchment geometries and assemble the final watershed.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 use geo::{MultiPolygon, Polygon};
-use hfx_core::{AtomId, WkbGeometry};
+use hfx_core::AtomId;
 use tracing::{debug, instrument};
 
 use crate::algo::{
@@ -153,11 +154,12 @@ pub(crate) fn assemble_watershed(
     refined_terminal_geometry: Option<&MultiPolygon<f64>>,
     options: AssemblyOptions<'_>,
 ) -> Result<AssemblyResult, AssemblyError> {
+    let terminal = upstream.terminal();
     let fetched = catchments
         .query_geometries_by_ids(upstream.atom_ids())
         .map_err(|source| AssemblyError::CatchmentQuery { source })?;
 
-    let atom_map = index_catchments_by_id(fetched)?;
+    let mut atom_map = index_catchments_by_id(fetched, terminal, refined_terminal_geometry)?;
     let missing_ids: Vec<AtomId> = upstream
         .atom_ids()
         .iter()
@@ -168,33 +170,21 @@ pub(crate) fn assemble_watershed(
         return Err(AssemblyError::MissingCatchments { missing_ids });
     }
 
-    let terminal = upstream.terminal();
     let mut geometries = Vec::with_capacity(upstream.len());
 
     for atom_id in upstream.atom_ids() {
-        if *atom_id == terminal
-            && let Some(override_geometry) = refined_terminal_geometry
-        {
-            if override_geometry.0.is_empty() {
-                return Err(AssemblyError::EmptyRefinedTerminalGeometry { atom_id: terminal });
-            }
-            geometries.push(override_geometry.clone());
-            continue;
-        }
-
-        let geometry_wkb =
+        let geometry =
             atom_map
-                .get(atom_id)
+                .remove(atom_id)
                 .ok_or_else(|| AssemblyError::MissingCatchments {
                     missing_ids: vec![*atom_id],
                 })?;
-        let geometry = decode_wkb_multi_polygon(geometry_wkb).map_err(|source| {
-            AssemblyError::GeometryDecode {
-                atom_id: *atom_id,
-                source,
+
+        if *atom_id == terminal && refined_terminal_geometry.is_some() {
+            if geometry.0.is_empty() {
+                return Err(AssemblyError::EmptyRefinedTerminalGeometry { atom_id: terminal });
             }
-        })?;
-        if geometry.0.is_empty() {
+        } else if geometry.0.is_empty() {
             return Err(AssemblyError::EmptyCatchmentGeometry { atom_id: *atom_id });
         }
         geometries.push(geometry);
@@ -209,12 +199,29 @@ pub(crate) fn assemble_watershed(
 
 fn index_catchments_by_id(
     fetched: Vec<CatchmentGeometryRow>,
-) -> Result<HashMap<AtomId, WkbGeometry>, AssemblyError> {
+    terminal: AtomId,
+    refined_terminal_geometry: Option<&MultiPolygon<f64>>,
+) -> Result<HashMap<AtomId, MultiPolygon<f64>>, AssemblyError> {
     let mut atom_map = HashMap::with_capacity(fetched.len());
     for atom in fetched {
-        let (atom_id, geometry) = atom.into_parts();
-        if atom_map.insert(atom_id, geometry).is_some() {
-            return Err(AssemblyError::DuplicateCatchment { atom_id });
+        let (atom_id, geometry_wkb) = atom.into_parts();
+        match atom_map.entry(atom_id) {
+            Entry::Occupied(_) => {
+                return Err(AssemblyError::DuplicateCatchment { atom_id });
+            }
+            Entry::Vacant(entry) => {
+                let geometry = if atom_id == terminal {
+                    match refined_terminal_geometry {
+                        Some(override_geometry) => override_geometry.clone(),
+                        None => decode_wkb_multi_polygon(&geometry_wkb)
+                            .map_err(|source| AssemblyError::GeometryDecode { atom_id, source })?,
+                    }
+                } else {
+                    decode_wkb_multi_polygon(&geometry_wkb)
+                        .map_err(|source| AssemblyError::GeometryDecode { atom_id, source })?
+                };
+                entry.insert(geometry);
+            }
         }
     }
     Ok(atom_map)
@@ -258,7 +265,7 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema};
     use geo::algorithm::winding_order::Winding;
     use geo::{Area, LineString, MultiPolygon, Polygon};
-    use hfx_core::{AdjacencyRow, DrainageGraph};
+    use hfx_core::{AdjacencyRow, DrainageGraph, WkbGeometry};
     use parquet::arrow::ArrowWriter;
     use parquet::file::properties::{EnabledStatistics, WriterProperties};
     use tempfile::NamedTempFile;
@@ -472,7 +479,7 @@ mod tests {
             ),
         ];
 
-        let err = index_catchments_by_id(fetched).unwrap_err();
+        let err = index_catchments_by_id(fetched, aid(1), None).unwrap_err();
 
         assert!(matches!(err, AssemblyError::DuplicateCatchment { atom_id } if atom_id == aid(1)));
     }
