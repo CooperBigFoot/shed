@@ -1,0 +1,142 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-fmt:
+    name: Rust fmt
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+  rust-clippy:
+    name: Rust clippy
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install GDAL build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang \
+            gdal-bin \
+            libclang-dev \
+            libgdal-dev \
+            pkg-config
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Run clippy
+        run: cargo clippy --workspace -- -D warnings
+
+  rust-tests:
+    name: Rust tests
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install GDAL build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang \
+            gdal-bin \
+            libclang-dev \
+            libgdal-dev \
+            pkg-config
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run tests
+        run: cargo test --workspace
+
+  python-wheel-smoke:
+    name: Python wheel smoke
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install GDAL build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang \
+            gdal-bin \
+            libclang-dev \
+            libgdal-dev \
+            pkg-config
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install maturin
+        run: python -m pip install --upgrade pip maturin
+
+      - name: Build wheel
+        working-directory: crates/python
+        run: maturin build --release --out dist
+
+      - name: Install wheel
+        working-directory: crates/python
+        run: python -m pip install dist/*.whl
+
+      - name: Import smoke test
+        run: |
+          python - <<'PY'
+          import pyshed
+
+          assert pyshed.__version__, "missing __version__"
+
+          try:
+              pyshed.Engine("/nonexistent/path/to/dataset")
+          except pyshed.DatasetError:
+              pass
+          else:
+              raise AssertionError("Engine should reject missing datasets")
+
+          pyshed._pyshed._self_test_proj()
+          print("pyshed import smoke passed; version=" + pyshed.__version__)
+          PY
