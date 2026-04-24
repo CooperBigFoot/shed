@@ -7,9 +7,12 @@ pub mod engine;
 pub mod error;
 pub mod reader;
 pub mod resolver;
+#[allow(dead_code)]
+pub(crate) mod runtime;
 pub mod session;
 
 #[cfg(any(test, feature = "test-fixtures"))]
+#[allow(deprecated)]
 pub mod testutil;
 
 pub use engine::{

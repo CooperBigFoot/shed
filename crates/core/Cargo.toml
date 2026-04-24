@@ -5,15 +5,20 @@ edition = "2024"
 
 [dependencies]
 hfx-core.workspace = true
-arrow = { version = "54", default-features = false, features = ["ipc"] }
+arrow = { version = "58", default-features = false, features = ["ipc"] }
+bytes = "1"
+dirs = "5"
 geo = "0.29"
 geozero = { version = "0.14", default-features = false, features = ["with-geo", "with-wkb"] }
+object_store = { version = "0.13", features = ["aws"] }
 rayon = "1"
-parquet = { version = "54", default-features = false, features = ["arrow", "zstd", "snap", "lz4", "flate2"] }
+parquet = { version = "58", default-features = false, features = ["arrow", "zstd", "snap", "lz4", "flate2-zlib-rs", "object_store"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tracing = "0.1"
+url = "2"
 tempfile = { version = "3", optional = true }
 dhat = { version = "0.3", optional = true }
 
