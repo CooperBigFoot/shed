@@ -7,7 +7,7 @@ LAT="70.4521297483898"
 LON="28.4906601273434"
 REMOTE_OUTPUT="/tmp/phase4-smoke.geojson"
 LOCAL_OUTPUT="${TMPDIR:-/tmp}/phase4-smoke-local.geojson"
-SCRIPT_VERSION="r1.2"
+SCRIPT_VERSION="r2.0"
 ONE_GB_BYTES=1000000000
 WALL_SECONDS_LIMIT=300
 RSS_RATIO_LIMIT=5
@@ -42,12 +42,14 @@ emit_header() {
   local adapter_version=$2
   local cache_dir_purged=$3
   local trace_path=$4
+  local cache_mode=$5
 
   jq -cn \
     --arg fabric_name "$fabric_name" \
     --arg adapter_version "$adapter_version" \
     --argjson cache_dir_purged "$cache_dir_purged" \
     --arg trace_path "$trace_path" \
+    --arg cache_mode "$cache_mode" \
     --arg started_at_iso8601 "$started_at_iso8601" \
     --arg script_version "$SCRIPT_VERSION" \
     '{
@@ -56,6 +58,7 @@ emit_header() {
       adapter_version: $adapter_version,
       cache_dir_purged: $cache_dir_purged,
       trace_path: $trace_path,
+      cache_mode: $cache_mode,
       started_at_iso8601: $started_at_iso8601,
       script_version: $script_version
     }'
@@ -236,6 +239,25 @@ bytes_on_wire_from_trace() {
   return 0
 }
 
+regular_file_bytes_under_dir() {
+  local dir=$1
+  local bytes
+
+  if [[ ! -d "$dir" ]]; then
+    printf '0\n'
+    return 0
+  fi
+
+  bytes=$(find "$dir" -type f -exec wc -c {} \; 2>/dev/null |
+    awk '{ total += $1 } END { printf "%.0f\n", total + 0 }')
+
+  if [[ -z ${bytes:-} ]]; then
+    bytes=0
+  fi
+
+  printf '%s\n' "$bytes"
+}
+
 classify_exit_code() {
   local exit_code=$1
   local status
@@ -263,6 +285,7 @@ run_remote() {
   local trace_file=$1
   local fabric_name=$2
   local adapter_version=$3
+  local raster_cache_dir=$4
   local start
   local end
   local rss_json
@@ -271,6 +294,10 @@ run_remote() {
   local peak_rss
   local seconds
   local bytes_on_wire
+  local trace_bytes
+  local cache_bytes_before
+  local cache_bytes_after
+  local raster_cache_bytes
   local classification
   local status
   local failure_kind
@@ -298,15 +325,23 @@ run_remote() {
     seconds=301.000
     bytes_on_wire=1000000001
   else
+    cache_bytes_before=$(regular_file_bytes_under_dir "$raster_cache_dir")
     start=$(date +%s)
     rss_json=$(RUST_LOG=object_store=trace scripts/measure-rss.sh --bin ./target/release/shed -- delineate --dataset "$PUBLIC_ROOT" --lat "$LAT" --lon "$LON" --output "$REMOTE_OUTPUT" 2>"$trace_file")
     wrapper_exit_code=$?
     end=$(date +%s)
+    cache_bytes_after=$(regular_file_bytes_under_dir "$raster_cache_dir")
 
     exit_code=$(exit_code_from_measurement "$rss_json" "$wrapper_exit_code")
     peak_rss=$(peak_rss_from_measurement "$rss_json")
     seconds=$(wall_seconds "$start" "$end")
-    bytes_on_wire=$(bytes_on_wire_from_trace "$trace_file")
+    trace_bytes=$(bytes_on_wire_from_trace "$trace_file")
+    if [[ "$cache_bytes_after" -ge "$cache_bytes_before" ]]; then
+      raster_cache_bytes=$((cache_bytes_after - cache_bytes_before))
+    else
+      raster_cache_bytes=0
+    fi
+    bytes_on_wire=$((trace_bytes + raster_cache_bytes))
   fi
 
   classification=$(classify_exit_code "$exit_code")
@@ -404,6 +439,16 @@ uses_fake_local_record() {
   esac
 }
 
+cache_mode=${HFX_SMOKE_CACHE_MODE:-cold}
+case "$cache_mode" in
+  cold|warm)
+    ;;
+  *)
+    emit_script_error "invalid HFX_SMOKE_CACHE_MODE" "value=$cache_mode expected=cold|warm"
+    exit 2
+    ;;
+esac
+
 manifest=$(curl -fsSL "$MANIFEST_URL")
 curl_status=$?
 if [[ "$curl_status" -ne 0 ]]; then
@@ -423,28 +468,34 @@ fi
 
 cache_root=${HFX_CACHE_DIR:-$HOME/.cache/hfx}
 cache_dir="${cache_root%/}/$fabric_name/$adapter_version"
+raster_cache_dir="$cache_dir/rasters"
 trace_file=$(mktemp "${TMPDIR:-/tmp}/phase4-smoke-r2-trace.XXXXXX")
 local_stderr_file=$(mktemp "${TMPDIR:-/tmp}/phase4-smoke-r2-local-stderr.XXXXXX")
 local_root=${LOCAL_HFX_ROOT:-$HOME/Desktop/merit-hfx/global/hfx}
 
 printf 'published manifest: fabric_name=%s adapter_version=%s\n' "$fabric_name" "$adapter_version" >&2
-printf 'purging remote cache subdirectory: %s\n' "$cache_dir" >&2
-rm -rf "$cache_dir"
-rm_status=$?
-if [[ "$rm_status" -eq 0 ]]; then
-  cache_dir_purged=true
+if [[ "$cache_mode" == "cold" ]]; then
+  printf 'purging remote cache subdirectory: %s\n' "$cache_dir" >&2
+  rm -rf "$cache_dir"
+  rm_status=$?
+  if [[ "$rm_status" -eq 0 ]]; then
+    cache_dir_purged=true
+  else
+    cache_dir_purged=false
+    printf 'warning: failed to purge remote cache subdirectory: %s\n' "$cache_dir" >&2
+  fi
 else
   cache_dir_purged=false
-  printf 'warning: failed to purge remote cache subdirectory: %s\n' "$cache_dir" >&2
+  printf 'warm cache mode: preserving remote cache subdirectory: %s\n' "$cache_dir" >&2
 fi
 
 printf 'remote object_store trace and stderr: %s\n' "$trace_file" >&2
 printf 'local stderr: %s\n' "$local_stderr_file" >&2
-printf 'summary: GDAL /vsis3/ raster reads bypass object_store and are not counted in bytes_on_wire.\n' >&2
+printf 'summary: bytes_on_wire sums object_store Range trace bytes plus newly staged raster-cache bytes; warm cache should add zero raster-cache bytes.\n' >&2
 
-emit_header "$fabric_name" "$adapter_version" "$cache_dir_purged" "$trace_file"
+emit_header "$fabric_name" "$adapter_version" "$cache_dir_purged" "$trace_file" "$cache_mode"
 
-remote_record=$(run_remote "$trace_file" "$fabric_name" "$adapter_version")
+remote_record=$(run_remote "$trace_file" "$fabric_name" "$adapter_version" "$raster_cache_dir")
 remote_status=$?
 if [[ "$remote_status" -ne 0 || -z ${remote_record:-} ]]; then
   emit_script_error "failed to emit remote dataset_run record" "status=$remote_status"
