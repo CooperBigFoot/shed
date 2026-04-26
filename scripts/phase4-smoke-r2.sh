@@ -7,7 +7,10 @@ LAT="70.4521297483898"
 LON="28.4906601273434"
 REMOTE_OUTPUT="/tmp/phase4-smoke.geojson"
 LOCAL_OUTPUT="${TMPDIR:-/tmp}/phase4-smoke-local.geojson"
-SCRIPT_VERSION="r1.1"
+SCRIPT_VERSION="r1.2"
+ONE_GB_BYTES=1000000000
+WALL_SECONDS_LIMIT=300
+RSS_RATIO_LIMIT=5
 
 started_at_iso8601=$(date -u "+%Y-%m-%dT%H:%M:%SZ")
 
@@ -103,6 +106,60 @@ emit_dataset_run() {
       fabric_name: $fabric_name,
       adapter_version: $adapter_version
     }'
+}
+
+emit_summary() {
+  local remote_record=$1
+  local local_record=$2
+
+  jq -nc \
+    --argjson remote "$remote_record" \
+    --argjson local "$local_record" \
+    --argjson one_gb_bytes "$ONE_GB_BYTES" \
+    --argjson wall_seconds_limit "$WALL_SECONDS_LIMIT" \
+    --argjson rss_ratio_limit "$RSS_RATIO_LIMIT" \
+    '
+      def number_or_null:
+        if type == "number" then . else null end;
+
+      ($remote.record_type == "dataset_run" and $local.record_type == "dataset_run") as $comparison_ok
+      | ($remote.bytes_on_wire | number_or_null) as $remote_bytes
+      | ($local.bytes_on_wire | number_or_null) as $local_bytes
+      | ($remote.wall_seconds | number_or_null) as $remote_wall
+      | ($local.wall_seconds | number_or_null) as $local_wall
+      | ($remote.peak_rss_bytes | number_or_null) as $remote_rss
+      | ($local.peak_rss_bytes | number_or_null) as $local_rss
+      | (if $remote_wall != null and $local_wall != null and $local_wall > 0
+         then (($remote_wall / $local_wall) * 100 | round / 100)
+         else null
+         end) as $wall_ratio
+      | (if $remote_rss != null and $local_rss != null and $local_rss > 0
+         then (($remote_rss / $local_rss) * 100 | round / 100)
+         else null
+         end) as $rss_ratio
+      | {
+          record_type: "summary",
+          comparison_ok: $comparison_ok,
+          remote_status: $remote.status,
+          local_status: $local.status,
+          bytes_on_wire_delta: (($remote_bytes // 0) - ($local_bytes // 0)),
+          wall_seconds_ratio: $wall_ratio,
+          peak_rss_bytes_ratio: $rss_ratio,
+          gates: {
+            bytes_on_wire_under_1gb: ($remote_bytes != null and $remote_bytes < $one_gb_bytes),
+            wall_seconds_under_300: ($remote_wall != null and $remote_wall < $wall_seconds_limit),
+            peak_rss_ratio_under_5x_local: ($rss_ratio != null and $rss_ratio < $rss_ratio_limit),
+            local_run_succeeded: ($local.status == "ok")
+          }
+        }
+      | .all_gates_passed = (
+          .comparison_ok
+          and .gates.bytes_on_wire_under_1gb
+          and .gates.wall_seconds_under_300
+          and .gates.peak_rss_ratio_under_5x_local
+          and .gates.local_run_succeeded
+        )
+    '
 }
 
 wall_seconds() {
@@ -226,6 +283,20 @@ run_remote() {
     peak_rss=67108864
     seconds=0.125
     bytes_on_wire=0
+  elif [[ ${HFX_SMOKE_FAULT_INJECT:-} == "remote_ok_local_fail" ]]; then
+    printf 'fault injection: simulating remote ok without running remote command\n' >&2
+    printf 'HFX_SMOKE_FAULT_INJECT=remote_ok_local_fail simulated remote ok\n' >"$trace_file"
+    exit_code=0
+    peak_rss=134217728
+    seconds=1.250
+    bytes_on_wire=1048576
+  elif [[ ${HFX_SMOKE_FAULT_INJECT:-} == "both_ok_remote_huge" ]]; then
+    printf 'fault injection: simulating oversized remote ok without running remote command\n' >&2
+    printf 'HFX_SMOKE_FAULT_INJECT=both_ok_remote_huge simulated remote ok over gates\n' >"$trace_file"
+    exit_code=0
+    peak_rss=600000000
+    seconds=301.000
+    bytes_on_wire=1000000001
   else
     start=$(date +%s)
     rss_json=$(RUST_LOG=object_store=trace scripts/measure-rss.sh --bin ./target/release/shed -- delineate --dataset "$PUBLIC_ROOT" --lat "$LAT" --lon "$LON" --output "$REMOTE_OUTPUT" 2>"$trace_file")
@@ -277,14 +348,28 @@ run_local() {
   local failure_kind
   local signal_number
 
-  start=$(date +%s)
-  rss_json=$(scripts/measure-rss.sh --bin ./target/release/shed -- delineate --dataset "$dataset_root" --lat "$LAT" --lon "$LON" --output "$LOCAL_OUTPUT" 2>"$stderr_log_file")
-  wrapper_exit_code=$?
-  end=$(date +%s)
+  if [[ ${HFX_SMOKE_FAULT_INJECT:-} == "remote_ok_local_fail" ]]; then
+    printf 'fault injection: simulating local failure without running local command\n' >&2
+    printf 'HFX_SMOKE_FAULT_INJECT=remote_ok_local_fail simulated local failure\n' >"$stderr_log_file"
+    exit_code=1
+    peak_rss=67108864
+    seconds=0.500
+  elif [[ ${HFX_SMOKE_FAULT_INJECT:-} == "both_ok_remote_huge" ]]; then
+    printf 'fault injection: simulating local ok without running local command\n' >&2
+    printf 'HFX_SMOKE_FAULT_INJECT=both_ok_remote_huge simulated local ok\n' >"$stderr_log_file"
+    exit_code=0
+    peak_rss=100000000
+    seconds=1.000
+  else
+    start=$(date +%s)
+    rss_json=$(scripts/measure-rss.sh --bin ./target/release/shed -- delineate --dataset "$dataset_root" --lat "$LAT" --lon "$LON" --output "$LOCAL_OUTPUT" 2>"$stderr_log_file")
+    wrapper_exit_code=$?
+    end=$(date +%s)
 
-  exit_code=$(exit_code_from_measurement "$rss_json" "$wrapper_exit_code")
-  peak_rss=$(peak_rss_from_measurement "$rss_json")
-  seconds=$(wall_seconds "$start" "$end")
+    exit_code=$(exit_code_from_measurement "$rss_json" "$wrapper_exit_code")
+    peak_rss=$(peak_rss_from_measurement "$rss_json")
+    seconds=$(wall_seconds "$start" "$end")
+  fi
 
   classification=$(classify_exit_code "$exit_code")
   status=$(printf '%s\n' "$classification" | awk -F '\t' '{ print $1 }')
@@ -306,6 +391,17 @@ run_local() {
     "$adapter_version"
 
   return 0
+}
+
+uses_fake_local_record() {
+  case ${HFX_SMOKE_FAULT_INJECT:-} in
+    remote_ok_local_fail|both_ok_remote_huge)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 manifest=$(curl -fsSL "$MANIFEST_URL")
@@ -347,5 +443,42 @@ printf 'local stderr: %s\n' "$local_stderr_file" >&2
 printf 'summary: GDAL /vsis3/ raster reads bypass object_store and are not counted in bytes_on_wire.\n' >&2
 
 emit_header "$fabric_name" "$adapter_version" "$cache_dir_purged" "$trace_file"
-run_remote "$trace_file" "$fabric_name" "$adapter_version"
-run_local "$local_root" "$local_stderr_file" "$fabric_name" "$adapter_version"
+
+remote_record=$(run_remote "$trace_file" "$fabric_name" "$adapter_version")
+remote_status=$?
+if [[ "$remote_status" -ne 0 || -z ${remote_record:-} ]]; then
+  emit_script_error "failed to emit remote dataset_run record" "status=$remote_status"
+  exit 2
+fi
+printf '%s\n' "$remote_record"
+
+if ! uses_fake_local_record; then
+  if [[ ! -d "$local_root" ]]; then
+    emit_script_error "local HFX root is missing" "path=$local_root"
+    exit 2
+  fi
+fi
+
+local_record=$(run_local "$local_root" "$local_stderr_file" "$fabric_name" "$adapter_version")
+local_status=$?
+if [[ "$local_status" -ne 0 || -z ${local_record:-} ]]; then
+  emit_script_error "failed to emit local dataset_run record" "status=$local_status"
+  exit 2
+fi
+printf '%s\n' "$local_record"
+
+summary_record=$(emit_summary "$remote_record" "$local_record" 2>/dev/null)
+summary_status=$?
+if [[ "$summary_status" -ne 0 || -z ${summary_record:-} ]]; then
+  emit_script_error "summary JSON build failed" "status=$summary_status"
+  exit 2
+fi
+printf '%s\n' "$summary_record"
+
+printf '%s\n' "$summary_record" | jq -e '.comparison_ok == true' >/dev/null 2>&1
+comparison_status=$?
+if [[ "$comparison_status" -ne 0 ]]; then
+  exit 2
+fi
+
+exit 0
