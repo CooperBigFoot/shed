@@ -48,6 +48,11 @@ impl RemoteArtifactCache {
         Ok(Self { root })
     }
 
+    /// Return the filesystem root used by this cache.
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// Return the parsed cache entry mapped to this exact remote source.
     pub(crate) fn read_entry_for_source(
         &self,

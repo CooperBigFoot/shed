@@ -18,7 +18,7 @@ use crate::reader::catchment_store::CatchmentGeometryQueryError;
 use crate::resolver::{
     OutletResolutionError, ResolutionMethod, ResolvedOutlet, ResolverConfig, resolve_outlet,
 };
-use crate::session::DatasetSession;
+use crate::session::{DatasetSession, RasterKind};
 
 // ── RefinementOutcome ─────────────────────────────────────────────────────────
 
@@ -272,6 +272,15 @@ pub enum EngineError {
         source: WkbDecodeError,
     },
 
+    /// Fired when a raster artifact cannot be materialized as a local path.
+    #[error("failed to localize raster for refinement (atom {atom_id}): {source}")]
+    RasterLocalize {
+        /// The raw atom ID for which raster localization was attempted.
+        atom_id: i64,
+        /// Underlying session error.
+        source: SessionError,
+    },
+
     /// Fired when the raster-based terminal refinement step fails.
     #[error("terminal refinement failed for atom {atom_id}: {source}")]
     Refinement {
@@ -361,6 +370,7 @@ impl Engine {
     /// | [`EngineError::Traversal`] | Upstream graph traversal fails |
     /// | [`EngineError::TerminalCatchmentFetch`] | Terminal catchment row is missing (refinement only) |
     /// | [`EngineError::TerminalCatchmentDecode`] | Terminal catchment WKB is invalid (refinement only) |
+    /// | [`EngineError::RasterLocalize`] | Remote rasters cannot be materialized locally (refinement only) |
     /// | [`EngineError::Refinement`] | Raster snap fails (refinement only) |
     /// | [`EngineError::Assembly`] | Watershed geometry assembly fails |
     #[instrument(skip(self, options), fields(outlet = %outlet))]
@@ -426,6 +436,7 @@ impl Engine {
     /// | [`EngineError::Traversal`] | Upstream graph traversal fails |
     /// | [`EngineError::TerminalCatchmentFetch`] | Terminal catchment row is missing (refinement only) |
     /// | [`EngineError::TerminalCatchmentDecode`] | Terminal catchment WKB is invalid (refinement only) |
+    /// | [`EngineError::RasterLocalize`] | Remote rasters cannot be materialized locally (refinement only) |
     /// | [`EngineError::Refinement`] | Raster snap fails (refinement only) |
     /// | [`EngineError::Assembly`] | Watershed geometry assembly fails |
     #[instrument(skip(self, options), fields(outlet = %outlet))]
@@ -480,10 +491,9 @@ impl Engine {
         if !options.refine {
             return Ok((RefinementOutcome::Disabled, None));
         }
-        let raster_paths = match self.session.raster_paths() {
-            Some(p) => p,
-            None => return Ok((RefinementOutcome::NoRastersAvailable, None)),
-        };
+        if self.session.raster_paths().is_none() {
+            return Ok((RefinementOutcome::NoRastersAvailable, None));
+        }
         let raster_source = match self.raster_source.as_deref() {
             Some(s) => s,
             None => return Ok((RefinementOutcome::NoRasterSourceProvided, None)),
@@ -519,11 +529,28 @@ impl Engine {
         })?;
         let terminal_polygon = terminal_atom.into_parts().1;
 
+        let flow_dir = self
+            .session
+            .localize_raster(RasterKind::FlowDir)
+            .map_err(|source| EngineError::RasterLocalize {
+                atom_id: terminal.get(),
+                source,
+            })?;
+        let flow_acc = self
+            .session
+            .localize_raster(RasterKind::FlowAcc)
+            .map_err(|source| EngineError::RasterLocalize {
+                atom_id: terminal.get(),
+                source,
+            })?;
+        let flow_dir_uri = flow_dir.to_string_lossy();
+        let flow_acc_uri = flow_acc.to_string_lossy();
+
         // Refine
         let refinement_result = refine_terminal_from_source(
             raster_source,
-            raster_paths.flow_dir_uri(),
-            raster_paths.flow_acc_uri(),
+            flow_dir_uri.as_ref(),
+            flow_acc_uri.as_ref(),
             &terminal_polygon,
             resolved.resolved_coord,
             options.snap_threshold,

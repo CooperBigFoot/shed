@@ -11,11 +11,30 @@ use url::Url;
 
 use crate::cache::RemoteArtifactCache;
 use crate::error::SessionError;
+use crate::raster_cache::RemoteRasterCache;
 use crate::reader;
 use crate::reader::catchment_store::CatchmentStore;
 use crate::reader::snap_store::SnapStore;
 use crate::runtime::RT;
 use crate::source::DatasetSource;
+
+/// Raster artifact selector for lazy localization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RasterKind {
+    /// The HFX `flow_dir.tif` artifact.
+    FlowDir,
+    /// The HFX `flow_acc.tif` artifact.
+    FlowAcc,
+}
+
+impl RasterKind {
+    fn artifact(self) -> &'static str {
+        match self {
+            Self::FlowDir => "flow_dir.tif",
+            Self::FlowAcc => "flow_acc.tif",
+        }
+    }
+}
 
 /// Validated paths to the optional raster pair.
 ///
@@ -61,6 +80,10 @@ pub struct DatasetSession {
     catchments: CatchmentStore,
     snap: Option<SnapStore>,
     raster_paths: Option<RasterPaths>,
+    raster_cache: Option<Arc<RemoteRasterCache>>,
+    remote_store: Option<Arc<dyn ObjectStore>>,
+    remote_root: Option<ObjectPath>,
+    fabric_cache_key: (String, String),
 }
 
 impl DatasetSession {
@@ -179,11 +202,18 @@ impl DatasetSession {
 
         Ok(DatasetSession {
             root: root.to_path_buf(),
+            fabric_cache_key: (
+                manifest.fabric_name().to_string(),
+                manifest.adapter_version().to_string(),
+            ),
             manifest,
             graph,
             catchments,
             snap,
             raster_paths,
+            raster_cache: None,
+            remote_store: None,
+            remote_root: None,
         })
     }
 
@@ -193,6 +223,7 @@ impl DatasetSession {
         url: &Url,
     ) -> Result<Self, SessionError> {
         let cache = RemoteArtifactCache::configured()?;
+        let raster_cache = Arc::new(RemoteRasterCache::new(cache.root().to_path_buf()));
         let (manifest, graph) = if let Some(cached) = cache.read_entry_for_source(url, root)? {
             debug!(
                 fabric = cached.manifest.fabric_name(),
@@ -233,7 +264,7 @@ impl DatasetSession {
         let snap = if manifest.snap() == SnapAvailability::Present {
             let snap_path = remote_artifact_path(root, "snap.parquet");
             Some(SnapStore::open_remote(
-                store,
+                store.clone(),
                 snap_path.clone(),
                 snap_path.as_ref().to_string(),
             )?)
@@ -262,11 +293,18 @@ impl DatasetSession {
 
         Ok(DatasetSession {
             root: PathBuf::from(url.as_str()),
+            fabric_cache_key: (
+                manifest.fabric_name().to_string(),
+                manifest.adapter_version().to_string(),
+            ),
             manifest,
             graph,
             catchments,
             snap,
             raster_paths,
+            raster_cache: Some(raster_cache),
+            remote_store: Some(store),
+            remote_root: Some(root.clone()),
         })
     }
 
@@ -308,6 +346,47 @@ impl DatasetSession {
     /// Return the validated raster paths, if rasters are present.
     pub fn raster_paths(&self) -> Option<&RasterPaths> {
         self.raster_paths.as_ref()
+    }
+
+    /// Return a local filesystem path for a raster artifact.
+    ///
+    /// Local sessions return the already-validated dataset path. Remote
+    /// sessions fetch the artifact into the configured cache on first use.
+    pub fn localize_raster(&self, kind: RasterKind) -> Result<PathBuf, SessionError> {
+        let raster_paths = self.raster_paths.as_ref().ok_or_else(|| {
+            SessionError::integrity(
+                "raster localization requested but manifest declares no rasters",
+            )
+        })?;
+
+        if let (Some(cache), Some(store), Some(root)) = (
+            self.raster_cache.as_ref(),
+            self.remote_store.as_ref(),
+            self.remote_root.as_ref(),
+        ) {
+            let remote_path = remote_artifact_path(root, kind.artifact());
+            let (fabric_name, adapter_version) = &self.fabric_cache_key;
+            return RT
+                .block_on(cache.get_or_fetch(
+                    store.as_ref(),
+                    &remote_path,
+                    fabric_name,
+                    adapter_version,
+                ))
+                .map_err(SessionError::from);
+        }
+
+        if self.raster_cache.is_some() || self.remote_store.is_some() || self.remote_root.is_some()
+        {
+            return Err(SessionError::integrity(
+                "remote raster localization state is incomplete",
+            ));
+        }
+
+        Ok(match kind {
+            RasterKind::FlowDir => raster_paths.flow_dir().to_path_buf(),
+            RasterKind::FlowAcc => raster_paths.flow_acc().to_path_buf(),
+        })
     }
 
     /// Return the dataset root directory path.
@@ -440,7 +519,7 @@ mod tests {
     use parquet::arrow::ArrowWriter;
     use url::Url;
 
-    use super::DatasetSession;
+    use super::{DatasetSession, RasterKind};
     use crate::error::SessionError;
     use crate::runtime::RT;
     use hfx_core::{BoundingBox, SnapId};
@@ -481,7 +560,7 @@ mod tests {
         }
     }
 
-    fn manifest_bytes(snap: bool) -> String {
+    fn manifest_bytes_with_rasters(snap: bool, rasters: bool) -> String {
         let mut manifest = serde_json::json!({
             "format_version": "0.1",
             "fabric_name": "testfabric",
@@ -495,6 +574,10 @@ mod tests {
         });
         if snap {
             manifest["has_snap"] = serde_json::json!(true);
+        }
+        if rasters {
+            manifest["has_rasters"] = serde_json::json!(true);
+            manifest["flow_dir_encoding"] = serde_json::json!("esri");
         }
         manifest.to_string()
     }
@@ -665,11 +748,20 @@ mod tests {
     }
 
     fn put_remote_manifest_and_graph(store: &Arc<InMemory>, root: &ObjectPath, snap: bool) {
+        put_remote_manifest_graph_with_rasters(store, root, snap, false);
+    }
+
+    fn put_remote_manifest_graph_with_rasters(
+        store: &Arc<InMemory>,
+        root: &ObjectPath,
+        snap: bool,
+        rasters: bool,
+    ) {
         RT.block_on(async {
             store
                 .put(
                     &root.clone().join("manifest.json"),
-                    PutPayload::from(manifest_bytes(snap)),
+                    PutPayload::from(manifest_bytes_with_rasters(snap, rasters)),
                 )
                 .await
                 .unwrap();
@@ -714,6 +806,35 @@ mod tests {
                 .join("graph.arrow")
                 .is_file()
         );
+    }
+
+    #[test]
+    fn remote_session_localizes_flow_dir_raster_into_cache() {
+        let cache_dir = tempfile::TempDir::new().unwrap();
+        let _cache_env = CacheEnv::set(cache_dir.path());
+        let store = Arc::new(InMemory::new());
+        let root = ObjectPath::from("dataset/root");
+        put_remote_manifest_graph_with_rasters(&store, &root, false, true);
+        put_remote_catchments(&store, &root);
+        RT.block_on(async {
+            store
+                .put(
+                    &root.clone().join("flow_dir.tif"),
+                    PutPayload::from_static(b"flow-dir-bytes"),
+                )
+                .await
+                .unwrap();
+        });
+        let url = Url::parse("s3://shed-test/dataset/root").unwrap();
+        let session = DatasetSession::open_remote(store, &root, &url).unwrap();
+
+        let path = session
+            .localize_raster(RasterKind::FlowDir)
+            .expect("flow_dir should localize");
+
+        assert!(path.is_file());
+        assert!(path.starts_with(cache_dir.path().join("testfabric").join("test-v1")));
+        assert_eq!(std::fs::read(path).unwrap(), b"flow-dir-bytes");
     }
 
     #[test]
