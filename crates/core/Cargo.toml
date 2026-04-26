@@ -7,7 +7,9 @@ edition = "2024"
 hfx-core.workspace = true
 arrow = { version = "58", default-features = false, features = ["ipc"] }
 bytes = "1"
+dashmap = "6"
 dirs = "5"
+futures-util = "0.3"
 geo = "0.29"
 geozero = { version = "0.14", default-features = false, features = ["with-geo", "with-wkb"] }
 object_store = { version = "0.13", features = ["aws"] }
@@ -16,15 +18,15 @@ parquet = { version = "58", default-features = false, features = ["arrow", "zstd
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync"] }
 tracing = "0.1"
 url = "2"
-tempfile = { version = "3", optional = true }
 dhat = { version = "0.3", optional = true }
 
 [features]
 dhat-heap = ["dep:dhat"]
-test-fixtures = ["tempfile"]
+test-fixtures = []
 
 [dev-dependencies]
 tempfile = "3"

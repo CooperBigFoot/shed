@@ -183,7 +183,7 @@ fn write_cache_file(path: &Path, bytes: &[u8]) -> Result<(), SessionError> {
     std::fs::write(path, bytes).map_err(|source| SessionError::cache_io("write", path, source))
 }
 
-fn fnv1a64(bytes: &[u8]) -> u64 {
+pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in bytes {
         hash ^= u64::from(*byte);

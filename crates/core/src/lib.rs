@@ -6,6 +6,8 @@ pub(crate) mod assembly;
 pub(crate) mod cache;
 pub mod engine;
 pub mod error;
+#[allow(dead_code)]
+pub(crate) mod raster_cache;
 pub mod reader;
 pub mod resolver;
 #[allow(dead_code)]

@@ -1,5 +1,40 @@
 //! Error types for dataset session operations.
 
+use std::path::PathBuf;
+
+use object_store::path::Path as ObjectPath;
+
+/// Errors that can occur while reading or writing local cache entries.
+#[derive(Debug, thiserror::Error)]
+pub enum CacheError {
+    /// Fired when a local filesystem operation fails for a cache path.
+    #[error("cache {op} failed at {}: {source}", path.display())]
+    Io {
+        /// Filesystem operation that failed.
+        op: &'static str,
+        /// Cache path involved in the operation.
+        path: PathBuf,
+        /// Underlying I/O error.
+        source: std::io::Error,
+    },
+
+    /// Fired when an object-store read fails for a remote path.
+    #[error("failed to fetch remote cache object {path}: {source}")]
+    ObjectStore {
+        /// Object-store path that was requested.
+        path: ObjectPath,
+        /// Underlying object-store error.
+        source: object_store::Error,
+    },
+
+    /// Fired when a temporary cache file cannot be persisted into place.
+    #[error("failed to persist cache file: {source}")]
+    Persist {
+        /// Underlying tempfile persist error.
+        source: tempfile::PersistError,
+    },
+}
+
 /// Errors that can occur while opening or reading an HFX dataset session.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
@@ -241,6 +276,10 @@ pub enum SessionError {
         /// Underlying JSON error.
         source: serde_json::Error,
     },
+
+    /// Fired when reading from or writing to a specialized cache fails.
+    #[error(transparent)]
+    Cache(#[from] CacheError),
 }
 
 impl SessionError {
