@@ -7,7 +7,7 @@ LAT="70.4521297483898"
 LON="28.4906601273434"
 REMOTE_OUTPUT="/tmp/phase4-smoke.geojson"
 LOCAL_OUTPUT="${TMPDIR:-/tmp}/phase4-smoke-local.geojson"
-SCRIPT_VERSION="r2.0"
+SCRIPT_VERSION="r3.0"
 ONE_GB_BYTES=1000000000
 WALL_SECONDS_LIMIT=300
 RSS_RATIO_LIMIT=5
@@ -77,6 +77,11 @@ emit_dataset_run() {
   local object_store_trace_path=${10}
   local fabric_name=${11}
   local adapter_version=${12}
+  local cog_header_bytes=${13}
+  local cog_tile_bytes=${14}
+  local cog_tile_count=${15}
+  local cog_window_pixels=${16}
+  local non_cog_bytes_on_wire=${17}
 
   jq -cn \
     --arg dataset "$dataset" \
@@ -93,6 +98,11 @@ emit_dataset_run() {
     --arg object_store_trace_path "$object_store_trace_path" \
     --arg fabric_name "$fabric_name" \
     --arg adapter_version "$adapter_version" \
+    --argjson cog_header_bytes "$cog_header_bytes" \
+    --argjson cog_tile_bytes "$cog_tile_bytes" \
+    --argjson cog_tile_count "$cog_tile_count" \
+    --argjson cog_window_pixels "$cog_window_pixels" \
+    --argjson non_cog_bytes_on_wire "$non_cog_bytes_on_wire" \
     '{
       record_type: "dataset_run",
       dataset: $dataset,
@@ -106,6 +116,11 @@ emit_dataset_run() {
       outlet: [$lat, $lon],
       stderr_log_path: $stderr_log_path,
       object_store_trace_path: (if $object_store_trace_path == "" then null else $object_store_trace_path end),
+      cog_header_bytes: $cog_header_bytes,
+      cog_tile_bytes: $cog_tile_bytes,
+      cog_tile_count: $cog_tile_count,
+      cog_window_pixels: $cog_window_pixels,
+      non_cog_bytes_on_wire: $non_cog_bytes_on_wire,
       fabric_name: $fabric_name,
       adapter_version: $adapter_version
     }'
@@ -239,6 +254,40 @@ bytes_on_wire_from_trace() {
   return 0
 }
 
+trace_number_sum() {
+  local trace_file=$1
+  local field=$2
+  local total
+
+  if [[ ! -f "$trace_file" ]]; then
+    printf '0\n'
+    return 0
+  fi
+
+  total=$(awk -v field="$field" '
+    {
+      line = $0
+      pattern = "(^|[^[:alnum:]_])" field "[[:space:]]*=[[:space:]]*[0-9]+"
+      while (match(line, pattern)) {
+        token = substr(line, RSTART, RLENGTH)
+        sub(".*" field "[[:space:]]*=[[:space:]]*", "", token)
+        total += token + 0
+        line = substr(line, RSTART + RLENGTH)
+      }
+    }
+    END {
+      printf "%.0f\n", total + 0
+    }
+  ' "$trace_file" 2>/dev/null)
+
+  if [[ -z ${total:-} ]]; then
+    total=0
+  fi
+
+  printf '%s\n' "$total"
+  return 0
+}
+
 regular_file_bytes_under_dir() {
   local dir=$1
   local bytes
@@ -295,9 +344,11 @@ run_remote() {
   local seconds
   local bytes_on_wire
   local trace_bytes
-  local cache_bytes_before
-  local cache_bytes_after
-  local raster_cache_bytes
+  local cog_header_bytes
+  local cog_tile_bytes
+  local cog_tile_count
+  local cog_window_pixels
+  local non_cog_bytes_on_wire
   local classification
   local status
   local failure_kind
@@ -310,6 +361,11 @@ run_remote() {
     peak_rss=67108864
     seconds=0.125
     bytes_on_wire=0
+    cog_header_bytes=0
+    cog_tile_bytes=0
+    cog_tile_count=0
+    cog_window_pixels=0
+    non_cog_bytes_on_wire=0
   elif [[ ${HFX_SMOKE_FAULT_INJECT:-} == "remote_ok_local_fail" ]]; then
     printf 'fault injection: simulating remote ok without running remote command\n' >&2
     printf 'HFX_SMOKE_FAULT_INJECT=remote_ok_local_fail simulated remote ok\n' >"$trace_file"
@@ -317,6 +373,11 @@ run_remote() {
     peak_rss=134217728
     seconds=1.250
     bytes_on_wire=1048576
+    cog_header_bytes=65536
+    cog_tile_bytes=983040
+    cog_tile_count=8
+    cog_window_pixels=262144
+    non_cog_bytes_on_wire=0
   elif [[ ${HFX_SMOKE_FAULT_INJECT:-} == "both_ok_remote_huge" ]]; then
     printf 'fault injection: simulating oversized remote ok without running remote command\n' >&2
     printf 'HFX_SMOKE_FAULT_INJECT=both_ok_remote_huge simulated remote ok over gates\n' >"$trace_file"
@@ -324,24 +385,30 @@ run_remote() {
     peak_rss=600000000
     seconds=301.000
     bytes_on_wire=1000000001
+    cog_header_bytes=33554432
+    cog_tile_bytes=966445569
+    cog_tile_count=2048
+    cog_window_pixels=268435456
+    non_cog_bytes_on_wire=0
   else
-    cache_bytes_before=$(regular_file_bytes_under_dir "$raster_cache_dir")
     start=$(date +%s)
-    rss_json=$(RUST_LOG=object_store=trace scripts/measure-rss.sh --bin ./target/release/shed -- delineate --dataset "$PUBLIC_ROOT" --lat "$LAT" --lon "$LON" --output "$REMOTE_OUTPUT" 2>"$trace_file")
+    rss_json=$(RUST_LOG=shed_core=debug,object_store=trace scripts/measure-rss.sh --bin ./target/release/shed -- delineate --dataset "$PUBLIC_ROOT" --lat "$LAT" --lon "$LON" --output "$REMOTE_OUTPUT" 2>"$trace_file")
     wrapper_exit_code=$?
     end=$(date +%s)
-    cache_bytes_after=$(regular_file_bytes_under_dir "$raster_cache_dir")
 
     exit_code=$(exit_code_from_measurement "$rss_json" "$wrapper_exit_code")
     peak_rss=$(peak_rss_from_measurement "$rss_json")
     seconds=$(wall_seconds "$start" "$end")
     trace_bytes=$(bytes_on_wire_from_trace "$trace_file")
-    if [[ "$cache_bytes_after" -ge "$cache_bytes_before" ]]; then
-      raster_cache_bytes=$((cache_bytes_after - cache_bytes_before))
-    else
-      raster_cache_bytes=0
+    cog_header_bytes=$(trace_number_sum "$trace_file" "cog_header_bytes")
+    cog_tile_bytes=$(trace_number_sum "$trace_file" "cog_tile_bytes")
+    cog_tile_count=$(trace_number_sum "$trace_file" "cog_tile_count")
+    cog_window_pixels=$(trace_number_sum "$trace_file" "window_pixels")
+    bytes_on_wire=$trace_bytes
+    non_cog_bytes_on_wire=$((bytes_on_wire - cog_header_bytes - cog_tile_bytes))
+    if [[ "$non_cog_bytes_on_wire" -lt 0 ]]; then
+      non_cog_bytes_on_wire=0
     fi
-    bytes_on_wire=$((trace_bytes + raster_cache_bytes))
   fi
 
   classification=$(classify_exit_code "$exit_code")
@@ -361,7 +428,12 @@ run_remote() {
     "$trace_file" \
     "$trace_file" \
     "$fabric_name" \
-    "$adapter_version"
+    "$adapter_version" \
+    "$cog_header_bytes" \
+    "$cog_tile_bytes" \
+    "$cog_tile_count" \
+    "$cog_window_pixels" \
+    "$non_cog_bytes_on_wire"
 
   return 0
 }
@@ -423,7 +495,12 @@ run_local() {
     "$stderr_log_file" \
     "" \
     "$fabric_name" \
-    "$adapter_version"
+    "$adapter_version" \
+    0 \
+    0 \
+    0 \
+    0 \
+    0
 
   return 0
 }
@@ -468,7 +545,7 @@ fi
 
 cache_root=${HFX_CACHE_DIR:-$HOME/.cache/hfx}
 cache_dir="${cache_root%/}/$fabric_name/$adapter_version"
-raster_cache_dir="$cache_dir/rasters"
+raster_cache_dir="$cache_dir/raster-windows"
 trace_file=$(mktemp "${TMPDIR:-/tmp}/phase4-smoke-r2-trace.XXXXXX")
 local_stderr_file=$(mktemp "${TMPDIR:-/tmp}/phase4-smoke-r2-local-stderr.XXXXXX")
 local_root=${LOCAL_HFX_ROOT:-$HOME/Desktop/merit-hfx/global/hfx}
@@ -491,7 +568,7 @@ fi
 
 printf 'remote object_store trace and stderr: %s\n' "$trace_file" >&2
 printf 'local stderr: %s\n' "$local_stderr_file" >&2
-printf 'summary: bytes_on_wire sums object_store Range trace bytes plus newly staged raster-cache bytes; warm cache should add zero raster-cache bytes.\n' >&2
+printf 'summary: bytes_on_wire comes from object_store Range traces; cog_* fields separate remote COG header/tile reads from manifest/graph/parquet reads.\n' >&2
 
 emit_header "$fabric_name" "$adapter_version" "$cache_dir_purged" "$trace_file" "$cache_mode"
 

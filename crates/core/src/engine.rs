@@ -1,7 +1,7 @@
 //! Engine composition layer — wires outlet resolution, upstream traversal,
 //! terminal refinement, and watershed assembly into a single `delineate()` call.
 
-use geo::MultiPolygon;
+use geo::{BoundingRect, MultiPolygon};
 use hfx_core::AtomId;
 use rayon::prelude::*;
 use tracing::instrument;
@@ -528,23 +528,41 @@ impl Engine {
             }
         })?;
         let terminal_polygon = terminal_atom.into_parts().1;
+        let terminal_bbox =
+            terminal_polygon
+                .bounding_rect()
+                .ok_or_else(|| EngineError::Refinement {
+                    atom_id: terminal.get(),
+                    source: RefinementError::DegenerateTerminalPolygon,
+                })?;
 
         let flow_dir = self
             .session
-            .localize_raster(RasterKind::FlowDir)
+            .localize_raster_window(RasterKind::FlowDir, terminal_bbox)
             .map_err(|source| EngineError::RasterLocalize {
                 atom_id: terminal.get(),
                 source,
             })?;
         let flow_acc = self
             .session
-            .localize_raster(RasterKind::FlowAcc)
+            .localize_raster_window(RasterKind::FlowAcc, terminal_bbox)
             .map_err(|source| EngineError::RasterLocalize {
                 atom_id: terminal.get(),
                 source,
             })?;
-        let flow_dir_uri = flow_dir.to_string_lossy();
-        let flow_acc_uri = flow_acc.to_string_lossy();
+        tracing::debug!(
+            flow_dir_cog_header_bytes = flow_dir.header_bytes(),
+            flow_dir_cog_tile_bytes = flow_dir.tile_bytes(),
+            flow_dir_cog_tile_count = flow_dir.tile_count(),
+            flow_dir_window_pixels = flow_dir.window_pixels(),
+            flow_acc_cog_header_bytes = flow_acc.header_bytes(),
+            flow_acc_cog_tile_bytes = flow_acc.tile_bytes(),
+            flow_acc_cog_tile_count = flow_acc.tile_count(),
+            flow_acc_window_pixels = flow_acc.window_pixels(),
+            "localized raster windows for refinement"
+        );
+        let flow_dir_uri = flow_dir.path().to_string_lossy();
+        let flow_acc_uri = flow_acc.path().to_string_lossy();
 
         // Refine
         let refinement_result = refine_terminal_from_source(

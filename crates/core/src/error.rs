@@ -33,6 +33,24 @@ pub enum CacheError {
         /// Underlying tempfile persist error.
         source: tempfile::PersistError,
     },
+
+    /// Fired when a remote raster cannot be treated as a supported windowed COG.
+    #[error("unsupported remote COG raster {path}: {reason}")]
+    UnsupportedCog {
+        /// Object-store path that was requested.
+        path: ObjectPath,
+        /// Human-readable reason the raster is unsupported.
+        reason: String,
+    },
+
+    /// Fired when TIFF metadata, tile decode, or local encoding fails.
+    #[error("TIFF processing failed for {path}: {source}")]
+    Tiff {
+        /// Object-store path or local cache path involved.
+        path: String,
+        /// Underlying TIFF error.
+        source: tiff::TiffError,
+    },
 }
 
 /// Errors that can occur while opening or reading an HFX dataset session.

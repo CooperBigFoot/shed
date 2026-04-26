@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use geo::Rect;
 use hfx_core::{AtomId, DrainageGraph, Manifest, RasterAvailability, SnapAvailability, Topology};
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt};
@@ -10,6 +11,7 @@ use tracing::{debug, info, instrument};
 use url::Url;
 
 use crate::cache::RemoteArtifactCache;
+use crate::cog::{LocalizedRasterWindow, RasterWindowRequest};
 use crate::error::SessionError;
 use crate::raster_cache::RemoteRasterCache;
 use crate::reader;
@@ -28,10 +30,17 @@ pub enum RasterKind {
 }
 
 impl RasterKind {
-    fn artifact(self) -> &'static str {
+    pub(crate) fn artifact(self) -> &'static str {
         match self {
             Self::FlowDir => "flow_dir.tif",
             Self::FlowAcc => "flow_acc.tif",
+        }
+    }
+
+    pub(crate) fn cache_name(self) -> &'static str {
+        match self {
+            Self::FlowDir => "flow-dir",
+            Self::FlowAcc => "flow-acc",
         }
     }
 }
@@ -387,6 +396,55 @@ impl DatasetSession {
             RasterKind::FlowDir => raster_paths.flow_dir().to_path_buf(),
             RasterKind::FlowAcc => raster_paths.flow_acc().to_path_buf(),
         })
+    }
+
+    /// Return a local filesystem path for a raster window needed by refinement.
+    ///
+    /// Local sessions return the full raster path because GDAL already performs
+    /// local windowed reads. Remote sessions read only the intersecting COG byte
+    /// ranges and materialize a small cache-local GeoTIFF.
+    pub(crate) fn localize_raster_window(
+        &self,
+        kind: RasterKind,
+        bbox: Rect<f64>,
+    ) -> Result<LocalizedRasterWindow, SessionError> {
+        let raster_paths = self.raster_paths.as_ref().ok_or_else(|| {
+            SessionError::integrity(
+                "raster localization requested but manifest declares no rasters",
+            )
+        })?;
+
+        if let (Some(cache), Some(store), Some(root)) = (
+            self.raster_cache.as_ref(),
+            self.remote_store.as_ref(),
+            self.remote_root.as_ref(),
+        ) {
+            let remote_path = remote_artifact_path(root, kind.artifact());
+            let request = RasterWindowRequest::new(kind, bbox);
+            let (fabric_name, adapter_version) = &self.fabric_cache_key;
+            return RT
+                .block_on(cache.get_or_fetch_window(
+                    store.as_ref(),
+                    &remote_path,
+                    &request,
+                    fabric_name,
+                    adapter_version,
+                ))
+                .map_err(SessionError::from);
+        }
+
+        if self.raster_cache.is_some() || self.remote_store.is_some() || self.remote_root.is_some()
+        {
+            return Err(SessionError::integrity(
+                "remote raster localization state is incomplete",
+            ));
+        }
+
+        let path = match kind {
+            RasterKind::FlowDir => raster_paths.flow_dir().to_path_buf(),
+            RasterKind::FlowAcc => raster_paths.flow_acc().to_path_buf(),
+        };
+        Ok(LocalizedRasterWindow::cached(path))
     }
 
     /// Return the dataset root directory path.

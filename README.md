@@ -58,10 +58,12 @@ For remote datasets, `manifest.json` and `graph.arrow` are cached locally under
 `HFX_CACHE_DIR=/path/to/cache` to override the cache root. Parquet artifacts are
 read through object-store range reads instead of being downloaded wholesale.
 
-Raster URI and GDAL configuration plumbing is present for remote dataset
-sessions. Treat public R2 raster access as environment-dependent until a
-dataset-specific smoke test has verified the target bucket, credentials, and
-GDAL driver behavior.
+Remote raster refinement uses COG window reads: `shed` fetches TIFF metadata and
+the compressed tile byte ranges intersecting the terminal catchment, writes a
+small cache-local GeoTIFF under `raster-windows/`, and lets the GDAL bridge open
+that local window. The older full-raster cache path remains as a stopgap API but
+is not used by the default remote refinement flow. See
+[`docs/raster-cache.md`](docs/raster-cache.md) for details.
 
 ### Canonical hosted dataset
 
@@ -92,7 +94,7 @@ result = engine.delineate(lat=47.3769, lon=8.5417)
 print(result.area_km2)
 ```
 
-Cold-cache smoke results, to be filled in Phase 5:
+Cold-cache smoke results, to be filled after the next public R3 smoke artifact:
 
 ```text
 <bytes-on-wire> | <peak-RSS> | <wall-time>

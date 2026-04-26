@@ -17,6 +17,9 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::Notify;
 
 use crate::cache::fnv1a64;
+use crate::cog::{
+    LocalizedRasterWindow, RasterWindowRequest, fetch_window_to_path, prepare_window,
+};
 use crate::error::CacheError;
 
 /// Cache for remote raster files fetched from object storage.
@@ -36,6 +39,9 @@ impl RemoteRasterCache {
     }
 
     /// Return the cached local path for a remote raster, fetching it if needed.
+    ///
+    /// This is the R2 full-file stopgap path. Engine refinement uses
+    /// [`RemoteRasterCache::get_or_fetch_window`] for remote rasters by default.
     pub(crate) async fn get_or_fetch(
         &self,
         store: &dyn ObjectStore,
@@ -70,6 +76,50 @@ impl RemoteRasterCache {
         }
     }
 
+    /// Return a cached local GeoTIFF for a remote COG pixel window.
+    pub(crate) async fn get_or_fetch_window(
+        &self,
+        store: &dyn ObjectStore,
+        remote_path: &ObjectPath,
+        request: &RasterWindowRequest,
+        fabric_name: &str,
+        adapter_version: &str,
+    ) -> Result<LocalizedRasterWindow, CacheError> {
+        let prepared = prepare_window(store, remote_path, request).await?;
+        let canonical = self.canonical_window_path(
+            remote_path,
+            request,
+            &prepared.cache_fragment(),
+            fabric_name,
+            adapter_version,
+        );
+        if cache_hit(&canonical).await? {
+            return Ok(LocalizedRasterWindow::cached(canonical));
+        }
+
+        loop {
+            match self.in_flight.entry(canonical.clone()) {
+                Entry::Occupied(entry) => {
+                    let notify = Arc::clone(entry.get());
+                    drop(entry);
+                    notify.notified().await;
+                    if cache_hit(&canonical).await? {
+                        return Ok(LocalizedRasterWindow::cached(canonical));
+                    }
+                }
+                Entry::Vacant(entry) => {
+                    let notify = Arc::new(Notify::new());
+                    entry.insert(Arc::clone(&notify));
+                    let result =
+                        fetch_window_to_path(store, remote_path, prepared, &canonical).await;
+                    self.in_flight.remove(&canonical);
+                    notify.notify_waiters();
+                    return result;
+                }
+            }
+        }
+    }
+
     fn canonical_path(
         &self,
         remote_path: &ObjectPath,
@@ -81,6 +131,28 @@ impl RemoteRasterCache {
             .join(adapter_version)
             .join("rasters")
             .join(flat_key(remote_path))
+    }
+
+    fn canonical_window_path(
+        &self,
+        remote_path: &ObjectPath,
+        request: &RasterWindowRequest,
+        window_fragment: &str,
+        fabric_name: &str,
+        adapter_version: &str,
+    ) -> PathBuf {
+        let remote_hash = fnv1a64(remote_path.as_ref().as_bytes());
+        let key = format!(
+            "{}.{}.{}.tif",
+            request.kind().cache_name(),
+            remote_hash,
+            window_fragment
+        );
+        self.root
+            .join(fabric_name)
+            .join(adapter_version)
+            .join("raster-windows")
+            .join(key)
     }
 
     async fn fetch_to_path(

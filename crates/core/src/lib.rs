@@ -4,6 +4,7 @@ pub mod algo;
 #[allow(dead_code)]
 pub(crate) mod assembly;
 pub(crate) mod cache;
+pub(crate) mod cog;
 pub mod engine;
 pub mod error;
 #[allow(dead_code)]
