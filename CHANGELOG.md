@@ -6,6 +6,8 @@ All notable changes to `shed` (the CLI binary) and `shed-core` (the engine crate
 
 ### Added
 
+- Accepted public R2 custom-domain dataset roots at
+  `https://basin-delineations-public.upstream.tech/...`.
 - Documented remote HFX dataset locations backed by the object-store
   integration, including local paths, `file://`, `s3://`, Cloudflare R2 HTTPS
   URLs, manifest/graph cache behavior, `HFX_CACHE_DIR`, and parquet range

@@ -51,6 +51,7 @@ Supported dataset path forms:
 | Local file URL | `file:///data/hfx/rhine` |
 | Amazon S3 URL | `s3://bucket/path/to/hfx/rhine` |
 | Cloudflare R2 HTTPS URL | `https://<account>.r2.cloudflarestorage.com/<bucket>/path/to/hfx/rhine` |
+| Public R2 custom-domain URL | `https://basin-delineations-public.upstream.tech/global/hfx` |
 
 For remote datasets, `manifest.json` and `graph.arrow` are cached locally under
 `~/.cache/hfx/<fabric_name>/<adapter_version>/` by default. Set

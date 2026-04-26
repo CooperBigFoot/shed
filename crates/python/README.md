@@ -37,6 +37,9 @@ s3_engine = pyshed.Engine("s3://bucket/path/to/hfx/rhine")
 r2_engine = pyshed.Engine(
     "https://<account>.r2.cloudflarestorage.com/<bucket>/path/to/hfx/rhine"
 )
+public_r2_engine = pyshed.Engine(
+    "https://basin-delineations-public.upstream.tech/global/hfx"
+)
 ```
 
 Remote dataset sessions cache `manifest.json` and `graph.arrow` under

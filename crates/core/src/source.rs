@@ -10,6 +10,9 @@ use url::Url;
 
 use crate::error::SessionError;
 
+const PUBLIC_R2_CUSTOM_DOMAIN: &str = "basin-delineations-public.upstream.tech";
+const PUBLIC_R2_BUCKET_NAME: &str = "basin-delineations-public";
+
 /// A parsed HFX dataset location.
 #[derive(Debug, Clone)]
 pub enum DatasetSource {
@@ -94,20 +97,28 @@ impl DatasetSource {
     }
 
     fn parse_http_url(input: &str, url: Url) -> Result<Self, SessionError> {
-        let Some(host) = url.host_str() else {
+        let Some(host) = url.host_str().map(str::to_owned) else {
             return Err(SessionError::InvalidDatasetSource {
                 input: input.to_string(),
                 reason: "URL is missing a host".to_string(),
             });
         };
 
-        let Some(account) = host.strip_suffix(".r2.cloudflarestorage.com") else {
-            return Err(SessionError::UnsupportedDatasetSource {
-                input: input.to_string(),
-                reason: "only Cloudflare R2 HTTP(S) endpoints are supported".to_string(),
-            });
-        };
+        if host == PUBLIC_R2_CUSTOM_DOMAIN {
+            return Self::parse_public_r2_custom_domain_url(input, url);
+        }
 
+        if let Some(account) = host.strip_suffix(".r2.cloudflarestorage.com") {
+            return Self::parse_account_r2_url(input, url, account);
+        }
+
+        Err(SessionError::UnsupportedDatasetSource {
+            input: input.to_string(),
+            reason: "only Cloudflare R2 HTTP(S) endpoints are supported".to_string(),
+        })
+    }
+
+    fn parse_account_r2_url(input: &str, url: Url, account: &str) -> Result<Self, SessionError> {
         if account.is_empty() {
             return Err(SessionError::InvalidDatasetSource {
                 input: input.to_string(),
@@ -139,6 +150,33 @@ impl DatasetSource {
             .with_endpoint(endpoint)
             .with_region("auto")
             .with_virtual_hosted_style_request(false)
+            .build()
+            .map_err(|source| SessionError::ObjectStoreConfig {
+                input: input.to_string(),
+                source: Box::new(source),
+            })?;
+
+        Ok(Self::Remote {
+            store: Arc::new(store),
+            root,
+            url,
+        })
+    }
+
+    fn parse_public_r2_custom_domain_url(input: &str, url: Url) -> Result<Self, SessionError> {
+        let root = ObjectPath::from_url_path(url.path()).map_err(|source| {
+            SessionError::DatasetSourcePath {
+                input: input.to_string(),
+                source,
+            }
+        })?;
+        let endpoint = format!("https://{PUBLIC_R2_CUSTOM_DOMAIN}");
+        let store = AmazonS3Builder::new()
+            .with_bucket_name(PUBLIC_R2_BUCKET_NAME)
+            .with_endpoint(endpoint)
+            .with_region("auto")
+            .with_virtual_hosted_style_request(true)
+            .with_skip_signature(true)
             .build()
             .map_err(|source| SessionError::ObjectStoreConfig {
                 input: input.to_string(),
@@ -208,6 +246,24 @@ mod tests {
                 assert_eq!(
                     url.as_str(),
                     "https://abc123.r2.cloudflarestorage.com/shed-test/example/root"
+                );
+            }
+            DatasetSource::Local(_) => panic!("expected remote source"),
+        }
+    }
+
+    #[test]
+    fn parses_public_r2_custom_domain_url_as_remote_source() {
+        let source =
+            DatasetSource::parse("https://basin-delineations-public.upstream.tech/global/hfx")
+                .expect("source should parse");
+
+        match source {
+            DatasetSource::Remote { root, url, .. } => {
+                assert_eq!(root.as_ref(), "global/hfx");
+                assert_eq!(
+                    url.as_str(),
+                    "https://basin-delineations-public.upstream.tech/global/hfx"
                 );
             }
             DatasetSource::Local(_) => panic!("expected remote source"),
