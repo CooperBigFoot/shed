@@ -63,6 +63,41 @@ sessions. Treat public R2 raster access as environment-dependent until a
 dataset-specific smoke test has verified the target bucket, credentials, and
 GDAL driver behavior.
 
+### Canonical hosted dataset
+
+The canonical public dataset for smoke tests and examples is MERIT-Basins
+global v0.1.0:
+
+```text
+https://basin-delineations-public.upstream.tech/merit-basins/0.1.0/
+```
+
+CLI example:
+
+```bash
+./target/release/shed delineate \
+    --dataset https://basin-delineations-public.upstream.tech/merit-basins/0.1.0/ \
+    --lat 47.3769 --lon 8.5417
+```
+
+Python example:
+
+```python
+import pyshed
+
+engine = pyshed.Engine(
+    "https://basin-delineations-public.upstream.tech/merit-basins/0.1.0/"
+)
+result = engine.delineate(lat=47.3769, lon=8.5417)
+print(result.area_km2)
+```
+
+Cold-cache smoke results, to be filled in Phase 5:
+
+```text
+<bytes-on-wire> | <peak-RSS> | <wall-time>
+```
+
 ## Use it from the CLI
 
 ```bash
