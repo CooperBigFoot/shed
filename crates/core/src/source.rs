@@ -4,12 +4,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use object_store::aws::AmazonS3Builder;
-use object_store::path::Path as ObjectPath;
 use object_store::BackoffConfig;
 use object_store::ClientOptions;
 use object_store::ObjectStore;
 use object_store::RetryConfig;
+use object_store::aws::AmazonS3Builder;
+use object_store::path::Path as ObjectPath;
 use url::Url;
 
 use crate::error::SessionError;

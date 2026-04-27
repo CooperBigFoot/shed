@@ -27,6 +27,7 @@ pub fn engine_err_to_py(e: shed_core::EngineError) -> PyErr {
         EngineError::Traversal { .. } => ShedError::new_err(e.to_string()),
         EngineError::TerminalCatchmentFetch { .. } => DatasetError::new_err(e.to_string()),
         EngineError::TerminalCatchmentDecode { .. } => DatasetError::new_err(e.to_string()),
+        EngineError::RasterLocalize { .. } => DatasetError::new_err(e.to_string()),
         EngineError::Refinement { .. } => ShedError::new_err(e.to_string()),
         EngineError::Assembly { .. } => PyAssemblyError::new_err(e.to_string()),
     }
