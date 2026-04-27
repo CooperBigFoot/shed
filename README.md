@@ -94,11 +94,19 @@ result = engine.delineate(lat=47.3769, lon=8.5417)
 print(result.area_km2)
 ```
 
-Cold-cache smoke results, to be filled after the next public R3 smoke artifact:
+End-to-end smoke results against the live R2 deployment (single Nordic outlet,
+lat=70.45213, lon=28.49066):
 
-```text
-<bytes-on-wire> | <peak-RSS> | <wall-time>
-```
+| Cache | Wall | Peak RSS | RSS vs local-disk | COG header bytes | COG tile bytes |
+|---|---|---|---|---|---|
+| Cold | 37 s | 626 MB | 1.05× | 32 MB | 280 KB |
+| Warm | 32 s | 568 MB | 1.00× | 0 (cached) | 0 (cached) |
+
+Total cold-cache bytes-on-wire ≈ 90 MB (graph.arrow ~57 MB once per dataset
+version, COG headers ~32 MB once per dataset version, COG tiles ~280 KB per
+outlet, Parquet row-groups ~1-5 MB transient). Against the 65 GB published
+dataset that is a ~720× reduction cold, ~13,000× warm. See
+[`scratchpad/benchmarks/20260427-phase4-r2-smoke.md`](scratchpad/benchmarks/20260427-phase4-r2-smoke.md).
 
 ## Use it from the CLI
 
