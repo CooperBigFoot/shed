@@ -1,6 +1,5 @@
 //! Local cache for remote raster artifacts.
 //!
-//! TODO(R3): replace full-file get_or_fetch with COG window byte-range reads.
 //! TODO(R3): add bounded LRU eviction and a cross-process file lock.
 
 use std::io::ErrorKind;
@@ -35,44 +34,6 @@ impl RemoteRasterCache {
         Self {
             root,
             in_flight: DashMap::new(),
-        }
-    }
-
-    /// Return the cached local path for a remote raster, fetching it if needed.
-    ///
-    /// This is the R2 full-file stopgap path. Engine refinement uses
-    /// [`RemoteRasterCache::get_or_fetch_window`] for remote rasters by default.
-    pub(crate) async fn get_or_fetch(
-        &self,
-        store: &dyn ObjectStore,
-        remote_path: &ObjectPath,
-        fabric_name: &str,
-        adapter_version: &str,
-    ) -> Result<PathBuf, CacheError> {
-        let canonical = self.canonical_path(remote_path, fabric_name, adapter_version);
-        if cache_hit(&canonical).await? {
-            return Ok(canonical);
-        }
-
-        loop {
-            match self.in_flight.entry(canonical.clone()) {
-                Entry::Occupied(entry) => {
-                    let notify = Arc::clone(entry.get());
-                    drop(entry);
-                    notify.notified().await;
-                    if cache_hit(&canonical).await? {
-                        return Ok(canonical);
-                    }
-                }
-                Entry::Vacant(entry) => {
-                    let notify = Arc::new(Notify::new());
-                    entry.insert(Arc::clone(&notify));
-                    let result = self.fetch_to_path(store, remote_path, &canonical).await;
-                    self.in_flight.remove(&canonical);
-                    notify.notify_waiters();
-                    return result.map(|()| canonical);
-                }
-            }
         }
     }
 
@@ -262,9 +223,6 @@ fn flat_key(remote_path: &ObjectPath) -> String {
 
 #[cfg(test)]
 mod tests {
-    use object_store::memory::InMemory;
-    use object_store::{ObjectStoreExt, PutPayload};
-
     use super::RemoteRasterCache;
     use object_store::path::Path as ObjectPath;
 
@@ -289,52 +247,5 @@ mod tests {
                     .as_path()
             )
         );
-    }
-
-    #[tokio::test]
-    async fn cache_hit_fast_path_skips_remote_fetch() {
-        let temp = tempfile::TempDir::new().expect("temp dir");
-        let cache = RemoteRasterCache::new(temp.path().to_path_buf());
-        let store = InMemory::new();
-        let remote_path = ObjectPath::from("rasters/existing.tif");
-        let canonical = cache.canonical_path(&remote_path, FABRIC, ADAPTER);
-        std::fs::create_dir_all(canonical.parent().expect("parent")).expect("create parent");
-        std::fs::write(&canonical, b"cached").expect("write cached file");
-
-        let path = cache
-            .get_or_fetch(&store, &remote_path, FABRIC, ADAPTER)
-            .await
-            .expect("cache hit");
-
-        assert_eq!(path, canonical);
-        assert_eq!(std::fs::read(&path).expect("read cached file"), b"cached");
-    }
-
-    #[tokio::test]
-    async fn fetch_writes_canonical_file() {
-        let temp = tempfile::TempDir::new().expect("temp dir");
-        let cache = RemoteRasterCache::new(temp.path().to_path_buf());
-        let store = InMemory::new();
-        let remote_path = ObjectPath::from("remote/flow_dir.tif");
-        store
-            .put(&remote_path, PutPayload::from_static(b"raster-bytes"))
-            .await
-            .expect("put remote object");
-
-        let path = cache
-            .get_or_fetch(&store, &remote_path, FABRIC, ADAPTER)
-            .await
-            .expect("fetch raster");
-
-        assert_eq!(path, cache.canonical_path(&remote_path, FABRIC, ADAPTER));
-        assert_eq!(
-            std::fs::read(&path).expect("read canonical file"),
-            b"raster-bytes"
-        );
-        let entries = std::fs::read_dir(path.parent().expect("parent"))
-            .expect("read cache dir")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("collect entries");
-        assert_eq!(entries.len(), 1);
     }
 }

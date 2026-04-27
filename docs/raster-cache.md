@@ -1,10 +1,9 @@
 # Raster Cache
 
-Remote raster refinement has two cache paths:
+Remote raster refinement caches materialized COG windows:
 
 | Path | Status | Behavior |
 |---|---|---|
-| `rasters/` | R2 stopgap | Stores a complete remote raster after `RemoteRasterCache::get_or_fetch`. This API is no longer used and will be removed in the next refactor. |
 | `raster-windows/` | R3 default | Stores a small local GeoTIFF for the terminal catchment bbox. The cache key includes the remote path hash, raster kind, adapter version, and planned pixel window. |
 
 For R3, remote MERIT-Basins rasters are treated as COGs. The engine reads the
