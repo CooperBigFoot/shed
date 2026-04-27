@@ -219,6 +219,10 @@ exit_code_from_measurement() {
   printf '%s\n' "$measured_exit_code"
 }
 
+strip_ansi() {
+  sed -E $'s/\x1B\\[[0-9;]*[A-Za-z]//g'
+}
+
 bytes_on_wire_from_trace() {
   local trace_file=$1
   local bytes_on_wire
@@ -228,7 +232,7 @@ bytes_on_wire_from_trace() {
     return 0
   fi
 
-  bytes_on_wire=$(awk '
+  bytes_on_wire=$(strip_ansi < "$trace_file" | awk '
     {
       line = tolower($0)
       while (match(line, /range[^[:alnum:]]+bytes[[:space:]]*=[^0-9]*[0-9]+[[:space:]]*-[[:space:]]*[0-9]+/)) {
@@ -244,7 +248,7 @@ bytes_on_wire_from_trace() {
     END {
       printf "%.0f\n", total + 0
     }
-  ' "$trace_file" 2>/dev/null)
+  ' 2>/dev/null)
 
   if [[ -z ${bytes_on_wire:-} ]]; then
     bytes_on_wire=0
@@ -264,7 +268,7 @@ trace_number_sum() {
     return 0
   fi
 
-  total=$(awk -v field="$field" '
+  total=$(strip_ansi < "$trace_file" | awk -v field="$field" '
     {
       line = $0
       pattern = "(^|[^[:alnum:]_])" field "[[:space:]]*=[[:space:]]*[0-9]+"
@@ -278,7 +282,7 @@ trace_number_sum() {
     END {
       printf "%.0f\n", total + 0
     }
-  ' "$trace_file" 2>/dev/null)
+  ' 2>/dev/null)
 
   if [[ -z ${total:-} ]]; then
     total=0
@@ -544,6 +548,7 @@ if [[ "$fabric_status" -ne 0 || "$adapter_status" -ne 0 ]]; then
 fi
 
 cache_root=${HFX_CACHE_DIR:-$HOME/.cache/hfx}
+export HFX_CACHE_DIR="$cache_root"
 cache_dir="${cache_root%/}/$fabric_name/$adapter_version"
 raster_cache_dir="$cache_dir/raster-windows"
 trace_file=$(mktemp "${TMPDIR:-/tmp}/phase4-smoke-r2-trace.XXXXXX")

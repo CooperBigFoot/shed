@@ -5,9 +5,11 @@ use std::path::Path;
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::{LazyLock, Mutex};
+use std::time::Instant;
 
 use arrow::array::{Array, BinaryArray, Float32Array, Int64Array, LargeBinaryArray};
 use arrow::datatypes::{DataType, Schema};
+use futures_util::{StreamExt, stream};
 use geo::{Geometry, MultiPolygon};
 use geozero::ToGeo;
 use geozero::wkb::Wkb;
@@ -16,8 +18,9 @@ use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt};
 use parquet::arrow::ProjectionMask;
+use parquet::arrow::arrow_reader::ArrowReaderMetadata;
 use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
-use tracing::{debug, instrument};
+use tracing::{debug, info, instrument};
 
 use super::{BboxColIndices, extract_row_group_bbox, require_column};
 use crate::algo::WkbDecodeError;
@@ -25,6 +28,7 @@ use crate::error::SessionError;
 use crate::runtime::RT;
 
 const ARTIFACT: &str = "catchments.parquet";
+const ID_INDEX_ROW_GROUP_CONCURRENCY: usize = 16;
 
 #[cfg(test)]
 static GEOMETRY_DECODE_COUNTS_FOR_TEST: LazyLock<Mutex<HashMap<(String, AtomId), usize>>> =
@@ -837,11 +841,13 @@ fn geometry_type_name(geom: &Geometry<f64>) -> &'static str {
     }
 }
 
+#[instrument(skip(store))]
 async fn read_all_ids_with_row_groups_async(
     store: &Arc<dyn ObjectStore>,
     path: &ObjectPath,
     file_size: u64,
 ) -> Result<(Vec<AtomId>, HashMap<AtomId, usize>), SessionError> {
+    let started = Instant::now();
     let builder = ParquetRecordBatchStreamBuilder::new(object_reader(store, path, file_size))
         .await
         .map_err(|e| SessionError::ParquetParse {
@@ -849,91 +855,144 @@ async fn read_all_ids_with_row_groups_async(
             source: e,
         })?;
     let metadata = builder.metadata().clone();
-    let selected_row_groups: Vec<usize> = (0..metadata.num_row_groups()).collect();
-    if selected_row_groups.is_empty() {
+    let num_row_groups = metadata.num_row_groups();
+    debug!(num_row_groups, "indexing ids");
+    if num_row_groups == 0 {
         return Ok((Vec::new(), HashMap::new()));
     }
+
+    let reader_metadata = ArrowReaderMetadata::try_new(metadata.clone(), Default::default())
+        .map_err(|e| SessionError::ParquetParse {
+            artifact: ARTIFACT,
+            source: e,
+        })?;
+    let parquet_schema = reader_metadata.parquet_schema();
+    let id_projection = ProjectionMask::roots(parquet_schema, [id_column_index(parquet_schema)?]);
+    let selected_row_groups: Vec<usize> = (0..num_row_groups).collect();
     let rg_absolute_starts = absolute_row_starts(&metadata, &selected_row_groups);
+
+    let row_group_results = stream::iter(selected_row_groups.into_iter().zip(rg_absolute_starts))
+        .map(|(row_group, absolute_start)| {
+            let store = Arc::clone(store);
+            let path = path.clone();
+            let reader_metadata = reader_metadata.clone();
+            let id_projection = id_projection.clone();
+            async move {
+                read_id_row_group_async(
+                    &store,
+                    &path,
+                    file_size,
+                    reader_metadata,
+                    id_projection,
+                    row_group,
+                    absolute_start,
+                )
+                .await
+            }
+        })
+        .buffered(ID_INDEX_ROW_GROUP_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+
     let mut ids = Vec::new();
     let mut id_row_groups = HashMap::new();
-    for (sel_idx, &row_group) in selected_row_groups.iter().enumerate() {
-        let builder = ParquetRecordBatchStreamBuilder::new(object_reader(store, path, file_size))
-            .await
-            .map_err(|e| SessionError::ParquetParse {
-                artifact: ARTIFACT,
-                source: e,
-            })?;
-        let parquet_schema = builder.parquet_schema();
-        let id_projection =
-            ProjectionMask::roots(parquet_schema, [id_column_index(parquet_schema)?]);
-        let mut stream = builder
-            .with_projection(id_projection)
-            .with_row_groups(vec![row_group])
-            .with_batch_size(8192)
-            .build()
-            .map_err(|e| SessionError::ParquetParse {
-                artifact: ARTIFACT,
-                source: e,
-            })?;
-
-        let mut offset_in_group = 0usize;
-        while let Some(reader) =
-            stream
-                .next_row_group()
-                .await
-                .map_err(|e| SessionError::RowGroupReadError {
-                    artifact: ARTIFACT,
+    // Mirrors `snap_store::read_all_catchment_ids_async`. Keep both in sync.
+    // DO NOT construct ParquetRecordBatchStreamBuilder::new inside this loop -- see catchment_store_perf_tests.rs.
+    for row_group_result in row_group_results {
+        let (row_group, row_group_ids) = row_group_result?;
+        for atom_id in row_group_ids {
+            ids.push(atom_id);
+            if let Some(previous_row_group) = id_row_groups.insert(atom_id, row_group) {
+                return Err(SessionError::integrity(format!(
+                    "duplicate catchment id {} found in row groups {} and {}",
+                    atom_id.get(),
+                    previous_row_group,
                     row_group,
-                    source: e,
-                })?
-        {
-            for batch_result in reader {
-                let batch = batch_result.map_err(|e| SessionError::RowGroupReadError {
-                    artifact: ARTIFACT,
-                    row_group,
-                    source: parquet::errors::ParquetError::ArrowError(e.to_string()),
-                })?;
-                let absolute_row = rg_absolute_starts[sel_idx] + offset_in_group;
-                let id_col = batch
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .ok_or_else(|| {
-                        SessionError::parquet_schema(ARTIFACT, "id column is not Int64")
-                    })?;
-
-                for i in 0..batch.num_rows() {
-                    if id_col.is_null(i) {
-                        return Err(SessionError::invalid_row(
-                            ARTIFACT,
-                            absolute_row + i,
-                            "null id",
-                        ));
-                    }
-                    let atom_id = AtomId::new(id_col.value(i)).map_err(|e| {
-                        SessionError::invalid_row(
-                            ARTIFACT,
-                            absolute_row + i,
-                            format!("invalid atom id: {e}"),
-                        )
-                    })?;
-                    ids.push(atom_id);
-                    if let Some(previous_row_group) = id_row_groups.insert(atom_id, row_group) {
-                        return Err(SessionError::integrity(format!(
-                            "duplicate catchment id {} found in row groups {} and {}",
-                            atom_id.get(),
-                            previous_row_group,
-                            row_group,
-                        )));
-                    }
-                }
-
-                offset_in_group += batch.num_rows();
+                )));
             }
         }
     }
 
+    info!(
+        num_ids = ids.len(),
+        num_row_groups,
+        elapsed_ms = started.elapsed().as_millis(),
+        "id index built"
+    );
     Ok((ids, id_row_groups))
+}
+
+async fn read_id_row_group_async(
+    store: &Arc<dyn ObjectStore>,
+    path: &ObjectPath,
+    file_size: u64,
+    reader_metadata: ArrowReaderMetadata,
+    id_projection: ProjectionMask,
+    row_group: usize,
+    absolute_start: usize,
+) -> Result<(usize, Vec<AtomId>), SessionError> {
+    let builder = ParquetRecordBatchStreamBuilder::new_with_metadata(
+        object_reader(store, path, file_size),
+        reader_metadata,
+    );
+    let mut stream = builder
+        .with_projection(id_projection)
+        .with_row_groups(vec![row_group])
+        .with_batch_size(8192)
+        .build()
+        .map_err(|e| SessionError::ParquetParse {
+            artifact: ARTIFACT,
+            source: e,
+        })?;
+
+    let mut ids = Vec::new();
+    let mut offset_in_group = 0usize;
+    while let Some(reader) =
+        stream
+            .next_row_group()
+            .await
+            .map_err(|e| SessionError::RowGroupReadError {
+                artifact: ARTIFACT,
+                row_group,
+                source: e,
+            })?
+    {
+        for batch_result in reader {
+            let batch = batch_result.map_err(|e| SessionError::RowGroupReadError {
+                artifact: ARTIFACT,
+                row_group,
+                source: parquet::errors::ParquetError::ArrowError(e.to_string()),
+            })?;
+            let absolute_row = absolute_start + offset_in_group;
+            let id_col = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .ok_or_else(|| SessionError::parquet_schema(ARTIFACT, "id column is not Int64"))?;
+
+            for i in 0..batch.num_rows() {
+                if id_col.is_null(i) {
+                    return Err(SessionError::invalid_row(
+                        ARTIFACT,
+                        absolute_row + i,
+                        "null id",
+                    ));
+                }
+                let atom_id = AtomId::new(id_col.value(i)).map_err(|e| {
+                    SessionError::invalid_row(
+                        ARTIFACT,
+                        absolute_row + i,
+                        format!("invalid atom id: {e}"),
+                    )
+                })?;
+                ids.push(atom_id);
+            }
+
+            offset_in_group += batch.num_rows();
+        }
+    }
+
+    Ok((row_group, ids))
 }
 
 fn read_all_ids_with_row_groups(
@@ -955,7 +1014,9 @@ fn object_reader(
     path: &ObjectPath,
     file_size: u64,
 ) -> ParquetObjectReader {
-    ParquetObjectReader::new(store.clone(), path.clone()).with_file_size(file_size)
+    ParquetObjectReader::new(store.clone(), path.clone())
+        .with_file_size(file_size)
+        .with_footer_size_hint(1 << 20)
 }
 
 fn head_file_size(

@@ -5,6 +5,9 @@ pub mod graph;
 pub mod manifest;
 pub mod snap_store;
 
+#[cfg(test)]
+mod catchment_store_perf_tests;
+
 use arrow::datatypes::{DataType, Schema};
 use hfx_core::BoundingBox;
 use parquet::file::metadata::RowGroupMetaData;

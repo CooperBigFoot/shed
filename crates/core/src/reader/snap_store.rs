@@ -2,16 +2,19 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 
 use arrow::array::{Array, BinaryArray, BooleanArray, Float32Array, Int64Array, LargeBinaryArray};
 use arrow::datatypes::DataType;
+use futures_util::{StreamExt, stream};
 use hfx_core::{AtomId, BoundingBox, MainstemStatus, SnapId, SnapTarget, Weight, WkbGeometry};
 use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt};
 use parquet::arrow::ProjectionMask;
+use parquet::arrow::arrow_reader::ArrowReaderMetadata;
 use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
-use tracing::{debug, instrument};
+use tracing::{debug, info, instrument};
 
 use crate::error::SessionError;
 use crate::reader::{BboxColIndices, extract_row_group_bbox, require_column};
@@ -69,6 +72,7 @@ fn snap_bbox(
 }
 
 const ARTIFACT: &str = "snap.parquet";
+const ID_INDEX_ROW_GROUP_CONCURRENCY: usize = 16;
 
 /// Row-group bounding box with metadata for pruning.
 #[derive(Debug, Clone)]
@@ -502,15 +506,25 @@ impl SnapStore {
         RT.block_on(self.read_all_catchment_ids_async())
     }
 
+    #[instrument(skip(self), fields(path = %self.path_display))]
     async fn read_all_catchment_ids_async(&self) -> Result<Vec<hfx_core::AtomId>, SessionError> {
+        let started = Instant::now();
         let builder = ParquetRecordBatchStreamBuilder::new(self.object_reader())
             .await
             .map_err(|e| SessionError::ParquetParse {
                 artifact: ARTIFACT,
                 source: e,
             })?;
+        let metadata = builder.metadata().clone();
+        let num_row_groups = metadata.num_row_groups();
+        debug!(num_row_groups, "indexing ids");
 
-        let parquet_schema = builder.parquet_schema();
+        let reader_metadata = ArrowReaderMetadata::try_new(metadata.clone(), Default::default())
+            .map_err(|e| SessionError::ParquetParse {
+                artifact: ARTIFACT,
+                source: e,
+            })?;
+        let parquet_schema = reader_metadata.parquet_schema();
         let col_idx = parquet_schema
             .columns()
             .iter()
@@ -520,62 +534,46 @@ impl SnapStore {
             })?;
 
         let mask = ProjectionMask::roots(parquet_schema, [col_idx]);
-        let mut stream = builder
-            .with_projection(mask)
-            .with_batch_size(8192)
-            .build()
-            .map_err(|e| SessionError::ParquetParse {
-                artifact: ARTIFACT,
-                source: e,
-            })?;
+        let selected_row_groups: Vec<usize> = (0..num_row_groups).collect();
+        let rg_absolute_starts = absolute_row_starts(&metadata, &selected_row_groups);
+        let row_group_results =
+            stream::iter(selected_row_groups.into_iter().zip(rg_absolute_starts))
+                .map(|(row_group, absolute_start)| {
+                    let store = Arc::clone(&self.store);
+                    let path = self.path.clone();
+                    let reader_metadata = reader_metadata.clone();
+                    let mask = mask.clone();
+                    let file_size = self.file_size;
+                    async move {
+                        read_catchment_id_row_group_async(
+                            &store,
+                            &path,
+                            file_size,
+                            reader_metadata,
+                            mask,
+                            row_group,
+                            absolute_start,
+                        )
+                        .await
+                    }
+                })
+                .buffered(ID_INDEX_ROW_GROUP_CONCURRENCY)
+                .collect::<Vec<_>>()
+                .await;
 
         let mut ids = Vec::new();
-        let mut global_row = 0usize;
-        let mut row_group = 0usize;
-        while let Some(reader) =
-            stream
-                .next_row_group()
-                .await
-                .map_err(|e| SessionError::RowGroupReadError {
-                    artifact: ARTIFACT,
-                    row_group,
-                    source: e,
-                })?
-        {
-            for batch_result in reader {
-                let batch = batch_result.map_err(|e| SessionError::RowGroupReadError {
-                    artifact: ARTIFACT,
-                    row_group,
-                    source: parquet::errors::ParquetError::ArrowError(e.to_string()),
-                })?;
-                let col = batch
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<arrow::array::Int64Array>()
-                    .ok_or_else(|| {
-                        SessionError::parquet_schema(ARTIFACT, "catchment_id column is not Int64")
-                    })?;
-                for i in 0..batch.num_rows() {
-                    if col.is_null(i) {
-                        return Err(SessionError::invalid_row(
-                            ARTIFACT,
-                            global_row + i,
-                            "null catchment_id",
-                        ));
-                    }
-                    let atom_id = hfx_core::AtomId::new(col.value(i)).map_err(|e| {
-                        SessionError::invalid_row(
-                            ARTIFACT,
-                            global_row + i,
-                            format!("invalid catchment_id: {e}"),
-                        )
-                    })?;
-                    ids.push(atom_id);
-                }
-                global_row += batch.num_rows();
-            }
-            row_group += 1;
+        // Mirrors `catchment_store::read_all_ids_with_row_groups_async`. Keep both in sync.
+        // DO NOT construct ParquetRecordBatchStreamBuilder::new inside this loop.
+        for row_group_result in row_group_results {
+            let row_group_ids = row_group_result?;
+            ids.extend(row_group_ids);
         }
+        info!(
+            num_ids = ids.len(),
+            num_row_groups,
+            elapsed_ms = started.elapsed().as_millis(),
+            "id index built"
+        );
         Ok(ids)
     }
 
@@ -589,6 +587,79 @@ impl SnapStore {
     }
 }
 
+async fn read_catchment_id_row_group_async(
+    store: &Arc<dyn ObjectStore>,
+    path: &ObjectPath,
+    file_size: u64,
+    reader_metadata: ArrowReaderMetadata,
+    mask: ProjectionMask,
+    row_group: usize,
+    absolute_start: usize,
+) -> Result<Vec<hfx_core::AtomId>, SessionError> {
+    let builder = ParquetRecordBatchStreamBuilder::new_with_metadata(
+        object_reader(store, path, file_size),
+        reader_metadata,
+    );
+    let mut stream = builder
+        .with_projection(mask)
+        .with_row_groups(vec![row_group])
+        .with_batch_size(8192)
+        .build()
+        .map_err(|e| SessionError::ParquetParse {
+            artifact: ARTIFACT,
+            source: e,
+        })?;
+
+    let mut ids = Vec::new();
+    let mut offset_in_group = 0usize;
+    while let Some(reader) =
+        stream
+            .next_row_group()
+            .await
+            .map_err(|e| SessionError::RowGroupReadError {
+                artifact: ARTIFACT,
+                row_group,
+                source: e,
+            })?
+    {
+        for batch_result in reader {
+            let batch = batch_result.map_err(|e| SessionError::RowGroupReadError {
+                artifact: ARTIFACT,
+                row_group,
+                source: parquet::errors::ParquetError::ArrowError(e.to_string()),
+            })?;
+            let absolute_row = absolute_start + offset_in_group;
+            let col = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .ok_or_else(|| {
+                    SessionError::parquet_schema(ARTIFACT, "catchment_id column is not Int64")
+                })?;
+            for i in 0..batch.num_rows() {
+                if col.is_null(i) {
+                    return Err(SessionError::invalid_row(
+                        ARTIFACT,
+                        absolute_row + i,
+                        "null catchment_id",
+                    ));
+                }
+                let atom_id = hfx_core::AtomId::new(col.value(i)).map_err(|e| {
+                    SessionError::invalid_row(
+                        ARTIFACT,
+                        absolute_row + i,
+                        format!("invalid catchment_id: {e}"),
+                    )
+                })?;
+                ids.push(atom_id);
+            }
+            offset_in_group += batch.num_rows();
+        }
+    }
+
+    Ok(ids)
+}
+
 #[derive(Debug, Clone, Copy)]
 enum HeadErrorMode {
     LocalIo,
@@ -600,7 +671,24 @@ fn object_reader(
     path: &ObjectPath,
     file_size: u64,
 ) -> ParquetObjectReader {
-    ParquetObjectReader::new(store.clone(), path.clone()).with_file_size(file_size)
+    ParquetObjectReader::new(store.clone(), path.clone())
+        .with_file_size(file_size)
+        .with_footer_size_hint(1 << 20)
+}
+
+fn absolute_row_starts(
+    metadata: &parquet::file::metadata::ParquetMetaData,
+    selected_row_groups: &[usize],
+) -> Vec<usize> {
+    let mut starts = Vec::with_capacity(selected_row_groups.len());
+    let mut cumulative = 0usize;
+    for rg_idx in 0..metadata.num_row_groups() {
+        if selected_row_groups.contains(&rg_idx) {
+            starts.push(cumulative);
+        }
+        cumulative += metadata.row_group(rg_idx).num_rows() as usize;
+    }
+    starts
 }
 
 fn head_file_size(
