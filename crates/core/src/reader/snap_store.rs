@@ -13,10 +13,13 @@ use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt};
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::ArrowReaderMetadata;
-use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
+use parquet::arrow::async_reader::{
+    AsyncFileReader, ParquetObjectReader, ParquetRecordBatchStreamBuilder,
+};
 use tracing::{debug, info, instrument};
 
 use crate::error::SessionError;
+use crate::parquet_cache::{ArtifactIdent, CachingReader, ParquetRowGroupCache};
 use crate::reader::{BboxColIndices, extract_row_group_bbox, require_column};
 use crate::runtime::RT;
 
@@ -95,6 +98,10 @@ pub struct SnapStore {
     total_rows: u64,
     #[allow(dead_code)]
     bbox_col_indices: BboxColIndices,
+    /// Optional column-chunk cache shared across all readers for this engine.
+    parquet_cache: Option<Arc<ParquetRowGroupCache>>,
+    /// Artifact identity used as the cache key prefix (populated iff `parquet_cache` is `Some`).
+    cache_ident: Option<ArtifactIdent>,
 }
 
 impl SnapStore {
@@ -111,17 +118,52 @@ impl SnapStore {
     #[instrument(skip_all, fields(path = %path.display()))]
     pub fn open(path: &Path) -> Result<Self, SessionError> {
         let (store, object_path, path_display) = local_object_artifact(path)?;
-        Self::open_object(store, object_path, path_display, HeadErrorMode::LocalIo)
+        Self::open_object(
+            store,
+            object_path,
+            path_display,
+            HeadErrorMode::LocalIo,
+            None,
+            None,
+        )
     }
 
     /// Open an object-store-backed `snap.parquet` artifact.
+    #[allow(dead_code)] // kept for API symmetry with CatchmentStore
     #[instrument(skip_all, fields(path = %path_display))]
     pub(crate) fn open_remote(
         store: Arc<dyn ObjectStore>,
         path: ObjectPath,
         path_display: String,
     ) -> Result<Self, SessionError> {
-        Self::open_object(store, path, path_display, HeadErrorMode::RemoteArtifact)
+        Self::open_object(
+            store,
+            path,
+            path_display,
+            HeadErrorMode::RemoteArtifact,
+            None,
+            None,
+        )
+    }
+
+    /// Open an object-store-backed `snap.parquet` with an optional column-chunk cache.
+    #[instrument(skip_all, fields(path = %path_display))]
+    pub(crate) fn open_remote_with_cache(
+        store: Arc<dyn ObjectStore>,
+        path: ObjectPath,
+        path_display: String,
+        fabric_name: String,
+        adapter_version: String,
+        parquet_cache: Option<Arc<ParquetRowGroupCache>>,
+    ) -> Result<Self, SessionError> {
+        Self::open_object(
+            store,
+            path,
+            path_display,
+            HeadErrorMode::RemoteArtifact,
+            Some((fabric_name, adapter_version)),
+            parquet_cache,
+        )
     }
 
     fn open_object(
@@ -129,8 +171,24 @@ impl SnapStore {
         path: ObjectPath,
         path_display: String,
         head_error_mode: HeadErrorMode,
+        fabric_info: Option<(String, String)>,
+        parquet_cache: Option<Arc<ParquetRowGroupCache>>,
     ) -> Result<Self, SessionError> {
-        let file_size = head_file_size(store.as_ref(), &path, &path_display, head_error_mode)?;
+        let head_meta = head_object_meta(store.as_ref(), &path, &path_display, head_error_mode)?;
+        let file_size = head_meta.size;
+
+        // Build cache identity if a cache and fabric info are both provided.
+        let cache_ident = if parquet_cache.is_some() {
+            fabric_info.map(|(fabric_name, adapter_version)| ArtifactIdent {
+                fabric_name,
+                adapter_version,
+                artifact: ARTIFACT,
+                file_size,
+                etag: head_meta.e_tag.clone(),
+            })
+        } else {
+            None
+        };
 
         let builder = RT
             .block_on(async {
@@ -196,6 +254,8 @@ impl SnapStore {
             groups_without_stats,
             total_rows,
             bbox_col_indices,
+            parquet_cache,
+            cache_ident,
         })
     }
 
@@ -582,8 +642,14 @@ impl SnapStore {
         self.total_rows
     }
 
-    fn object_reader(&self) -> ParquetObjectReader {
-        object_reader(&self.store, &self.path, self.file_size)
+    fn object_reader(&self) -> Box<dyn AsyncFileReader> {
+        let raw = object_reader(&self.store, &self.path, self.file_size);
+        match (&self.parquet_cache, &self.cache_ident) {
+            (Some(cache), Some(ident)) => {
+                Box::new(CachingReader::new(raw, cache.clone(), ident.clone()))
+            }
+            _ => Box::new(raw),
+        }
     }
 }
 
@@ -691,23 +757,19 @@ fn absolute_row_starts(
     starts
 }
 
-fn head_file_size(
+fn head_object_meta(
     store: &dyn ObjectStore,
     path: &ObjectPath,
     path_display: &str,
     error_mode: HeadErrorMode,
-) -> Result<u64, SessionError> {
+) -> Result<object_store::ObjectMeta, SessionError> {
     RT.block_on(async {
-        store
-            .head(path)
-            .await
-            .map(|meta| meta.size)
-            .map_err(|source| match error_mode {
-                HeadErrorMode::LocalIo => object_store_error_as_io(source),
-                HeadErrorMode::RemoteArtifact => {
-                    SessionError::remote_artifact_read(ARTIFACT, path_display, source)
-                }
-            })
+        store.head(path).await.map_err(|source| match error_mode {
+            HeadErrorMode::LocalIo => object_store_error_as_io(source),
+            HeadErrorMode::RemoteArtifact => {
+                SessionError::remote_artifact_read(ARTIFACT, path_display, source)
+            }
+        })
     })
 }
 

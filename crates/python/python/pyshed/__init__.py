@@ -44,7 +44,49 @@ from pyshed._pyshed import (
     Engine,
     ResolutionError,
     ShedError,
+    _set_log_level,
 )
+
+
+def set_log_level(level: str) -> None:
+    """Set the pyshed log level for both the Rust bridge and Python `logging`.
+
+    Updates the dynamic max-level used by the pyo3-log bridge and configures
+    the relevant Python loggers so records actually emit. If no handler is
+    already configured (neither on the ``pyshed`` logger nor on the root
+    logger) a default ``StreamHandler`` is attached to the root logger so
+    first-time users see output without calling ``logging.basicConfig``.
+
+    Records originating from Rust route through pyo3-log under loggers named
+    after their Rust crate (``_pyshed.*``, ``shed_core.*``, ``hfx_core.*``).
+    We therefore set the level on each of those roots in addition to the
+    Python ``pyshed`` facade.
+
+    Valid levels (case-insensitive): ``"trace"``, ``"debug"``, ``"info"``,
+    ``"warn"``, ``"error"``.
+    """
+    _set_log_level(level)
+    py_level = level.upper()
+    # ``log`` crate's "WARN" maps to Python's "WARNING"; "TRACE" has no
+    # stdlib equivalent, so map it to DEBUG (the closest verbose level).
+    py_level = {"WARN": "WARNING", "TRACE": "DEBUG"}.get(py_level, py_level)
+    pyshed_logger = logging.getLogger("pyshed")
+    pyshed_logger.setLevel(py_level)
+    # Rust events come out under the crate-name roots; set level on each so
+    # they aren't silently filtered by the per-logger threshold.
+    for rust_root in ("_pyshed", "shed_core", "hfx_core"):
+        logging.getLogger(rust_root).setLevel(py_level)
+    if not pyshed_logger.handlers and not logging.root.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s pyshed.%(name)s: %(message)s")
+        )
+        # Attach to the root logger — Rust events propagate up through
+        # ``_pyshed.*`` / ``shed_core.*`` / ``hfx_core.*`` (none of which
+        # are children of ``pyshed``), so a handler on ``pyshed`` would
+        # miss them. The root logger catches both Python and Rust records.
+        logging.root.addHandler(handler)
+
 
 __all__ = [
     "AreaOnlyResult",
@@ -54,6 +96,7 @@ __all__ = [
     "Engine",
     "ResolutionError",
     "ShedError",
+    "set_log_level",
 ]
 
 try:
@@ -86,3 +129,11 @@ def _inject_proj_data() -> None:
 
 _inject_gdal_data()
 _inject_proj_data()
+
+import sys as _sys
+
+if "IPython" in _sys.modules:
+    try:
+        set_log_level("info")
+    except Exception:
+        pass

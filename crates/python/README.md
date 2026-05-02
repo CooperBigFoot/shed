@@ -28,6 +28,14 @@ result = engine.delineate(lat=47.3769, lon=8.5417)
 print(result.area_km2)
 ```
 
+Snapping options belong on the **constructor**, not on `delineate`:
+
+```python
+# Correct — snap_radius is an Engine constructor kwarg
+engine = pyshed.Engine("/path/to/hfx/dataset", snap_radius=5000)
+result = engine.delineate(lat=47.3769, lon=8.5417)
+```
+
 `Engine` also accepts dataset root URLs backed by the object-store integration:
 
 ```python
@@ -53,15 +61,70 @@ but public Cloudflare R2 raster access still depends on the target bucket,
 credentials, and GDAL driver behavior. Verify the specific remote raster dataset
 you plan to use.
 
-For batch delineation:
+### Verbose mode
+
+Enable structured log output from both the Python and Rust layers:
 
 ```python
+import pyshed
+
+pyshed.set_log_level("info")
+engine = pyshed.Engine("https://basin-delineations-public.upstream.tech/global/hfx")
+# INFO lines stream during manifest/graph/catchment loading
+result = engine.delineate(lat=47.3769, lon=8.5417)
+```
+
+Valid levels: `"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"`. In a Jupyter
+notebook `"info"` is enabled automatically on import.
+
+### Speeding up repeated delineations
+
+Enable the in-memory Parquet column-chunk cache to avoid redundant range reads
+across overlapping watersheds:
+
+```python
+engine = pyshed.Engine(
+    "https://basin-delineations-public.upstream.tech/global/hfx",
+    parquet_cache=True,
+    parquet_cache_max_mb=512,
+)
+```
+
+The cache is off by default. `parquet_cache_max_mb` defaults to `2048` when
+`parquet_cache=True`. Cache state is per-`Engine` instance and is not persisted
+to disk.
+
+### Batch delineation with progress
+
+```python
+import pyshed
+
+# tqdm is a user dependency — not bundled with pyshed
+from tqdm.auto import tqdm
+
+url = "https://basin-delineations-public.upstream.tech/global/hfx"
+engine = pyshed.Engine(url)
+
 outlets = [
     {"lat": 47.3769, "lon": 8.5417},
     {"lat": 46.9480, "lon": 7.4474},
+    {"lat": 48.1351, "lon": 11.5820},
 ]
-results = engine.delineate_batch(outlets)
+
+bar = tqdm(total=len(outlets), unit="outlet")
+
+def on_progress(event):
+    bar.update(1)
+    bar.set_postfix(status=event.get("status"), ms=event.get("duration_ms"))
+
+results = engine.delineate_batch(outlets, progress=on_progress)
+bar.close()
 ```
+
+The `progress` callback receives a dict with keys `index`, `total`, `lat`,
+`lon`, `duration_ms`, `status` (`"ok"` or `"error"`), plus `n_catchments` on
+success and `error` on failure. Exceptions raised inside the callback are
+swallowed and logged; they do not interrupt the batch.
 
 ## API Reference
 

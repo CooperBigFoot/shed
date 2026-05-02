@@ -16,10 +16,32 @@ The `pyshed` package exports these names:
 - `DatasetError`
 - `ResolutionError`
 - `AssemblyError`
+- `set_log_level`
 - `__version__`
 
 `_pyshed` exists as a compiled implementation detail, but its helper functions
 are not part of the supported public API.
+
+## set_log_level
+
+```python
+set_log_level(level: str) -> None
+```
+
+Sets the active log level for both the Rust tracing bridge and the Python
+`logging` tree.
+
+| Parameter | Type | Meaning |
+|---|---|---|
+| `level` | `str` | Case-insensitive level name: `"trace"`, `"debug"`, `"info"`, `"warn"`, or `"error"` |
+
+Records from Rust code route through pyo3-log under loggers named after their
+crate (`_pyshed.*`, `shed_core.*`, `hfx_core.*`). If no handler is configured on
+the `pyshed` logger or the root logger, a `StreamHandler` is added to the root
+logger automatically, so first-time users see output without calling
+`logging.basicConfig`.
+
+In a Jupyter notebook, `"info"` is enabled automatically at import time.
 
 ## Engine
 
@@ -34,25 +56,30 @@ Engine(
     snap_threshold: int | None = None,
     clean_epsilon: float | None = None,
     refine: bool = True,
+    parquet_cache: bool = False,
+    parquet_cache_max_mb: int = 2048,
 ) -> None
 ```
 
 Opens an HFX dataset and constructs a delineation engine.
 
-| Parameter | Type | Meaning |
-|---|---|---|
-| `dataset_path` | `str` | Path to the HFX dataset root directory |
-| `snap_radius` | `float \| None` | Optional snap-path search radius in metres; must be finite and positive when provided |
-| `snap_strategy` | `"distance-first" \| "weight-first" \| None` | Snap ranking strategy. Defaults to `"weight-first"` (HFX v0.2 contract: higher weight = more hydrologically significant). Pass `"distance-first"` to opt back into proximity-first ranking for datasets whose `weight` column is not rank-meaningful. |
-| `snap_threshold` | `int \| None` | Minimum upstream-pixel count for stream-network snapping |
-| `clean_epsilon` | `float \| None` | Topology-cleaning epsilon in degrees |
-| `refine` | `bool` | Whether raster-based terminal refinement is enabled |
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `dataset_path` | `str` | — | Path or URL to the HFX dataset root directory |
+| `snap_radius` | `float \| None` | `None` | Snap-path search radius in metres; must be finite and positive when provided |
+| `snap_strategy` | `"distance-first" \| "weight-first" \| None` | `None` | Snap ranking strategy. Defaults to `"weight-first"` (HFX v0.2 contract). |
+| `snap_threshold` | `int \| None` | `None` | Minimum upstream-pixel count for stream-network snapping |
+| `clean_epsilon` | `float \| None` | `None` | Topology-cleaning epsilon in degrees |
+| `refine` | `bool` | `True` | Whether raster-based terminal refinement is enabled |
+| `parquet_cache` | `bool` | `False` | Enable in-memory Parquet column-chunk cache for repeated delineations on the same dataset |
+| `parquet_cache_max_mb` | `int` | `2048` | Maximum cache size in MiB; must be > 0 when `parquet_cache=True` |
 
 ### Exceptions
 
 - `DatasetError` when the dataset cannot be opened or read.
 - `ValueError` when a configuration argument is invalid, such as an unknown
-  `snap_strategy` or a non-positive `snap_radius`.
+  `snap_strategy`, a non-positive `snap_radius`, or `parquet_cache_max_mb=0`
+  when `parquet_cache=True`.
 
 ### Methods
 
@@ -90,7 +117,11 @@ Engine.delineate(*, lat: float, lon: float, geometry=False) -> AreaOnlyResult
 - `ShedError` for other engine failures such as traversal or refinement errors.
 
 ```python
-delineate_batch(outlets: list[dict[str, float]]) -> list[DelineationResult]
+delineate_batch(
+    outlets: list[dict[str, float]],
+    *,
+    progress: Callable[[dict], None] | None = None,
+) -> list[DelineationResult]
 ```
 
 Delineates watersheds for a batch of outlets that share the same engine
@@ -104,6 +135,25 @@ Each outlet must be a dict with exactly these keys:
 
 Results are returned in input order. The call raises on the first failure in
 that order rather than returning per-outlet error objects.
+
+When `progress` is supplied, the batch runs sequentially and the callback is
+invoked once per outlet (after it completes) with an event dict:
+
+| Key | Type | Present |
+|---|---|---|
+| `index` | `int` | always |
+| `total` | `int` | always |
+| `lat` | `float` | always |
+| `lon` | `float` | always |
+| `duration_ms` | `int` | always |
+| `status` | `str` (`"ok"` or `"error"`) | always |
+| `n_catchments` | `int` | success only |
+| `error` | `str` | failure only |
+
+Exceptions raised by the callback are swallowed and logged via `warn!`; they do
+not interrupt the batch.
+
+Without `progress`, the batch runs in parallel via Rayon.
 
 #### Exceptions
 

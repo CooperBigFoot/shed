@@ -7,6 +7,7 @@ pub(crate) mod cache;
 pub(crate) mod cog;
 pub mod engine;
 pub mod error;
+pub mod parquet_cache;
 #[allow(dead_code)]
 pub(crate) mod raster_cache;
 pub mod reader;

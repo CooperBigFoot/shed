@@ -13,6 +13,7 @@ use url::Url;
 use crate::cache::RemoteArtifactCache;
 use crate::cog::{LocalizedRasterWindow, RasterWindowRequest};
 use crate::error::SessionError;
+use crate::parquet_cache::ParquetRowGroupCache;
 use crate::raster_cache::RemoteRasterCache;
 use crate::reader;
 use crate::reader::catchment_store::CatchmentStore;
@@ -78,9 +79,9 @@ impl RasterPaths {
 
 /// A loaded HFX dataset, ready for repeated queries.
 ///
-/// Created via [`DatasetSession::open`]. Holds the manifest and drainage
-/// graph in memory. Catchment and snap data are read on demand via
-/// row-group bbox pruning.
+/// Created via [`DatasetSession::open`] or [`DatasetSession::open_with_cache`].
+/// Holds the manifest and drainage graph in memory. Catchment and snap data
+/// are read on demand via row-group bbox pruning.
 #[derive(Debug)]
 pub struct DatasetSession {
     root: PathBuf,
@@ -93,6 +94,10 @@ pub struct DatasetSession {
     remote_store: Option<Arc<dyn ObjectStore>>,
     remote_root: Option<ObjectPath>,
     fabric_cache_key: (String, String),
+    /// Optional Parquet column-chunk cache shared across catchment and snap readers.
+    /// Stored here for future `engine.cache_stats()` exposure (deferred to v2).
+    #[allow(dead_code)]
+    parquet_cache: Option<Arc<ParquetRowGroupCache>>,
 }
 
 impl DatasetSession {
@@ -109,9 +114,31 @@ impl DatasetSession {
     /// | Local session errors | Propagated from [`DatasetSession::open_path`] |
     #[instrument(skip_all, fields(input = %input))]
     pub fn open(input: &str) -> Result<Self, SessionError> {
+        Self::open_with_cache(input, None)
+    }
+
+    /// Open an HFX dataset source with an optional Parquet column-chunk cache.
+    ///
+    /// Behaves identically to [`DatasetSession::open`] when `cache` is `None`.
+    /// When `cache` is `Some`, remote parquet reads are intercepted by
+    /// [`crate::parquet_cache::CachingReader`].
+    ///
+    /// # Errors
+    ///
+    /// | Variant | Condition |
+    /// |---|---|
+    /// | Source parsing errors | The dataset source string is malformed or unsupported |
+    /// | Local session errors | Propagated from [`DatasetSession::open_path`] |
+    #[instrument(skip_all, fields(input = %input))]
+    pub fn open_with_cache(
+        input: &str,
+        cache: Option<Arc<ParquetRowGroupCache>>,
+    ) -> Result<Self, SessionError> {
         match DatasetSource::parse(input)? {
             DatasetSource::Local(root) => Self::open_path(&root),
-            DatasetSource::Remote { store, root, url } => Self::open_remote(store, &root, &url),
+            DatasetSource::Remote { store, root, url } => {
+                Self::open_remote(store, &root, &url, cache)
+            }
         }
     }
 
@@ -223,6 +250,7 @@ impl DatasetSession {
             raster_cache: None,
             remote_store: None,
             remote_root: None,
+            parquet_cache: None,
         })
     }
 
@@ -230,7 +258,12 @@ impl DatasetSession {
         store: Arc<dyn ObjectStore>,
         root: &ObjectPath,
         url: &Url,
+        parquet_cache: Option<Arc<ParquetRowGroupCache>>,
     ) -> Result<Self, SessionError> {
+        let session_start = std::time::Instant::now();
+
+        info!(url = %url, "opening remote dataset");
+
         let cache = RemoteArtifactCache::configured()?;
         let raster_cache = Arc::new(RemoteRasterCache::new(cache.root().to_path_buf()));
         let (manifest, graph) = if let Some(cached) = cache.read_entry_for_source(url, root)? {
@@ -245,12 +278,25 @@ impl DatasetSession {
             let manifest_path = remote_artifact_path(root, "manifest.json");
             let graph_path = remote_artifact_path(root, "graph.arrow");
 
+            let t = std::time::Instant::now();
             let manifest_bytes =
                 read_remote_artifact(store.as_ref(), manifest_path, "manifest.json")?;
+            info!(
+                bytes = manifest_bytes.len(),
+                duration_ms = t.elapsed().as_millis(),
+                "fetched manifest"
+            );
             let manifest = reader::manifest::read_manifest_from_bytes(&manifest_bytes)?;
 
+            let t = std::time::Instant::now();
             let graph_bytes = read_remote_artifact(store.as_ref(), graph_path, "graph.arrow")?;
             let graph = reader::graph::load_graph_from_bytes(graph_bytes.clone())?;
+            info!(
+                bytes = graph_bytes.len(),
+                atoms = graph.len(),
+                duration_ms = t.elapsed().as_millis(),
+                "fetched graph"
+            );
             cache.write_manifest_graph(url, root, &manifest, &manifest_bytes, &graph_bytes)?;
 
             debug!(
@@ -262,20 +308,35 @@ impl DatasetSession {
             (manifest, graph)
         };
 
+        let fabric_name = manifest.fabric_name().to_string();
+        let adapter_version = manifest.adapter_version().to_string();
+
         let catchments_path = remote_artifact_path(root, "catchments.parquet");
-        let catchments = CatchmentStore::open_remote(
+        let catchments = CatchmentStore::open_remote_with_cache(
             store.clone(),
             catchments_path.clone(),
             catchments_path.as_ref().to_string(),
+            fabric_name.clone(),
+            adapter_version.clone(),
+            parquet_cache.clone(),
         )?;
+        let t = std::time::Instant::now();
         let catchment_id_set = validate_graph_catchments(&manifest, &graph, &catchments)?;
+        info!(
+            rows = catchment_id_set.len(),
+            duration_ms = t.elapsed().as_millis(),
+            "indexed catchments"
+        );
 
         let snap = if manifest.snap() == SnapAvailability::Present {
             let snap_path = remote_artifact_path(root, "snap.parquet");
-            Some(SnapStore::open_remote(
+            Some(SnapStore::open_remote_with_cache(
                 store.clone(),
                 snap_path.clone(),
                 snap_path.as_ref().to_string(),
+                fabric_name.clone(),
+                adapter_version.clone(),
+                parquet_cache.clone(),
             )?)
         } else {
             None
@@ -297,15 +358,13 @@ impl DatasetSession {
             fabric = manifest.fabric_name(),
             atoms = manifest.atom_count().get(),
             topology = %manifest.topology(),
+            elapsed_ms = session_start.elapsed().as_millis(),
             "remote dataset session opened"
         );
 
         Ok(DatasetSession {
             root: PathBuf::from(url.as_str()),
-            fabric_cache_key: (
-                manifest.fabric_name().to_string(),
-                manifest.adapter_version().to_string(),
-            ),
+            fabric_cache_key: (fabric_name, adapter_version),
             manifest,
             graph,
             catchments,
@@ -314,6 +373,7 @@ impl DatasetSession {
             raster_cache: Some(raster_cache),
             remote_store: Some(store),
             remote_root: Some(root.clone()),
+            parquet_cache,
         })
     }
 
@@ -324,7 +384,7 @@ impl DatasetSession {
         root: &ObjectPath,
         url: &Url,
     ) -> Result<Self, SessionError> {
-        Self::open_remote(store, root, url)
+        Self::open_remote(store, root, url, None)
     }
 
     /// Return a reference to the parsed manifest.
@@ -802,7 +862,7 @@ mod tests {
         put_remote_catchments(&store, &root);
         let url = Url::parse("s3://shed-test/dataset/root").unwrap();
 
-        let session = DatasetSession::open_remote(store, &root, &url).unwrap();
+        let session = DatasetSession::open_remote(store, &root, &url, None).unwrap();
 
         assert_eq!(session.catchments().total_rows(), 2);
         let bbox = BoundingBox::new(0.75, 0.0, 1.75, 1.0).unwrap();
@@ -835,11 +895,12 @@ mod tests {
         put_remote_catchments(&store, &root);
         let url = Url::parse("s3://shed-test/dataset/root").unwrap();
 
-        DatasetSession::open_remote(store, &root, &url).unwrap();
+        DatasetSession::open_remote(store, &root, &url, None).unwrap();
 
         let catchments_only_store = Arc::new(InMemory::new());
         put_remote_catchments(&catchments_only_store, &root);
-        let session = DatasetSession::open_remote(catchments_only_store, &root, &url).unwrap();
+        let session =
+            DatasetSession::open_remote(catchments_only_store, &root, &url, None).unwrap();
 
         assert_eq!(session.graph().len(), 2);
         assert_eq!(session.catchments().total_rows(), 2);
@@ -855,12 +916,13 @@ mod tests {
         put_remote_manifest_and_graph(&store_a, &root_a, false);
         put_remote_catchments(&store_a, &root_a);
 
-        DatasetSession::open_remote(store_a, &root_a, &url_a).unwrap();
+        DatasetSession::open_remote(store_a, &root_a, &url_a, None).unwrap();
 
         let root_b = ObjectPath::from("dataset/b");
         let url_b = Url::parse("s3://shed-test/dataset/b").unwrap();
         let empty_store = Arc::new(InMemory::new());
-        let unmapped_err = DatasetSession::open_remote(empty_store, &root_b, &url_b).unwrap_err();
+        let unmapped_err =
+            DatasetSession::open_remote(empty_store, &root_b, &url_b, None).unwrap_err();
         assert!(matches!(
             unmapped_err,
             SessionError::RemoteArtifactRead {
@@ -872,11 +934,11 @@ mod tests {
         let store_b = Arc::new(InMemory::new());
         put_remote_manifest_and_graph(&store_b, &root_b, false);
         put_remote_catchments(&store_b, &root_b);
-        DatasetSession::open_remote(store_b, &root_b, &url_b).unwrap();
+        DatasetSession::open_remote(store_b, &root_b, &url_b, None).unwrap();
 
         let catchments_only_store = Arc::new(InMemory::new());
         put_remote_catchments(&catchments_only_store, &root_b);
-        DatasetSession::open_remote(catchments_only_store, &root_b, &url_b).unwrap();
+        DatasetSession::open_remote(catchments_only_store, &root_b, &url_b, None).unwrap();
     }
 
     #[test]
@@ -887,7 +949,7 @@ mod tests {
         let root = ObjectPath::from("dataset/root");
         let url = Url::parse("s3://shed-test/dataset/root").unwrap();
 
-        let err = DatasetSession::open_remote(store, &root, &url).unwrap_err();
+        let err = DatasetSession::open_remote(store, &root, &url, None).unwrap_err();
 
         assert!(matches!(
             err,
@@ -917,7 +979,7 @@ mod tests {
         });
         let url = Url::parse("s3://shed-test/dataset/root").unwrap();
 
-        let session = DatasetSession::open_remote(store, &root, &url).unwrap();
+        let session = DatasetSession::open_remote(store, &root, &url, None).unwrap();
         let snap = session.snap().expect("snap store should be present");
         let bbox = BoundingBox::new(1.0, 0.0, 1.5, 0.5).unwrap();
         let results = snap.query_by_bbox(&bbox).unwrap();

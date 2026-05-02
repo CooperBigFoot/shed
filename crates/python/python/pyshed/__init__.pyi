@@ -1,13 +1,30 @@
 from __future__ import annotations
 
-from typing import Literal, TypedDict, overload
+from typing import Callable, Literal, Mapping, TypedDict, overload
 
 __version__: str
+
+
+def set_log_level(level: str) -> None: ...
 
 
 class _Outlet(TypedDict):
     lat: float
     lon: float
+
+
+class ProgressEvent(TypedDict, total=False):
+    index: int
+    total: int
+    lat: float
+    lon: float
+    duration_ms: int
+    status: str  # "ok" | "error"
+    n_catchments: int  # only on success
+    error: str  # only on failure
+
+
+ProgressCallback = Callable[[ProgressEvent], None]
 
 
 class ShedError(Exception): ...
@@ -85,11 +102,13 @@ class Engine:
         self,
         dataset_path: str,
         *,
-        snap_radius: float | None = ...,
-        snap_strategy: Literal["distance-first", "weight-first"] | None = ...,
-        snap_threshold: int | None = ...,
-        clean_epsilon: float | None = ...,
-        refine: bool = ...,
+        snap_radius: float | None = None,
+        snap_strategy: Literal["distance-first", "weight-first"] | None = None,
+        snap_threshold: int | None = None,
+        clean_epsilon: float | None = None,
+        refine: bool = True,
+        parquet_cache: bool = False,
+        parquet_cache_max_mb: int = 2048,
     ) -> None: ...
 
     @overload
@@ -107,4 +126,9 @@ class Engine:
         self, *, lat: float, lon: float, geometry: bool
     ) -> DelineationResult | AreaOnlyResult: ...
 
-    def delineate_batch(self, outlets: list[_Outlet]) -> list[DelineationResult]: ...
+    def delineate_batch(
+        self,
+        outlets: list[_Outlet],
+        *,
+        progress: ProgressCallback | None = None,
+    ) -> list[DelineationResult]: ...

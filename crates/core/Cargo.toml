@@ -10,6 +10,7 @@ bytes = "1"
 dashmap = "6"
 dirs = "5"
 futures-util = "0.3"
+moka = { version = "0.12", features = ["sync"] }
 geo = "0.29"
 geozero = { version = "0.14", default-features = false, features = ["with-geo", "with-wkb"] }
 object_store = { version = "0.13", features = ["aws"] }

@@ -41,6 +41,11 @@ Changelog = "https://github.com/CooperBigFoot/shed/blob/main/crates/python/CHANG
 test = ["pytest>=8", "pyarrow>=15"]
 dev = ["pyshed[test]", "ruff", "maturin>=1.7,<2"]
 
+[tool.pytest.ini_options]
+markers = [
+    "network: tests that require a live HFX dataset URL (set PYSHED_TEST_REMOTE_URL)",
+]
+
 [tool.maturin]
 features = ["pyo3/extension-module"]
 module-name = "pyshed._pyshed"
