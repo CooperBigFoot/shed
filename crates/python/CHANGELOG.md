@@ -7,6 +7,14 @@ per-commit Rust crate versioning).
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-05-04
+
+### Changed
+
+- Updated the root README examples to use the canonical public GRIT HFX
+  v1.0.0 dataset at
+  `https://basin-delineations-public.upstream.tech/grit/1.0.0/`.
+
 ### Added
 
 - Added `AreaOnlyResult` via `Engine.delineate(..., geometry=False)` for callers

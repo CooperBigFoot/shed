@@ -51,34 +51,31 @@ Supported dataset path forms:
 | Local file URL | `file:///data/hfx/rhine` |
 | Amazon S3 URL | `s3://bucket/path/to/hfx/rhine` |
 | Cloudflare R2 HTTPS URL | `https://<account>.r2.cloudflarestorage.com/<bucket>/path/to/hfx/rhine` |
-| Public R2 custom-domain URL | `https://basin-delineations-public.upstream.tech/global/hfx` |
+| Public R2 custom-domain URL | `https://basin-delineations-public.upstream.tech/grit/1.0.0/` |
 
 For remote datasets, `manifest.json` and `graph.arrow` are cached locally under
 `~/.cache/hfx/<fabric_name>/<adapter_version>/` by default. Set
 `HFX_CACHE_DIR=/path/to/cache` to override the cache root. Parquet artifacts are
 read through object-store range reads instead of being downloaded wholesale.
 
-Remote raster refinement uses COG window reads: `shed` fetches TIFF metadata and
-the compressed tile byte ranges intersecting the terminal catchment, writes a
-small cache-local GeoTIFF under `raster-windows/`, and lets the GDAL bridge open
-that local window. The older full-raster cache path remains as a stopgap API but
-is not used by the default remote refinement flow. See
-[`docs/raster-cache.md`](docs/raster-cache.md) for details.
+Remote raster refinement uses COG window reads when raster artifacts are present:
+`shed` fetches TIFF metadata and only the compressed tile byte ranges needed for
+the terminal catchment. See [`docs/raster-cache.md`](docs/raster-cache.md) for
+details.
 
 ### Canonical hosted dataset
 
-The canonical public dataset for smoke tests and examples is MERIT-Basins
-global v0.1.0:
+The canonical public dataset for examples is global GRIT HFX v1.0.0:
 
 ```text
-https://basin-delineations-public.upstream.tech/merit-basins/0.1.0/
+https://basin-delineations-public.upstream.tech/grit/1.0.0/
 ```
 
 CLI example:
 
 ```bash
 ./target/release/shed delineate \
-    --dataset https://basin-delineations-public.upstream.tech/merit-basins/0.1.0/ \
+    --dataset https://basin-delineations-public.upstream.tech/grit/1.0.0/ \
     --lat 47.3769 --lon 8.5417
 ```
 
@@ -88,25 +85,11 @@ Python example:
 import pyshed
 
 engine = pyshed.Engine(
-    "https://basin-delineations-public.upstream.tech/merit-basins/0.1.0/"
+    "https://basin-delineations-public.upstream.tech/grit/1.0.0/"
 )
 result = engine.delineate(lat=47.3769, lon=8.5417)
 print(result.area_km2)
 ```
-
-End-to-end smoke results against the live R2 deployment (single Nordic outlet,
-lat=70.45213, lon=28.49066):
-
-| Cache | Wall | Peak RSS | RSS vs local-disk | COG header bytes | COG tile bytes |
-|---|---|---|---|---|---|
-| Cold | 37 s | 626 MB | 1.05× | 32 MB | 280 KB |
-| Warm | 32 s | 568 MB | 1.00× | 0 (cached) | 0 (cached) |
-
-Total cold-cache bytes-on-wire ≈ 90 MB (graph.arrow ~57 MB once per dataset
-version, COG headers ~32 MB once per dataset version, COG tiles ~280 KB per
-outlet, Parquet row-groups ~1-5 MB transient). Against the 65 GB published
-dataset that is a ~720× reduction cold, ~13,000× warm. See
-[`scratchpad/benchmarks/20260427-phase4-r2-smoke.md`](scratchpad/benchmarks/20260427-phase4-r2-smoke.md).
 
 ## Use it from the CLI
 
