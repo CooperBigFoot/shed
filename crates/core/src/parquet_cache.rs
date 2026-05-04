@@ -313,10 +313,7 @@ impl AsyncFileReader for CachingReader {
                 )));
             }
 
-            for ((index, key), bytes) in missing_indexes
-                .into_iter()
-                .zip(missing_keys.into_iter())
-                .zip(fetched.into_iter())
+            for ((index, key), bytes) in missing_indexes.into_iter().zip(missing_keys).zip(fetched)
             {
                 tracing::debug!(
                     artifact = key.ident.artifact,
