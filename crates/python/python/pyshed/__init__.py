@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import warnings
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
 
@@ -48,14 +49,35 @@ from pyshed._pyshed import (
 )
 
 
+_LOGGER_NAMES = ("pyshed", "_pyshed", "shed_core", "hfx_core")
+_LOG_LEVELS = {
+    "trace": ("trace", logging.DEBUG),
+    "debug": ("debug", logging.DEBUG),
+    "info": ("info", logging.INFO),
+    "warn": ("warn", logging.WARNING),
+    "warning": ("warn", logging.WARNING),
+    "error": ("error", logging.ERROR),
+    "critical": ("error", logging.ERROR),
+}
+_LOG_FORMATTER = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+
+def _normalize_log_level(level: str) -> tuple[str, int]:
+    try:
+        return _LOG_LEVELS[level.lower()]
+    except KeyError as exc:
+        raise ValueError(
+            "unknown log level; valid values are: trace, debug, info, warn, "
+            "warning, error, critical"
+        ) from exc
+
+
 def set_log_level(level: str) -> None:
     """Set the pyshed log level for both the Rust bridge and Python `logging`.
 
     Updates the dynamic max-level used by the pyo3-log bridge and configures
-    the relevant Python loggers so records actually emit. If no handler is
-    already configured (neither on the ``pyshed`` logger nor on the root
-    logger) a default ``StreamHandler`` is attached to the root logger so
-    first-time users see output without calling ``logging.basicConfig``.
+    the relevant Python loggers so records actually emit. If any pyshed logger
+    has no handler, a default ``StreamHandler`` is attached to that logger.
 
     Records originating from Rust route through pyo3-log under loggers named
     after their Rust crate (``_pyshed.*``, ``shed_core.*``, ``hfx_core.*``).
@@ -63,29 +85,18 @@ def set_log_level(level: str) -> None:
     Python ``pyshed`` facade.
 
     Valid levels (case-insensitive): ``"trace"``, ``"debug"``, ``"info"``,
-    ``"warn"``, ``"error"``.
+    ``"warn"``/``"warning"``, ``"error"``/``"critical"``.
     """
-    _set_log_level(level)
-    py_level = level.upper()
-    # ``log`` crate's "WARN" maps to Python's "WARNING"; "TRACE" has no
-    # stdlib equivalent, so map it to DEBUG (the closest verbose level).
-    py_level = {"WARN": "WARNING", "TRACE": "DEBUG"}.get(py_level, py_level)
-    pyshed_logger = logging.getLogger("pyshed")
-    pyshed_logger.setLevel(py_level)
-    # Rust events come out under the crate-name roots; set level on each so
-    # they aren't silently filtered by the per-logger threshold.
-    for rust_root in ("_pyshed", "shed_core", "hfx_core"):
-        logging.getLogger(rust_root).setLevel(py_level)
-    if not pyshed_logger.handlers and not logging.root.handlers:
-        handler = logging.StreamHandler()
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s %(levelname)s pyshed.%(name)s: %(message)s")
-        )
-        # Attach to the root logger — Rust events propagate up through
-        # ``_pyshed.*`` / ``shed_core.*`` / ``hfx_core.*`` (none of which
-        # are children of ``pyshed``), so a handler on ``pyshed`` would
-        # miss them. The root logger catches both Python and Rust records.
-        logging.root.addHandler(handler)
+    rust_level, py_level = _normalize_log_level(level)
+    _set_log_level(rust_level)
+    for logger_name in _LOGGER_NAMES:
+        logger = logging.getLogger(logger_name)
+        logger.setLevel(py_level)
+        logger.propagate = False
+        if not logger.handlers:
+            handler = logging.StreamHandler()
+            handler.setFormatter(_LOG_FORMATTER)
+            logger.addHandler(handler)
 
 
 __all__ = [
@@ -130,10 +141,13 @@ def _inject_proj_data() -> None:
 _inject_gdal_data()
 _inject_proj_data()
 
-import sys as _sys
-
-if "IPython" in _sys.modules:
+if "PYSHED_LOG" in os.environ:
     try:
-        set_log_level("info")
-    except Exception:
-        pass
+        set_log_level(os.environ["PYSHED_LOG"])
+    except ValueError:
+        warnings.warn(
+            "invalid PYSHED_LOG value; valid values are: trace, debug, info, "
+            "warn, warning, error, critical",
+            UserWarning,
+            stacklevel=2,
+        )

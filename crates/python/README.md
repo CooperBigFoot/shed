@@ -74,8 +74,9 @@ engine = pyshed.Engine("https://basin-delineations-public.upstream.tech/global/h
 result = engine.delineate(lat=47.3769, lon=8.5417)
 ```
 
-Valid levels: `"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"`. In a Jupyter
-notebook `"info"` is enabled automatically on import.
+Valid levels: `"trace"`, `"debug"`, `"info"`, `"warn"`/`"warning"`, and
+`"error"`/`"critical"`. Set `PYSHED_LOG` to one of those values to opt in at
+import time.
 
 ### Speeding up repeated delineations
 

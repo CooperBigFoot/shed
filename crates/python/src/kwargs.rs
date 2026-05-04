@@ -74,11 +74,15 @@ fn registry_hint(name: &str, ctx: &KwargContext) -> Option<String> {
                      pass it when calling delineate, not when constructing the engine."
                 )
             }
-            // Already allowed on Delineate/DelineateBatch — only reachable if
-            // someone removed them from the allowed list, so be defensive.
-            KwargContext::Delineate | KwargContext::DelineateBatch => format!(
+            // Already allowed on Delineate — only reachable if someone
+            // removed them from the allowed list, so be defensive.
+            KwargContext::Delineate => format!(
                 "'{name}' should be in the allowed list for this method; \
                  this is a pyshed bug — please report it."
+            ),
+            KwargContext::DelineateBatch => format!(
+                "'{name}' is a per-outlet field, not a batch kwarg. \
+                 Pass it inside outlets, e.g. engine.delineate_batch(outlets=[{{\"lat\": 47.0, \"lon\": 8.0}}])."
             ),
         });
     }
@@ -110,39 +114,29 @@ fn registry_hint(name: &str, ctx: &KwargContext) -> Option<String> {
     None
 }
 
-/// Validate a Python kwargs dict against the allowed names for `ctx`.
+/// Validate kwarg names against the allowed names for `ctx`.
 ///
 /// On success returns `Ok(())`. On the first unknown kwarg, raises a
-/// `PyTypeError` with a hint from the registry (or an edit-distance suggestion)
+/// string error with a hint from the registry (or an edit-distance suggestion)
 /// and a list of valid kwargs.
-///
-/// # Errors
-///
-/// - [`pyo3::exceptions::PyTypeError`] — when an unknown kwarg is encountered.
-pub fn validate_kwargs(
-    kwargs: Option<&Bound<'_, PyDict>>,
+pub fn validate_kwarg_names(
+    names: &[&str],
     allowed: &[&str],
-    ctx: KwargContext,
-) -> PyResult<()> {
-    let Some(kwargs) = kwargs else {
-        return Ok(());
-    };
-
-    for (key, _val) in kwargs.iter() {
-        let name: String = key.extract()?;
-
-        if allowed.contains(&name.as_str()) {
+    ctx: &KwargContext,
+) -> Result<(), String> {
+    for name in names {
+        if allowed.contains(name) {
             continue;
         }
 
         // Build the hint.
-        let hint = if let Some(h) = registry_hint(&name, &ctx) {
+        let hint = if let Some(h) = registry_hint(name, ctx) {
             h
         } else {
             // Edit-distance fallback: find closest allowed kwarg within ≤ 2.
             let best = allowed
                 .iter()
-                .map(|&candidate| (candidate, strsim::levenshtein(&name, candidate)))
+                .map(|&candidate| (candidate, strsim::levenshtein(name, candidate)))
                 .min_by_key(|&(_, dist)| dist);
 
             match best {
@@ -162,118 +156,121 @@ pub fn validate_kwargs(
 
         let method = ctx.method_name();
         let valid_list = allowed.join(", ");
-        return Err(PyTypeError::new_err(format!(
+        return Err(format!(
             "Engine.{method}() got unexpected keyword argument '{name}'.\n\
              Hint: {hint}\n\
              Valid kwargs for {method}: {valid_list}."
-        )));
+        ));
     }
+
+    Ok(())
+}
+
+/// Validate a Python kwargs dict against the allowed names for `ctx`.
+///
+/// Extracts keyword names from Python, then delegates all validation and hint
+/// formatting to [`validate_kwarg_names`].
+///
+/// # Errors
+///
+/// - [`pyo3::exceptions::PyTypeError`] — when an unknown kwarg is encountered.
+pub fn validate_kwargs(
+    kwargs: Option<&Bound<'_, PyDict>>,
+    allowed: &[&str],
+    ctx: KwargContext,
+) -> PyResult<()> {
+    let Some(kwargs) = kwargs else {
+        return Ok(());
+    };
+
+    let names = kwargs
+        .iter()
+        .map(|(key, _val)| key.extract::<String>())
+        .collect::<PyResult<Vec<_>>>()?;
+    let name_refs = names.iter().map(String::as_str).collect::<Vec<_>>();
+
+    validate_kwarg_names(&name_refs, allowed, &ctx).map_err(PyTypeError::new_err)?;
 
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use pyo3::Python;
-    use pyo3::types::PyDict;
-
     use super::*;
 
     /// An allowed kwarg must pass silently.
     #[test]
     fn known_kwarg_passes() {
-        Python::with_gil(|py| {
-            let d = PyDict::new(py);
-            d.set_item("snap_radius", 500.0_f64).unwrap();
-            let result = validate_kwargs(
-                Some(&d),
-                &["snap_radius", "refine"],
-                KwargContext::EngineNew,
-            );
-            assert!(result.is_ok(), "known kwarg should pass");
-        });
+        let result = validate_kwarg_names(
+            &["snap_radius"],
+            &["snap_radius", "refine"],
+            &KwargContext::EngineNew,
+        );
+        assert!(result.is_ok(), "known kwarg should pass");
     }
 
     /// `snap_radius` on Delineate fires the registry hint about the constructor.
     #[test]
     fn registry_hint_fires_for_constructor_kwarg_on_delineate() {
-        Python::with_gil(|py| {
-            let d = PyDict::new(py);
-            d.set_item("snap_radius", 500.0_f64).unwrap();
-            let result = validate_kwargs(
-                Some(&d),
-                &["lat", "lon", "geometry"],
-                KwargContext::Delineate,
-            );
-            let err = result.unwrap_err();
-            let msg = err.to_string();
-            assert!(
-                msg.contains("snap_radius"),
-                "message should mention 'snap_radius': {msg}"
-            );
-            assert!(
-                msg.contains("constructor"),
-                "message should mention 'constructor': {msg}"
-            );
-        });
+        let result = validate_kwarg_names(
+            &["snap_radius"],
+            &["lat", "lon", "geometry"],
+            &KwargContext::Delineate,
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("snap_radius"),
+            "message should mention 'snap_radius': {msg}"
+        );
+        assert!(
+            msg.contains("constructor"),
+            "message should mention 'constructor': {msg}"
+        );
     }
 
     /// `geomtry` (typo) triggers the Levenshtein suggestion for `geometry`.
     #[test]
     fn levenshtein_suggestion_fires() {
-        Python::with_gil(|py| {
-            let d = PyDict::new(py);
-            d.set_item("geomtry", true).unwrap();
-            let result = validate_kwargs(
-                Some(&d),
-                &["lat", "lon", "geometry"],
-                KwargContext::Delineate,
-            );
-            let err = result.unwrap_err();
-            let msg = err.to_string();
-            assert!(
-                msg.contains("geometry"),
-                "message should suggest 'geometry': {msg}"
-            );
-        });
+        let result = validate_kwarg_names(
+            &["geomtry"],
+            &["lat", "lon", "geometry"],
+            &KwargContext::Delineate,
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("geometry"),
+            "message should suggest 'geometry': {msg}"
+        );
     }
 
     /// A completely unrelated name with no close match lists the valid kwargs.
     #[test]
     fn unknown_unrelated_name_lists_valid_kwargs() {
-        Python::with_gil(|py| {
-            let d = PyDict::new(py);
-            d.set_item("foobarqux", 42_i32).unwrap();
-            let result = validate_kwargs(
-                Some(&d),
-                &["lat", "lon", "geometry"],
-                KwargContext::Delineate,
-            );
-            let err = result.unwrap_err();
-            let msg = err.to_string();
-            assert!(
-                msg.contains("lat"),
-                "message should list valid kwargs including 'lat': {msg}"
-            );
-            assert!(
-                msg.contains("lon"),
-                "message should list valid kwargs including 'lon': {msg}"
-            );
-            assert!(
-                msg.contains("geometry"),
-                "message should list valid kwargs including 'geometry': {msg}"
-            );
-        });
+        let result = validate_kwarg_names(
+            &["foobarqux"],
+            &["lat", "lon", "geometry"],
+            &KwargContext::Delineate,
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("lat"),
+            "message should list valid kwargs including 'lat': {msg}"
+        );
+        assert!(
+            msg.contains("lon"),
+            "message should list valid kwargs including 'lon': {msg}"
+        );
+        assert!(
+            msg.contains("geometry"),
+            "message should list valid kwargs including 'geometry': {msg}"
+        );
     }
 
-    /// `None` kwargs dict is always valid.
+    /// An empty kwargs name slice is always valid.
     #[test]
-    fn none_kwargs_passes() {
-        Python::with_gil(|py| {
-            let _ = py; // ensure GIL is held
-            let result =
-                validate_kwargs(None, &["lat", "lon", "geometry"], KwargContext::Delineate);
-            assert!(result.is_ok(), "None kwargs should pass");
-        });
+    fn empty_kwargs_passes() {
+        let result =
+            validate_kwarg_names(&[], &["lat", "lon", "geometry"], &KwargContext::Delineate);
+        assert!(result.is_ok(), "empty kwargs should pass");
     }
 }

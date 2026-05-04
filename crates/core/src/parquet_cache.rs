@@ -29,21 +29,22 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
+use chrono::{DateTime, Utc};
 use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
 use moka::sync::Cache;
 use parquet::arrow::arrow_reader::ArrowReaderOptions;
 use parquet::arrow::async_reader::AsyncFileReader;
 use parquet::arrow::async_reader::ParquetObjectReader;
-use parquet::errors::Result as ParquetResult;
+use parquet::errors::{ParquetError, Result as ParquetResult};
 use parquet::file::metadata::ParquetMetaData;
 
 /// Identifies which remote artifact a cached chunk belongs to.
 ///
 /// Captured once at session-open time from the manifest and HEAD response.
-/// Baking file size and e-tag into the key means stale R2 overwrites are
-/// detected at the next `Engine(...)` construction rather than silently
-/// returning wrong bytes.
+/// Baking file size, ETag, and last-modified time into the key means stale R2
+/// overwrites are detected at the next `Engine(...)` construction rather than
+/// silently returning wrong bytes.
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct ArtifactIdent {
     /// HFX fabric name (from manifest).
@@ -56,6 +57,8 @@ pub struct ArtifactIdent {
     pub file_size: u64,
     /// ETag from the HEAD response, if the object store returns one.
     pub etag: Option<String>,
+    /// Last-modified timestamp from the HEAD response.
+    pub last_modified: DateTime<Utc>,
 }
 
 /// Cache key for one column-chunk byte range (or the footer sentinel).
@@ -112,6 +115,16 @@ impl ParquetRowGroupCache {
             // moka weigher must return u32; chunks > u32::MAX are inserted with
             // weight 0 (effectively unpinned/uncached). See module doc.
             .weigher(|_k: &ChunkKey, v: &Bytes| v.len().min(u32::MAX as usize) as u32)
+            .eviction_listener(|key, value, cause| {
+                tracing::debug!(
+                    artifact = key.ident.artifact,
+                    offset = key.chunk_offset,
+                    length = key.chunk_length,
+                    evicted_bytes = value.len(),
+                    cause = ?cause,
+                    "parquet_cache evict"
+                );
+            })
             .build();
 
         Arc::new(Self {
@@ -241,13 +254,94 @@ impl AsyncFileReader for CachingReader {
         .boxed()
     }
 
-    // Note: we deliberately do NOT override `get_byte_ranges`. The trait default
-    // fans out to `get_bytes`, which is our cached path. Overriding to delegate
-    // straight to `inner.get_byte_ranges` would bypass the cache for the dominant
-    // read pattern (`ParquetRecordBatchStreamBuilder` fetches projected column
-    // chunks via this method). We trade `ParquetObjectReader`'s HTTP-level
-    // adjacent-range coalescing on cold misses for warm-read caching, which is
-    // strictly more valuable in v1.
+    fn get_byte_ranges(
+        &mut self,
+        ranges: Vec<Range<u64>>,
+    ) -> BoxFuture<'_, ParquetResult<Vec<Bytes>>> {
+        let mut ordered = vec![None; ranges.len()];
+        let mut missing_indexes = Vec::new();
+        let mut missing_keys = Vec::new();
+        let mut missing_ranges = Vec::new();
+
+        for (index, range) in ranges.into_iter().enumerate() {
+            let key = ChunkKey {
+                ident: self.ident.clone(),
+                chunk_offset: range.start,
+                chunk_length: range.end - range.start,
+            };
+
+            if let Some(bytes) = self.cache.get(&key) {
+                tracing::debug!(
+                    artifact = key.ident.artifact,
+                    offset = key.chunk_offset,
+                    length = key.chunk_length,
+                    "parquet_cache hit"
+                );
+                ordered[index] = Some(bytes);
+            } else {
+                missing_indexes.push(index);
+                missing_keys.push(key);
+                missing_ranges.push(range);
+            }
+        }
+
+        let missing_count = missing_ranges.len();
+        self.cache
+            .misses
+            .fetch_add(missing_count as u64, Ordering::Relaxed);
+
+        if missing_count == 0 {
+            return std::future::ready(ordered.into_iter().collect::<Option<Vec<_>>>().ok_or_else(
+                || {
+                    ParquetError::General(
+                        "cache hit assembly omitted a requested byte range".to_owned(),
+                    )
+                },
+            ))
+            .boxed();
+        }
+
+        let cache = self.cache.clone();
+        let inner_fut = self.inner.get_byte_ranges(missing_ranges);
+        async move {
+            let fetched = inner_fut.await?;
+            if fetched.len() != missing_count {
+                return Err(ParquetError::General(format!(
+                    "inner reader returned {} byte ranges for {} requested ranges",
+                    fetched.len(),
+                    missing_count
+                )));
+            }
+
+            for ((index, key), bytes) in missing_indexes
+                .into_iter()
+                .zip(missing_keys.into_iter())
+                .zip(fetched.into_iter())
+            {
+                tracing::debug!(
+                    artifact = key.ident.artifact,
+                    offset = key.chunk_offset,
+                    length = key.chunk_length,
+                    fetched_bytes = bytes.len(),
+                    "parquet_cache miss"
+                );
+                cache.insert(key, bytes.clone());
+                ordered[index] = Some(bytes);
+            }
+
+            ordered
+                .into_iter()
+                .map(|bytes| {
+                    bytes.ok_or_else(|| {
+                        ParquetError::General(
+                            "inner reader returned fewer byte ranges than requested".to_owned(),
+                        )
+                    })
+                })
+                .collect()
+        }
+        .boxed()
+    }
 
     fn get_metadata<'a>(
         &'a mut self,
@@ -263,7 +357,58 @@ impl AsyncFileReader for CachingReader {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::{self, Write};
+    use std::sync::{Arc, Mutex};
+
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Metadata, Subscriber};
+
     use super::*;
+
+    #[derive(Clone)]
+    struct RecordingSubscriber {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    struct EventVisitor {
+        line: String,
+    }
+
+    impl Visit for EventVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+            if !self.line.is_empty() {
+                self.line.push(' ');
+            }
+            let _ = write!(&mut self.line, "{}={value:?}", field.name());
+        }
+    }
+
+    impl Subscriber for RecordingSubscriber {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            let mut visitor = EventVisitor {
+                line: String::new(),
+            };
+            event.record(&mut visitor);
+            self.events.lock().unwrap().push(visitor.line);
+        }
+
+        fn enter(&self, _span: &Id) {}
+
+        fn exit(&self, _span: &Id) {}
+    }
 
     fn make_ident() -> ArtifactIdent {
         ArtifactIdent {
@@ -272,6 +417,7 @@ mod tests {
             artifact: "catchments.parquet",
             file_size: 1_000_000,
             etag: Some("abc123".to_owned()),
+            last_modified: DateTime::<Utc>::UNIX_EPOCH,
         }
     }
 
@@ -325,11 +471,12 @@ mod tests {
     }
 
     #[test]
-    fn caching_reader_dispatches_get_byte_ranges_through_get_bytes() {
-        // Verifies CachingReader does NOT override get_byte_ranges. The trait
-        // default fans out one get_bytes per range, which routes through our
-        // cache. We assert the cache observes one miss-then-insert per range
-        // (a regression catch for re-introducing the override).
+    fn caching_reader_get_byte_ranges_mixes_hits_and_misses_in_order() {
+        // ParquetObjectReader does not expose its request/coalescing count, so
+        // this regression test cannot directly assert the single bulk miss
+        // fetch. It verifies the observable contract of the override: cached
+        // ranges are hits, only cold input ranges increment misses, cold bytes
+        // are inserted, and output order matches the caller's range order.
         use object_store::PutPayload;
         use object_store::memory::InMemory;
         use object_store::path::Path as ObjectPath;
@@ -352,29 +499,28 @@ mod tests {
         let inner = ParquetObjectReader::new(store, path).with_file_size(payload.len() as u64);
         let cache = ParquetRowGroupCache::new(1024 * 1024);
         let ident = make_ident();
+        cache.insert(
+            ChunkKey {
+                ident: ident.clone(),
+                chunk_offset: 8,
+                chunk_length: 8,
+            },
+            Bytes::copy_from_slice(&payload[8..16]),
+        );
         let mut reader = CachingReader::new(inner, cache.clone(), ident.clone());
 
-        // First call: 3 distinct ranges, all cold. Each must route through
-        // get_bytes (the trait default), so we expect 3 misses and 3 inserts.
-        let ranges = vec![0u64..4, 8u64..16, 32u64..40];
+        let ranges = vec![32u64..40, 8u64..16, 0u64..4];
         let bytes_vec = RT
             .block_on(async { reader.get_byte_ranges(ranges.clone()).await })
             .expect("get_byte_ranges should succeed");
         assert_eq!(bytes_vec.len(), 3);
-        assert_eq!(bytes_vec[0].as_ref(), &payload[0..4]);
+        assert_eq!(bytes_vec[0].as_ref(), &payload[32..40]);
         assert_eq!(bytes_vec[1].as_ref(), &payload[8..16]);
-        assert_eq!(bytes_vec[2].as_ref(), &payload[32..40]);
+        assert_eq!(bytes_vec[2].as_ref(), &payload[0..4]);
 
-        // Three cold ranges → three misses. If get_byte_ranges had been
-        // overridden to delegate straight to inner.get_byte_ranges, the cache
-        // would have observed zero events and the keys would be absent.
-        assert_eq!(
-            cache.miss_count(),
-            3,
-            "expected 3 misses (one per range, fanned out via trait default)"
-        );
+        assert_eq!(cache.hit_count(), 1, "pre-warmed range should be a hit");
+        assert_eq!(cache.miss_count(), 2, "only cold ranges should miss");
 
-        // Each range must have been inserted into the cache.
         for range in &ranges {
             let key = ChunkKey {
                 ident: ident.clone(),
@@ -394,22 +540,25 @@ mod tests {
         assert_eq!(bytes_vec_warm.len(), 3);
         assert_eq!(
             cache.hit_count(),
-            3,
+            4,
             "expected 3 hits on the warm pass; got {}",
             cache.hit_count()
         );
         assert_eq!(
             cache.miss_count(),
-            3,
+            2,
             "miss count must not change on the warm pass"
         );
     }
 
     #[test]
-    fn lru_eviction_under_tight_budget() {
+    fn lru_eviction_under_tight_budget_logs_debug_event() {
         // Budget: 10 bytes. Insert two 8-byte chunks.  Second insert should
-        // cause the first to be evicted (weighted LRU).
-        let cache = ParquetRowGroupCache::new(10);
+        // force eviction because both entries cannot fit together.
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let dispatch = tracing::Dispatch::new(RecordingSubscriber {
+            events: events.clone(),
+        });
         let ident = make_ident();
 
         let key_a = ChunkKey {
@@ -423,23 +572,44 @@ mod tests {
             chunk_length: 8,
         };
 
-        cache.insert(key_a.clone(), Bytes::from(vec![0u8; 8]));
-        // Read key_a to mark it as recently used.
-        let _ = cache.get(&key_a);
+        tracing::dispatcher::with_default(&dispatch, || {
+            let cache = ParquetRowGroupCache::new(10);
+            cache.insert(key_a.clone(), Bytes::from(vec![0u8; 8]));
+            // Read key_a to exercise the access-order path before pressure.
+            let _ = cache.get(&key_a);
 
-        // Insert key_b — combined weight (16) exceeds capacity (10), so moka
-        // must evict key_a to stay within budget.
-        cache.insert(key_b.clone(), Bytes::from(vec![1u8; 8]));
+            // Insert key_b — combined weight (16) exceeds capacity (10), so
+            // moka must evict one entry to stay within budget.
+            cache.insert(key_b.clone(), Bytes::from(vec![1u8; 8]));
 
-        // Moka eviction is async/lazy, so we sync the cache before asserting.
-        cache.inner.run_pending_tasks();
+            // Moka eviction is async/lazy, so we sync before asserting.
+            cache.inner.run_pending_tasks();
 
-        // After eviction, at most one entry should be present.
-        let a_present = cache.inner.get(&key_a).is_some();
-        let b_present = cache.inner.get(&key_b).is_some();
-        assert!(
-            !(a_present && b_present),
-            "both keys present after tight eviction — expected at most one"
+            assert!(
+                cache.inner.weighted_size() <= 10,
+                "cache remained over budget after pending tasks"
+            );
+            let a_present = cache.inner.get(&key_a).is_some();
+            let b_present = cache.inner.get(&key_b).is_some();
+            assert!(
+                !(a_present && b_present),
+                "both keys present after tight eviction — expected at most one"
+            );
+        });
+
+        let events = events.lock().unwrap();
+        let evict_events = events
+            .iter()
+            .filter(|line| line.contains("parquet_cache evict"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            evict_events.len(),
+            1,
+            "expected one eviction log event; captured: {events:?}"
         );
+        let event = evict_events[0];
+        assert!(event.contains("artifact=\"catchments.parquet\""));
+        assert!(event.contains("length=8"));
+        assert!(event.contains("evicted_bytes=8"));
     }
 }

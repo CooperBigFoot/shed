@@ -126,6 +126,8 @@ class Engine:
         self, *, lat: float, lon: float, geometry: bool
     ) -> DelineationResult | AreaOnlyResult: ...
 
+    # Passing progress disables Rayon parallelism and runs the batch
+    # sequentially to preserve monotonic callback order.
     def delineate_batch(
         self,
         outlets: list[_Outlet],

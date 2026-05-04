@@ -9,6 +9,7 @@ use std::time::Instant;
 
 use arrow::array::{Array, BinaryArray, Float32Array, Int64Array, LargeBinaryArray};
 use arrow::datatypes::{DataType, Schema};
+use chrono::{DateTime, Utc};
 use futures_util::{StreamExt, stream};
 use geo::{Geometry, MultiPolygon};
 use geozero::ToGeo;
@@ -22,7 +23,7 @@ use parquet::arrow::arrow_reader::ArrowReaderMetadata;
 use parquet::arrow::async_reader::{
     AsyncFileReader, ParquetObjectReader, ParquetRecordBatchStreamBuilder,
 };
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, instrument, warn};
 
 use super::{BboxColIndices, extract_row_group_bbox, require_column};
 use crate::algo::WkbDecodeError;
@@ -196,15 +197,27 @@ impl CatchmentStore {
     ) -> Result<Self, SessionError> {
         let head_meta = head_object_meta(store.as_ref(), &path, &path_display, head_error_mode)?;
         let file_size = head_meta.size;
+        let last_modified = head_meta.last_modified;
 
         // Build the cache identity if a cache is provided and we have fabric info.
-        let cache_ident = if parquet_cache.is_some() {
+        let cache_ident = if parquet_cache.is_some()
+            && head_meta.e_tag.is_none()
+            && last_modified == DateTime::<Utc>::UNIX_EPOCH
+        {
+            warn!(
+                artifact = ARTIFACT,
+                path = %path_display,
+                "disabling parquet cache because object metadata lacks both ETag and last_modified"
+            );
+            None
+        } else if parquet_cache.is_some() {
             fabric_info.map(|(fabric_name, adapter_version)| ArtifactIdent {
                 fabric_name,
                 adapter_version,
                 artifact: ARTIFACT,
                 file_size,
                 etag: head_meta.e_tag.clone(),
+                last_modified,
             })
         } else {
             None
@@ -434,20 +447,23 @@ impl CatchmentStore {
             })?;
         let metadata = builder.metadata().clone();
         let rg_absolute_starts = absolute_row_starts(&metadata, &selected_row_groups);
+        let reader_metadata = ArrowReaderMetadata::try_new(metadata.clone(), Default::default())
+            .map_err(|e| SessionError::ParquetParse {
+                artifact: ARTIFACT,
+                source: e,
+            })?;
+        let parquet_schema = reader_metadata.parquet_schema();
+        let projection =
+            ProjectionMask::roots(parquet_schema, full_projection_indices(parquet_schema)?);
 
         let mut results = Vec::new();
         for (sel_idx, &row_group) in selected_row_groups.iter().enumerate() {
-            let builder = ParquetRecordBatchStreamBuilder::new(self.object_reader())
-                .await
-                .map_err(|e| SessionError::ParquetParse {
-                    artifact: ARTIFACT,
-                    source: e,
-                })?;
-            let parquet_schema = builder.parquet_schema();
-            let projection =
-                ProjectionMask::roots(parquet_schema, full_projection_indices(parquet_schema)?);
+            let builder = ParquetRecordBatchStreamBuilder::new_with_metadata(
+                self.object_reader(),
+                reader_metadata.clone(),
+            );
             let mut stream = builder
-                .with_projection(projection)
+                .with_projection(projection.clone())
                 .with_row_groups(vec![row_group])
                 .with_batch_size(8192)
                 .build()
@@ -521,20 +537,23 @@ impl CatchmentStore {
             })?;
         let metadata = builder.metadata().clone();
         let rg_absolute_starts = absolute_row_starts(&metadata, &selected_row_groups);
+        let reader_metadata = ArrowReaderMetadata::try_new(metadata.clone(), Default::default())
+            .map_err(|e| SessionError::ParquetParse {
+                artifact: ARTIFACT,
+                source: e,
+            })?;
+        let parquet_schema = reader_metadata.parquet_schema();
+        let projection =
+            ProjectionMask::roots(parquet_schema, geometry_projection_indices(parquet_schema)?);
 
         let mut results = Vec::new();
         for (sel_idx, &row_group) in selected_row_groups.iter().enumerate() {
-            let builder = ParquetRecordBatchStreamBuilder::new(self.object_reader())
-                .await
-                .map_err(|e| SessionError::ParquetParse {
-                    artifact: ARTIFACT,
-                    source: e,
-                })?;
-            let parquet_schema = builder.parquet_schema();
-            let projection =
-                ProjectionMask::roots(parquet_schema, geometry_projection_indices(parquet_schema)?);
+            let builder = ParquetRecordBatchStreamBuilder::new_with_metadata(
+                self.object_reader(),
+                reader_metadata.clone(),
+            );
             let mut stream = builder
-                .with_projection(projection)
+                .with_projection(projection.clone())
                 .with_row_groups(vec![row_group])
                 .with_batch_size(8192)
                 .build()

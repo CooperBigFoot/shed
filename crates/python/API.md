@@ -33,15 +33,14 @@ Sets the active log level for both the Rust tracing bridge and the Python
 
 | Parameter | Type | Meaning |
 |---|---|---|
-| `level` | `str` | Case-insensitive level name: `"trace"`, `"debug"`, `"info"`, `"warn"`, or `"error"` |
+| `level` | `str` | Case-insensitive level name: `"trace"`, `"debug"`, `"info"`, `"warn"`/`"warning"`, or `"error"`/`"critical"` |
 
 Records from Rust code route through pyo3-log under loggers named after their
-crate (`_pyshed.*`, `shed_core.*`, `hfx_core.*`). If no handler is configured on
-the `pyshed` logger or the root logger, a `StreamHandler` is added to the root
-logger automatically, so first-time users see output without calling
-`logging.basicConfig`.
+crate (`_pyshed.*`, `shed_core.*`, `hfx_core.*`). If any relevant logger has no
+handler, a `StreamHandler` is added to that logger automatically, so first-time
+users see output without calling `logging.basicConfig`.
 
-In a Jupyter notebook, `"info"` is enabled automatically at import time.
+Set `PYSHED_LOG` to one of the same level names to opt in at import time.
 
 ## Engine
 

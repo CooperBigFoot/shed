@@ -2138,7 +2138,7 @@ dependencies = [
 
 [[package]]
 name = "pyshed"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "gdal",
  "gdal-sys",
@@ -2659,7 +2659,7 @@ dependencies = [
 
 [[package]]
 name = "shed"
-version = "0.1.101"
+version = "0.1.103"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2681,6 +2681,7 @@ version = "0.1.0"
 dependencies = [
  "arrow",
  "bytes",
+ "chrono",
  "dashmap",
  "dhat",
  "dirs",

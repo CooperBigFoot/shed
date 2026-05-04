@@ -9,6 +9,7 @@ variable and marked with ``@pytest.mark.network``.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import logging
 import os
 
@@ -21,6 +22,7 @@ import pyshed
 # ---------------------------------------------------------------------------
 
 _REMOTE_URL = os.environ.get("PYSHED_TEST_REMOTE_URL", "")
+_CRATE_LOGGER_NAMES = ("pyshed", "_pyshed", "shed_core", "hfx_core")
 
 # Three outlets inside the GRIT dataset.  Only used in network tests.
 _REMOTE_OUTLETS = [
@@ -33,6 +35,29 @@ network_skip = pytest.mark.skipif(
     not _REMOTE_URL,
     reason="requires PYSHED_TEST_REMOTE_URL",
 )
+
+
+@contextmanager
+def crate_caplog(caplog, level=logging.DEBUG):
+    """Attach pytest's caplog handler directly to non-propagating crate loggers."""
+    previous = []
+    previous_handler_level = caplog.handler.level
+    caplog.handler.setLevel(level)
+    try:
+        for name in _CRATE_LOGGER_NAMES:
+            logger = logging.getLogger(name)
+            previous.append((logger, logger.level, list(logger.handlers), logger.propagate))
+            logger.setLevel(level)
+            logger.propagate = False
+            if caplog.handler not in logger.handlers:
+                logger.addHandler(caplog.handler)
+        yield
+    finally:
+        caplog.handler.setLevel(previous_handler_level)
+        for logger, logger_level, handlers, propagate in reversed(previous):
+            logger.handlers[:] = handlers
+            logger.setLevel(logger_level)
+            logger.propagate = propagate
 
 # ---------------------------------------------------------------------------
 # D1 – kwarg validation (no network needed)
@@ -102,6 +127,27 @@ class TestKwargValidation:
         with pytest.raises(ValueError, match="parquet_cache_max_mb"):
             pyshed.Engine(self._path, parquet_cache=True, parquet_cache_max_mb=0)
 
+    def test_parquet_cache_max_mb_upper_bound_validation(self):
+        with pytest.raises(ValueError, match="parquet_cache_max_mb"):
+            pyshed.Engine(self._path, parquet_cache=True, parquet_cache_max_mb=1048577)
+
+    def test_delineate_batch_progress_must_be_callable(self, hfx_dataset):
+        engine = pyshed.Engine(hfx_dataset)
+        with pytest.raises(TypeError, match="progress must be callable"):
+            engine.delineate_batch([], progress=123)
+
+    def test_delineate_batch_rejects_per_outlet_kwargs(self, hfx_dataset):
+        engine = pyshed.Engine(hfx_dataset)
+        with pytest.raises(TypeError) as exc_info:
+            engine.delineate_batch([{"lat": 47, "lon": 8}], lat=47, lon=8)
+        msg = str(exc_info.value)
+        assert "per-outlet" in msg
+        assert "outlets" in msg
+
+    def test_set_log_level_accepts_warning_and_critical(self):
+        pyshed.set_log_level("warning")
+        pyshed.set_log_level("critical")
+
 
 # ---------------------------------------------------------------------------
 # D2 – delineate happy path (network)
@@ -129,10 +175,8 @@ def test_delineate_happy_path_unchanged():
 def test_set_log_level_emits_records(caplog):
     """Opening a remote dataset with INFO enabled produces ≥4 log records."""
     pyshed.set_log_level("info")
-    with caplog.at_level(logging.DEBUG, logger="shed_core"):
-        with caplog.at_level(logging.DEBUG, logger="_pyshed"):
-            with caplog.at_level(logging.DEBUG, logger="hfx_core"):
-                pyshed.Engine(_REMOTE_URL)
+    with crate_caplog(caplog):
+        pyshed.Engine(_REMOTE_URL)
 
     all_records = caplog.records
     assert len(all_records) >= 4, (
@@ -171,6 +215,30 @@ def test_delineate_batch_progress_callback():
 
 
 # ---------------------------------------------------------------------------
+# D4b – delineate_batch parallel/sequential equivalence (network)
+# ---------------------------------------------------------------------------
+
+
+@network_skip
+@pytest.mark.network
+def test_delineate_batch_parallel_sequential_equivalence():
+    """progress=None uses parallel batch; progress=callable uses the sequential callback path."""
+    engine = pyshed.Engine(_REMOTE_URL)
+
+    parallel_results = engine.delineate_batch(_REMOTE_OUTLETS)
+    sequential_results = engine.delineate_batch(_REMOTE_OUTLETS, progress=lambda _: None)
+
+    assert len(parallel_results) == len(_REMOTE_OUTLETS)
+    assert len(sequential_results) == len(_REMOTE_OUTLETS)
+
+    for parallel, sequential in zip(parallel_results, sequential_results):
+        assert parallel.terminal_atom_id == sequential.terminal_atom_id
+        assert parallel.area_km2 == pytest.approx(sequential.area_km2, rel=1e-9)
+        assert sorted(parallel.upstream_atom_ids) == sorted(sequential.upstream_atom_ids)
+        assert parallel.geometry_wkb == sequential.geometry_wkb
+
+
+# ---------------------------------------------------------------------------
 # D5 – parquet cache off by default (network)
 # ---------------------------------------------------------------------------
 
@@ -180,10 +248,9 @@ def test_delineate_batch_progress_callback():
 def test_parquet_cache_off_default(caplog):
     """Engine() with no parquet_cache kwarg must not emit a 'parquet_cache enabled' log."""
     pyshed.set_log_level("info")
-    with caplog.at_level(logging.DEBUG, logger="shed_core"):
-        with caplog.at_level(logging.DEBUG, logger="_pyshed"):
-            engine = pyshed.Engine(_REMOTE_URL)
-            engine.delineate(lat=47.3769, lon=8.5417)
+    with crate_caplog(caplog):
+        engine = pyshed.Engine(_REMOTE_URL)
+        engine.delineate(lat=47.3769, lon=8.5417)
 
     cache_enabled_lines = [
         r.getMessage() for r in caplog.records if "parquet_cache enabled" in r.getMessage()
@@ -226,10 +293,9 @@ def test_parquet_cache_miss_then_hit(caplog):
     pyshed.set_log_level("debug")
     engine = pyshed.Engine(_REMOTE_URL, parquet_cache=True, parquet_cache_max_mb=512)
 
-    with caplog.at_level(logging.DEBUG, logger="shed_core"):
-        with caplog.at_level(logging.DEBUG, logger="_pyshed"):
-            engine.delineate(lat=47.3769, lon=8.5417)
-            engine.delineate(lat=47.3769, lon=8.5417)
+    with crate_caplog(caplog):
+        engine.delineate(lat=47.3769, lon=8.5417)
+        engine.delineate(lat=47.3769, lon=8.5417)
 
     messages = [r.getMessage() for r in caplog.records]
     miss_count = sum(1 for m in messages if "parquet_cache miss" in m)
@@ -237,39 +303,3 @@ def test_parquet_cache_miss_then_hit(caplog):
 
     assert miss_count >= 1, f"expected ≥1 cache miss log; messages: {messages}"
     assert hit_count >= 1, f"expected ≥1 cache hit log; messages: {messages}"
-
-
-# ---------------------------------------------------------------------------
-# D8 – parquet cache eviction under tight budget (network)
-# ---------------------------------------------------------------------------
-
-
-@network_skip
-@pytest.mark.network
-def test_parquet_cache_eviction_under_tight_budget(caplog):
-    """With a 1 MiB budget and several distinct delineations, at least one eviction fires."""
-    pyshed.set_log_level("debug")
-    engine = pyshed.Engine(_REMOTE_URL, parquet_cache=True, parquet_cache_max_mb=1)
-
-    outlets = [
-        {"lat": 47.3769, "lon": 8.5417},
-        {"lat": 46.9480, "lon": 7.4474},
-        {"lat": 48.1351, "lon": 11.5820},
-        {"lat": 47.8095, "lon": 13.0550},
-        {"lat": 47.0707, "lon": 15.4395},
-    ]
-
-    with caplog.at_level(logging.DEBUG, logger="shed_core"):
-        with caplog.at_level(logging.DEBUG, logger="_pyshed"):
-            for outlet in outlets:
-                engine.delineate(**outlet)
-
-    messages = [r.getMessage() for r in caplog.records]
-    evict_count = sum(1 for m in messages if "parquet_cache evict" in m)
-
-    if evict_count == 0:
-        pytest.skip(
-            "no parquet_cache evict event observed; row-group sizes may exceed 1 MiB budget"
-        )
-
-    assert evict_count >= 1

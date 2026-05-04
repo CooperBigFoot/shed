@@ -18,18 +18,19 @@ mod result;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-/// Map a log level string to `log::LevelFilter`.
+/// Map a Python log level string or common alias to `log::LevelFilter`.
 ///
-/// Accepts `"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"` (case-insensitive).
+/// Accepts `"trace"`, `"debug"`, `"info"`, `"warn"`/`"warning"`, and
+/// `"error"`/`"critical"` (case-insensitive).
 fn parse_level_filter(level: &str) -> PyResult<log::LevelFilter> {
     match level.to_ascii_lowercase().as_str() {
         "trace" => Ok(log::LevelFilter::Trace),
         "debug" => Ok(log::LevelFilter::Debug),
         "info" => Ok(log::LevelFilter::Info),
-        "warn" => Ok(log::LevelFilter::Warn),
-        "error" => Ok(log::LevelFilter::Error),
+        "warn" | "warning" => Ok(log::LevelFilter::Warn),
+        "error" | "critical" => Ok(log::LevelFilter::Error),
         other => Err(PyValueError::new_err(format!(
-            "unknown log level {other:?}; valid values are: trace, debug, info, warn, error"
+            "unknown log level {other:?}; valid values are: trace, debug, info, warn, warning, error, critical"
         ))),
     }
 }
@@ -44,7 +45,8 @@ fn parse_level_filter(level: &str) -> PyResult<log::LevelFilter> {
 /// calls into this and additionally configures the Python `logging` hierarchy
 /// so records are actually emitted.
 ///
-/// Valid levels (case-insensitive): `"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"`.
+/// Valid levels (case-insensitive): `"trace"`, `"debug"`, `"info"`,
+/// `"warn"`/`"warning"`, `"error"`/`"critical"`.
 #[pyfunction]
 fn _set_log_level(level: &str) -> PyResult<()> {
     let filter = parse_level_filter(level)?;
@@ -58,12 +60,11 @@ fn _pyshed(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // `let _ =` ensures a duplicate install on re-import does not panic
     // (`log::set_boxed_logger` only succeeds once per process).
     let _ = pyo3_log::Logger::default()
-        .filter(log::LevelFilter::Trace)
+        .filter(log::LevelFilter::Warn)
         .install();
-    // Be explicit about the dynamic max-level — the bridge respects this and
-    // future readers shouldn't have to grep pyo3-log internals to know we
-    // start at Trace.
-    log::set_max_level(log::LevelFilter::Trace);
+    // Keep import quiet by default. The public Python wrapper can raise this
+    // dynamic max-level on demand through `_set_log_level`.
+    log::set_max_level(log::LevelFilter::Warn);
 
     m.add_class::<engine::PyEngine>()?;
     m.add_class::<result::PyDelineationResult>()?;

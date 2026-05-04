@@ -84,6 +84,8 @@ impl PyEngine {
             "parquet_cache_max_mb",
         ];
         crate::kwargs::validate_kwargs(kwargs, ALLOWED, crate::kwargs::KwargContext::EngineNew)?;
+        const MAX_PARQUET_CACHE_MB: u64 = 1_048_576;
+        const BYTES_PER_MIB: u64 = 1024 * 1024;
 
         // Extract typed values from kwargs (None when missing, defaults applied below).
         let snap_radius: Option<f64> = kwargs
@@ -119,11 +121,29 @@ impl PyEngine {
             .unwrap_or(2048);
 
         // Validate cache budget before releasing the GIL.
-        if parquet_cache_enabled && parquet_cache_max_mb == 0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "parquet_cache_max_mb must be > 0 when parquet_cache=True",
-            ));
-        }
+        let parquet_cache_max_bytes = if parquet_cache_enabled {
+            if parquet_cache_max_mb == 0 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "parquet_cache_max_mb must be > 0 when parquet_cache=True",
+                ));
+            }
+            if parquet_cache_max_mb > MAX_PARQUET_CACHE_MB {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "parquet_cache_max_mb must be <= {MAX_PARQUET_CACHE_MB}"
+                )));
+            }
+            Some(
+                parquet_cache_max_mb
+                    .checked_mul(BYTES_PER_MIB)
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyValueError::new_err(
+                            "parquet_cache_max_mb overflows bytes",
+                        )
+                    })?,
+            )
+        } else {
+            None
+        };
 
         // Validate config before releasing the GIL (config errors are cheap/immediate).
         let config = EngineConfig::new(
@@ -134,14 +154,10 @@ impl PyEngine {
             refine,
         )?;
 
-        let cache = parquet_cache_enabled
-            .then(|| ParquetRowGroupCache::new(parquet_cache_max_mb * 1024 * 1024));
+        let cache = parquet_cache_max_bytes.map(ParquetRowGroupCache::new);
 
-        if parquet_cache_enabled {
-            tracing::info!(
-                max_bytes = parquet_cache_max_mb * 1024 * 1024,
-                "parquet_cache enabled"
-            );
+        if let Some(max_bytes) = parquet_cache_max_bytes {
+            tracing::info!(max_bytes = max_bytes, "parquet_cache enabled");
         }
 
         // Release the GIL for the synchronous I/O path (manifest + graph + catchment
@@ -246,6 +262,8 @@ impl PyEngine {
     ///     `duration_ms`, `status` (`"ok"` or `"error"`), `n_catchments`
     ///     (on success), and `error` (on failure).  Exceptions raised by the
     ///     callback are logged via `tracing::warn!` and otherwise ignored.
+    ///     Passing `progress` disables Rayon parallelism and runs the batch
+    ///     sequentially to preserve monotonic callback order.
     ///
     /// Returns
     /// -------
@@ -267,7 +285,16 @@ impl PyEngine {
 
         let progress: Option<PyObject> = kwargs
             .and_then(|k| k.get_item("progress").ok().flatten())
-            .map(|v| v.unbind());
+            .map(|v| {
+                if !v.is_callable() {
+                    let type_name = v.get_type().name()?;
+                    return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                        "progress must be callable, not {type_name}"
+                    )));
+                }
+                Ok(v.unbind())
+            })
+            .transpose()?;
 
         // Parse all outlets before releasing the GIL.
         let parsed: Vec<(f64, f64)> = outlets
@@ -323,14 +350,16 @@ impl PyEngine {
                 });
 
             let mut py_results = Vec::with_capacity(results.len());
-            for r in results {
+            for (failed_index, r) in results.into_iter().enumerate() {
                 match r {
                     Ok(result) => py_results.push(result),
                     Err(engine_err) => {
-                        tracing::info!(
+                        tracing::warn!(
                             n_outlets = total,
+                            failed_index,
                             elapsed_ms = batch_start.elapsed().as_millis() as u64,
-                            "batch delineation complete"
+                            error = %engine_err,
+                            "batch delineation aborted"
                         );
                         return Err(engine_err_to_py(engine_err));
                     }
@@ -421,10 +450,12 @@ fn sequential_delineate_with_progress(
                 py_results.push(PyDelineationResult::from_result(result));
             }
             Err(engine_err) => {
-                tracing::info!(
+                tracing::warn!(
                     n_outlets = total,
+                    failed_index = index,
                     elapsed_ms = batch_start.elapsed().as_millis() as u64,
-                    "batch delineation complete"
+                    error = %engine_err,
+                    "batch delineation aborted"
                 );
                 return Err(engine_err_to_py(engine_err));
             }

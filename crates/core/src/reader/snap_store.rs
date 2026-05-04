@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use arrow::array::{Array, BinaryArray, BooleanArray, Float32Array, Int64Array, LargeBinaryArray};
 use arrow::datatypes::DataType;
+use chrono::{DateTime, Utc};
 use futures_util::{StreamExt, stream};
 use hfx_core::{AtomId, BoundingBox, MainstemStatus, SnapId, SnapTarget, Weight, WkbGeometry};
 use object_store::local::LocalFileSystem;
@@ -16,7 +17,7 @@ use parquet::arrow::arrow_reader::ArrowReaderMetadata;
 use parquet::arrow::async_reader::{
     AsyncFileReader, ParquetObjectReader, ParquetRecordBatchStreamBuilder,
 };
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, instrument, warn};
 
 use crate::error::SessionError;
 use crate::parquet_cache::{ArtifactIdent, CachingReader, ParquetRowGroupCache};
@@ -176,15 +177,27 @@ impl SnapStore {
     ) -> Result<Self, SessionError> {
         let head_meta = head_object_meta(store.as_ref(), &path, &path_display, head_error_mode)?;
         let file_size = head_meta.size;
+        let last_modified = head_meta.last_modified;
 
         // Build cache identity if a cache and fabric info are both provided.
-        let cache_ident = if parquet_cache.is_some() {
+        let cache_ident = if parquet_cache.is_some()
+            && head_meta.e_tag.is_none()
+            && last_modified == DateTime::<Utc>::UNIX_EPOCH
+        {
+            warn!(
+                artifact = ARTIFACT,
+                path = %path_display,
+                "disabling parquet cache because object metadata lacks both ETag and last_modified"
+            );
+            None
+        } else if parquet_cache.is_some() {
             fabric_info.map(|(fabric_name, adapter_version)| ArtifactIdent {
                 fabric_name,
                 adapter_version,
                 artifact: ARTIFACT,
                 file_size,
                 etag: head_meta.e_tag.clone(),
+                last_modified,
             })
         } else {
             None
