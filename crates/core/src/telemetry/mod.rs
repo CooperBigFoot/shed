@@ -9,6 +9,8 @@
 //! - Timestamp and thread fields may be added by the tracing layer.
 //! - These field names and stage names are stable for downstream parsers.
 
+pub mod jsonl;
+
 use std::fmt;
 use std::path::Path;
 use std::time::{Duration, Instant};

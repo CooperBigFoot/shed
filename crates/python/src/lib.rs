@@ -15,8 +15,52 @@ mod geojson;
 pub(crate) mod kwargs;
 mod result;
 
+use std::sync::OnceLock;
+
+use log::{LevelFilter, Log, Metadata, Record};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use shed_core::telemetry::jsonl::{JsonlGuard, JsonlLayer};
+use tracing_subscriber::prelude::*;
+
+static JSONL_GUARD: OnceLock<JsonlGuard> = OnceLock::new();
+
+struct PythonTracingLogger {
+    python: pyo3_log::Logger,
+    tracing: tracing_log::LogTracer,
+}
+
+impl PythonTracingLogger {
+    fn install() -> Result<(), log::SetLoggerError> {
+        let logger = Self {
+            python: pyo3_log::Logger::default().filter(LevelFilter::Warn),
+            tracing: tracing_log::LogTracer::new(),
+        };
+        log::set_boxed_logger(Box::new(logger))?;
+        log::set_max_level(LevelFilter::Warn);
+        Ok(())
+    }
+}
+
+impl Log for PythonTracingLogger {
+    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        self.python.enabled(metadata) || self.tracing.enabled(metadata)
+    }
+
+    fn log(&self, record: &Record<'_>) {
+        if self.python.enabled(record.metadata()) {
+            self.python.log(record);
+        }
+        if self.tracing.enabled(record.metadata()) {
+            self.tracing.log(record);
+        }
+    }
+
+    fn flush(&self) {
+        self.python.flush();
+        self.tracing.flush();
+    }
+}
 
 /// Map a Python log level string or common alias to `log::LevelFilter`.
 ///
@@ -54,14 +98,28 @@ fn _set_log_level(level: &str) -> PyResult<()> {
     Ok(())
 }
 
+fn install_tracing() {
+    let Ok(Some((layer, guard))) = JsonlLayer::from_env() else {
+        return;
+    };
+    let subscriber = tracing_subscriber::registry().with(layer);
+    if tracing::subscriber::set_global_default(subscriber).is_ok() {
+        let _ = JSONL_GUARD.set(guard);
+    }
+}
+
+#[pyfunction]
+fn _install_bench_trace() {
+    install_tracing();
+}
+
 #[pymodule]
 fn _pyshed(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Route Rust `tracing`/`log` events to Python's `logging` module.
     // `let _ =` ensures a duplicate install on re-import does not panic
     // (`log::set_boxed_logger` only succeeds once per process).
-    let _ = pyo3_log::Logger::default()
-        .filter(log::LevelFilter::Warn)
-        .install();
+    let _ = PythonTracingLogger::install();
+    install_tracing();
     // Keep import quiet by default. The public Python wrapper can raise this
     // dynamic max-level on demand through `_set_log_level`.
     log::set_max_level(log::LevelFilter::Warn);
@@ -79,6 +137,7 @@ fn _pyshed(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(data_paths::_set_gdal_data, m)?)?;
     m.add_function(wrap_pyfunction!(data_paths::_set_proj_data, m)?)?;
     m.add_function(wrap_pyfunction!(data_paths::_self_test_proj, m)?)?;
+    m.add_function(wrap_pyfunction!(_install_bench_trace, m)?)?;
     m.add_function(wrap_pyfunction!(_set_log_level, m)?)?;
     Ok(())
 }

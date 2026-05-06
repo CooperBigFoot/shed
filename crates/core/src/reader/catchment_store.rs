@@ -30,6 +30,7 @@ use crate::algo::WkbDecodeError;
 use crate::error::SessionError;
 use crate::parquet_cache::{ArtifactIdent, CachingReader, ParquetRowGroupCache};
 use crate::runtime::RT;
+use crate::telemetry::{Stage, StageGuard, record_path};
 
 const ARTIFACT: &str = "catchments.parquet";
 const ID_INDEX_ROW_GROUP_CONCURRENCY: usize = 16;
@@ -195,6 +196,8 @@ impl CatchmentStore {
         fabric_info: Option<(String, String)>,
         parquet_cache: Option<Arc<ParquetRowGroupCache>>,
     ) -> Result<Self, SessionError> {
+        let _guard = StageGuard::enter(Stage::CatchmentStoreOpen);
+        record_path(&path_display);
         let head_meta = head_object_meta(store.as_ref(), &path, &path_display, head_error_mode)?;
         let file_size = head_meta.size;
         let last_modified = head_meta.last_modified;
@@ -935,6 +938,8 @@ async fn read_all_ids_with_row_groups_async(
     path: &ObjectPath,
     file_size: u64,
 ) -> Result<(Vec<AtomId>, HashMap<AtomId, usize>), SessionError> {
+    let _guard = StageGuard::enter(Stage::CatchmentIdIndex);
+    record_path(path.as_ref());
     let started = Instant::now();
     let builder = ParquetRecordBatchStreamBuilder::new(object_reader(store, path, file_size))
         .await

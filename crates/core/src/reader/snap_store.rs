@@ -23,6 +23,7 @@ use crate::error::SessionError;
 use crate::parquet_cache::{ArtifactIdent, CachingReader, ParquetRowGroupCache};
 use crate::reader::{BboxColIndices, extract_row_group_bbox, require_column};
 use crate::runtime::RT;
+use crate::telemetry::{Stage, StageGuard, record_path};
 
 /// Advance a `f32` value to the next representable float strictly greater than `v`.
 ///
@@ -175,6 +176,8 @@ impl SnapStore {
         fabric_info: Option<(String, String)>,
         parquet_cache: Option<Arc<ParquetRowGroupCache>>,
     ) -> Result<Self, SessionError> {
+        let _guard = StageGuard::enter(Stage::SnapStoreOpen);
+        record_path(&path_display);
         let head_meta = head_object_meta(store.as_ref(), &path, &path_display, head_error_mode)?;
         let file_size = head_meta.size;
         let last_modified = head_meta.last_modified;
@@ -581,6 +584,8 @@ impl SnapStore {
 
     #[instrument(skip(self), fields(path = %self.path_display))]
     async fn read_all_catchment_ids_async(&self) -> Result<Vec<hfx_core::AtomId>, SessionError> {
+        let _guard = StageGuard::enter(Stage::SnapIdIndex);
+        record_path(&self.path_display);
         let started = Instant::now();
         let builder = ParquetRecordBatchStreamBuilder::new(self.object_reader())
             .await

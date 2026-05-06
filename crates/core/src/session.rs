@@ -20,6 +20,8 @@ use crate::reader::catchment_store::CatchmentStore;
 use crate::reader::snap_store::SnapStore;
 use crate::runtime::RT;
 use crate::source::DatasetSource;
+use crate::source_telemetry::{HttpStatsHandle, HttpStatsSnapshot};
+use crate::telemetry::{Stage, StageGuard, record_bytes, record_path};
 
 /// Raster artifact selector for lazy localization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +95,7 @@ pub struct DatasetSession {
     raster_cache: Option<Arc<RemoteRasterCache>>,
     remote_store: Option<Arc<dyn ObjectStore>>,
     remote_root: Option<ObjectPath>,
+    http_stats: Option<HttpStatsHandle>,
     fabric_cache_key: (String, String),
     /// Optional Parquet column-chunk cache shared across catchment and snap readers.
     /// Stored here for future `engine.cache_stats()` exposure (deferred to v2).
@@ -136,9 +139,12 @@ impl DatasetSession {
     ) -> Result<Self, SessionError> {
         match DatasetSource::parse(input)? {
             DatasetSource::Local(root) => Self::open_path(&root),
-            DatasetSource::Remote { store, root, url } => {
-                Self::open_remote(store, &root, &url, cache)
-            }
+            DatasetSource::Remote {
+                store,
+                http_stats,
+                root,
+                url,
+            } => Self::open_remote_with_stats(store, &root, &url, cache, http_stats),
         }
     }
 
@@ -207,7 +213,10 @@ impl DatasetSession {
 
         let catchments = CatchmentStore::open(&root.join("catchments.parquet"))?;
 
-        let catchment_id_set = validate_graph_catchments(&manifest, &graph, &catchments)?;
+        let catchment_id_set = {
+            let _guard = StageGuard::enter(Stage::ValidateGraphCatchments);
+            validate_graph_catchments(&manifest, &graph, &catchments)?
+        };
 
         let snap = if manifest.snap() == SnapAvailability::Present {
             Some(SnapStore::open(&root.join("snap.parquet"))?)
@@ -217,6 +226,7 @@ impl DatasetSession {
 
         // If snap is present, verify all snap catchment_id references exist
         if let Some(ref snap_store) = snap {
+            let _guard = StageGuard::enter(Stage::ValidateSnapRefs);
             validate_snap_refs(snap_store, &catchment_id_set)?;
         }
 
@@ -250,6 +260,7 @@ impl DatasetSession {
             raster_cache: None,
             remote_store: None,
             remote_root: None,
+            http_stats: None,
             parquet_cache: None,
         })
     }
@@ -260,12 +271,26 @@ impl DatasetSession {
         url: &Url,
         parquet_cache: Option<Arc<ParquetRowGroupCache>>,
     ) -> Result<Self, SessionError> {
+        Self::open_remote_with_stats(store, root, url, parquet_cache, None)
+    }
+
+    fn open_remote_with_stats(
+        store: Arc<dyn ObjectStore>,
+        root: &ObjectPath,
+        url: &Url,
+        parquet_cache: Option<Arc<ParquetRowGroupCache>>,
+        http_stats: Option<HttpStatsHandle>,
+    ) -> Result<Self, SessionError> {
         let session_start = std::time::Instant::now();
 
-        info!(url = %url, "opening remote dataset");
-
-        let cache = RemoteArtifactCache::configured()?;
-        let raster_cache = Arc::new(RemoteRasterCache::new(cache.root().to_path_buf()));
+        let (cache, raster_cache) = {
+            let _remote_open_guard = StageGuard::enter(Stage::RemoteOpen);
+            record_path(url.as_str());
+            info!(url = %url, "opening remote dataset");
+            let cache = RemoteArtifactCache::configured()?;
+            let raster_cache = Arc::new(RemoteRasterCache::new(cache.root().to_path_buf()));
+            (cache, raster_cache)
+        };
         let (manifest, graph) = if let Some(cached) = cache.read_entry_for_source(url, root)? {
             debug!(
                 fabric = cached.manifest.fabric_name(),
@@ -279,8 +304,13 @@ impl DatasetSession {
             let graph_path = remote_artifact_path(root, "graph.arrow");
 
             let t = std::time::Instant::now();
-            let manifest_bytes =
-                read_remote_artifact(store.as_ref(), manifest_path, "manifest.json")?;
+            let manifest_bytes = {
+                let _guard = StageGuard::enter(Stage::ManifestFetch);
+                record_path(manifest_path.as_ref());
+                let bytes = read_remote_artifact(store.as_ref(), manifest_path, "manifest.json")?;
+                record_bytes(bytes.len() as u64);
+                bytes
+            };
             info!(
                 bytes = manifest_bytes.len(),
                 duration_ms = t.elapsed().as_millis(),
@@ -289,8 +319,14 @@ impl DatasetSession {
             let manifest = reader::manifest::read_manifest_from_bytes(&manifest_bytes)?;
 
             let t = std::time::Instant::now();
-            let graph_bytes = read_remote_artifact(store.as_ref(), graph_path, "graph.arrow")?;
-            let graph = reader::graph::load_graph_from_bytes(graph_bytes.clone())?;
+            let (graph_bytes, graph) = {
+                let _guard = StageGuard::enter(Stage::GraphFetch);
+                record_path(graph_path.as_ref());
+                let bytes = read_remote_artifact(store.as_ref(), graph_path, "graph.arrow")?;
+                record_bytes(bytes.len() as u64);
+                let graph = reader::graph::load_graph_from_bytes(bytes.clone())?;
+                (bytes, graph)
+            };
             info!(
                 bytes = graph_bytes.len(),
                 atoms = graph.len(),
@@ -321,7 +357,10 @@ impl DatasetSession {
             parquet_cache.clone(),
         )?;
         let t = std::time::Instant::now();
-        let catchment_id_set = validate_graph_catchments(&manifest, &graph, &catchments)?;
+        let catchment_id_set = {
+            let _guard = StageGuard::enter(Stage::ValidateGraphCatchments);
+            validate_graph_catchments(&manifest, &graph, &catchments)?
+        };
         info!(
             rows = catchment_id_set.len(),
             duration_ms = t.elapsed().as_millis(),
@@ -342,6 +381,7 @@ impl DatasetSession {
             None
         };
         if let Some(ref snap_store) = snap {
+            let _guard = StageGuard::enter(Stage::ValidateSnapRefs);
             validate_snap_refs(snap_store, &catchment_id_set)?;
         }
 
@@ -373,6 +413,7 @@ impl DatasetSession {
             raster_cache: Some(raster_cache),
             remote_store: Some(store),
             remote_root: Some(root.clone()),
+            http_stats,
             parquet_cache,
         })
     }
@@ -415,6 +456,11 @@ impl DatasetSession {
     /// Return the validated raster paths, if rasters are present.
     pub fn raster_paths(&self) -> Option<&RasterPaths> {
         self.raster_paths.as_ref()
+    }
+
+    /// Return object-store request counters when network benchmarking is enabled.
+    pub fn http_stats(&self) -> Option<HttpStatsSnapshot> {
+        self.http_stats.as_ref().map(HttpStatsHandle::snapshot)
     }
 
     /// Return a local filesystem path for a raster window needed by refinement.

@@ -13,6 +13,7 @@ use object_store::path::Path as ObjectPath;
 use url::Url;
 
 use crate::error::SessionError;
+use crate::source_telemetry::{HttpStatsHandle, wrap_if_enabled};
 
 const PUBLIC_R2_CUSTOM_DOMAIN: &str = "basin-delineations-public.upstream.tech";
 const PUBLIC_R2_BUCKET_NAME: &str = "basin-delineations-public";
@@ -45,6 +46,8 @@ pub enum DatasetSource {
     Remote {
         /// Object store configured for the backing bucket.
         store: Arc<dyn ObjectStore>,
+        /// Optional object-store counters for benchmark runs.
+        http_stats: Option<HttpStatsHandle>,
         /// Prefix within the object store where the dataset root begins.
         root: ObjectPath,
         /// Original URL supplied by the caller.
@@ -114,8 +117,10 @@ impl DatasetSource {
                 source: Box::new(source),
             })?;
 
+        let (store, http_stats) = wrap_if_enabled(Arc::new(store));
         Ok(Self::Remote {
-            store: Arc::new(store),
+            store,
+            http_stats,
             root,
             url,
         })
@@ -183,8 +188,10 @@ impl DatasetSource {
                 source: Box::new(source),
             })?;
 
+        let (store, http_stats) = wrap_if_enabled(Arc::new(store));
         Ok(Self::Remote {
-            store: Arc::new(store),
+            store,
+            http_stats,
             root,
             url,
         })
@@ -212,8 +219,10 @@ impl DatasetSource {
                 source: Box::new(source),
             })?;
 
+        let (store, http_stats) = wrap_if_enabled(Arc::new(store));
         Ok(Self::Remote {
-            store: Arc::new(store),
+            store,
+            http_stats,
             root,
             url,
         })

@@ -2153,6 +2153,8 @@ dependencies = [
  "strsim",
  "thiserror 2.0.18",
  "tracing",
+ "tracing-log",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2659,7 +2661,7 @@ dependencies = [
 
 [[package]]
 name = "shed"
-version = "0.1.106"
+version = "0.1.107"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2701,6 +2703,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-core",
+ "tracing-subscriber",
  "url",
 ]
 

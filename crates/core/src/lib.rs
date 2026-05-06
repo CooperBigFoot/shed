@@ -16,6 +16,7 @@ pub mod resolver;
 pub(crate) mod runtime;
 pub mod session;
 pub mod source;
+pub mod source_telemetry;
 pub mod telemetry;
 
 #[cfg(any(test, feature = "test-fixtures"))]

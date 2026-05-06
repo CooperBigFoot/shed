@@ -10,7 +10,9 @@ from __future__ import annotations
 import logging
 import os
 import warnings
+from contextlib import contextmanager
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
+from collections.abc import Iterator
 from pathlib import Path
 
 _PKG_DIR = Path(__file__).resolve().parent
@@ -45,6 +47,7 @@ from pyshed._pyshed import (
     Engine,
     ResolutionError,
     ShedError,
+    _install_bench_trace,
     _set_log_level,
 )
 
@@ -99,6 +102,21 @@ def set_log_level(level: str) -> None:
             logger.addHandler(handler)
 
 
+@contextmanager
+def bench_trace(path: os.PathLike[str] | str) -> Iterator[None]:
+    """Write Rust stage-span benchmark telemetry to ``path`` inside the context."""
+    previous = os.environ.get("PYSHED_BENCH_TRACE")
+    os.environ["PYSHED_BENCH_TRACE"] = os.fspath(path)
+    _install_bench_trace()
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("PYSHED_BENCH_TRACE", None)
+        else:
+            os.environ["PYSHED_BENCH_TRACE"] = previous
+
+
 __all__ = [
     "AreaOnlyResult",
     "AssemblyError",
@@ -107,6 +125,7 @@ __all__ = [
     "Engine",
     "ResolutionError",
     "ShedError",
+    "bench_trace",
     "set_log_level",
 ]
 

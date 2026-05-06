@@ -19,6 +19,9 @@ use crate::resolver::{
     OutletResolutionError, ResolutionMethod, ResolvedOutlet, ResolverConfig, resolve_outlet,
 };
 use crate::session::{DatasetSession, RasterKind};
+use crate::telemetry::{
+    Stage, StageGuard, record_bytes, record_cache_status, record_path, record_requests,
+};
 
 // ── RefinementOutcome ─────────────────────────────────────────────────────────
 
@@ -380,47 +383,60 @@ impl Engine {
         options: &DelineationOptions,
     ) -> Result<DelineationResult, EngineError> {
         // Step 1: Resolve outlet
-        let resolved = resolve_outlet(&self.session, outlet, &options.resolver_config)
-            .map_err(|source| EngineError::Resolution { outlet, source })?;
+        let resolved = {
+            let _guard = StageGuard::enter(Stage::OutletResolve);
+            resolve_outlet(&self.session, outlet, &options.resolver_config)
+                .map_err(|source| EngineError::Resolution { outlet, source })?
+        };
         let terminal = resolved.atom_id;
 
         // Step 2: Upstream traversal
-        let upstream = collect_upstream(terminal, self.session.graph()).map_err(|source| {
-            EngineError::Traversal {
-                atom_id: terminal.get(),
-                source,
-            }
-        })?;
+        let upstream = {
+            let _guard = StageGuard::enter(Stage::UpstreamTraversal);
+            collect_upstream(terminal, self.session.graph()).map_err(|source| {
+                EngineError::Traversal {
+                    atom_id: terminal.get(),
+                    source,
+                }
+            })?
+        };
 
         // Step 3: Try refinement
         let (refinement, refined_geometry) = self.try_refine(terminal, &resolved, options)?;
 
         // Step 4: Assembly
         let assembly_options = self.build_assembly_options(options);
-        let result = assemble_watershed(
-            self.session.catchments(),
-            &upstream,
-            refined_geometry.as_ref(),
-            assembly_options,
-        )
-        .map_err(|e| EngineError::Assembly {
-            atom_id: terminal.get(),
-            message: e.to_string(),
-            source: Box::new(e),
-        })?;
+        let result = {
+            let _guard = StageGuard::enter(Stage::WatershedAssembly);
+            assemble_watershed(
+                self.session.catchments(),
+                &upstream,
+                refined_geometry.as_ref(),
+                assembly_options,
+            )
+            .map_err(|e| EngineError::Assembly {
+                atom_id: terminal.get(),
+                message: e.to_string(),
+                source: Box::new(e),
+            })?
+        };
         let (geometry, area_km2) = result.into_parts();
 
         // Step 5: Compose result
-        Ok(DelineationResult {
-            terminal_atom_id: terminal,
-            input_outlet: resolved.input_coord,
-            resolved_outlet: resolved.resolved_coord,
-            resolution_method: resolved.method,
-            upstream_atom_ids: upstream.into_atom_ids(),
-            refinement,
-            geometry,
-            area_km2,
-        })
+        let result = {
+            let _guard = StageGuard::enter(Stage::ResultCompose);
+            DelineationResult {
+                terminal_atom_id: terminal,
+                input_outlet: resolved.input_coord,
+                resolved_outlet: resolved.resolved_coord,
+                resolution_method: resolved.method,
+                upstream_atom_ids: upstream.into_atom_ids(),
+                refinement,
+                geometry,
+                area_km2,
+            }
+        };
+        Ok(result)
     }
 
     /// Delineate the watershed upstream of `outlet` and return scalar metadata only.
@@ -500,56 +516,78 @@ impl Engine {
         };
 
         // Fetch terminal catchment geometry
-        let terminal_atoms = self
-            .session
-            .catchments()
-            .query_geometries_by_ids(&[terminal])
-            .map_err(|source| match source {
-                CatchmentGeometryQueryError::Read { source } => {
-                    EngineError::TerminalCatchmentFetch {
-                        atom_id: terminal.get(),
-                        source,
+        let (terminal_polygon, terminal_bbox) = {
+            let _guard = StageGuard::enter(Stage::TerminalCatchmentFetch);
+            let terminal_atoms = self
+                .session
+                .catchments()
+                .query_geometries_by_ids(&[terminal])
+                .map_err(|source| match source {
+                    CatchmentGeometryQueryError::Read { source } => {
+                        EngineError::TerminalCatchmentFetch {
+                            atom_id: terminal.get(),
+                            source,
+                        }
                     }
-                }
-                CatchmentGeometryQueryError::Decode { source, .. } => {
-                    EngineError::TerminalCatchmentDecode {
-                        atom_id: terminal.get(),
-                        source,
+                    CatchmentGeometryQueryError::Decode { source, .. } => {
+                        EngineError::TerminalCatchmentDecode {
+                            atom_id: terminal.get(),
+                            source,
+                        }
                     }
-                }
-            })?;
-        let terminal_atom = terminal_atoms.into_iter().next().ok_or_else(|| {
-            EngineError::TerminalCatchmentFetch {
-                atom_id: terminal.get(),
-                source: SessionError::integrity(format!(
-                    "terminal atom {} not in catchment store",
-                    terminal.get()
-                )),
-            }
-        })?;
-        let terminal_polygon = terminal_atom.into_parts().1;
-        let terminal_bbox =
-            terminal_polygon
-                .bounding_rect()
-                .ok_or_else(|| EngineError::Refinement {
-                    atom_id: terminal.get(),
-                    source: RefinementError::DegenerateTerminalPolygon,
                 })?;
+            let terminal_atom = terminal_atoms.into_iter().next().ok_or_else(|| {
+                EngineError::TerminalCatchmentFetch {
+                    atom_id: terminal.get(),
+                    source: SessionError::integrity(format!(
+                        "terminal atom {} not in catchment store",
+                        terminal.get()
+                    )),
+                }
+            })?;
+            let terminal_polygon = terminal_atom.into_parts().1;
+            let terminal_bbox =
+                terminal_polygon
+                    .bounding_rect()
+                    .ok_or_else(|| EngineError::Refinement {
+                        atom_id: terminal.get(),
+                        source: RefinementError::DegenerateTerminalPolygon,
+                    })?;
+            (terminal_polygon, terminal_bbox)
+        };
 
-        let flow_dir = self
-            .session
-            .localize_raster_window(RasterKind::FlowDir, terminal_bbox)
-            .map_err(|source| EngineError::RasterLocalize {
-                atom_id: terminal.get(),
-                source,
-            })?;
-        let flow_acc = self
-            .session
-            .localize_raster_window(RasterKind::FlowAcc, terminal_bbox)
-            .map_err(|source| EngineError::RasterLocalize {
-                atom_id: terminal.get(),
-                source,
-            })?;
+        let flow_dir = {
+            let _guard = StageGuard::enter(Stage::RasterLocalizeFlowDir);
+            let flow_dir = self
+                .session
+                .localize_raster_window(RasterKind::FlowDir, terminal_bbox)
+                .map_err(|source| EngineError::RasterLocalize {
+                    atom_id: terminal.get(),
+                    source,
+                })?;
+            let bytes = flow_dir.header_bytes() + flow_dir.tile_bytes();
+            record_bytes(bytes);
+            record_requests(flow_dir.tile_count() as u64);
+            record_cache_status(if bytes == 0 { "no_fetch" } else { "fetched" });
+            record_path(flow_dir.path());
+            flow_dir
+        };
+        let flow_acc = {
+            let _guard = StageGuard::enter(Stage::RasterLocalizeFlowAcc);
+            let flow_acc = self
+                .session
+                .localize_raster_window(RasterKind::FlowAcc, terminal_bbox)
+                .map_err(|source| EngineError::RasterLocalize {
+                    atom_id: terminal.get(),
+                    source,
+                })?;
+            let bytes = flow_acc.header_bytes() + flow_acc.tile_bytes();
+            record_bytes(bytes);
+            record_requests(flow_acc.tile_count() as u64);
+            record_cache_status(if bytes == 0 { "no_fetch" } else { "fetched" });
+            record_path(flow_acc.path());
+            flow_acc
+        };
         tracing::debug!(
             flow_dir_cog_header_bytes = flow_dir.header_bytes(),
             flow_dir_cog_tile_bytes = flow_dir.tile_bytes(),
@@ -565,18 +603,21 @@ impl Engine {
         let flow_acc_uri = flow_acc.path().to_string_lossy();
 
         // Refine
-        let refinement_result = refine_terminal_from_source(
-            raster_source,
-            flow_dir_uri.as_ref(),
-            flow_acc_uri.as_ref(),
-            &terminal_polygon,
-            resolved.resolved_coord,
-            options.snap_threshold,
-        )
-        .map_err(|source| EngineError::Refinement {
-            atom_id: terminal.get(),
-            source,
-        })?;
+        let refinement_result = {
+            let _refine_guard = StageGuard::enter(Stage::TerminalRefine);
+            refine_terminal_from_source(
+                raster_source,
+                flow_dir_uri.as_ref(),
+                flow_acc_uri.as_ref(),
+                &terminal_polygon,
+                resolved.resolved_coord,
+                options.snap_threshold,
+            )
+            .map_err(|source| EngineError::Refinement {
+                atom_id: terminal.get(),
+                source,
+            })?
+        };
 
         let refined_coord = refinement_result.snapped_coord();
         let refined_polygon = refinement_result.into_polygon();

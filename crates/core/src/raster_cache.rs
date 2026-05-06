@@ -20,6 +20,9 @@ use crate::cog::{
     LocalizedRasterWindow, RasterWindowRequest, fetch_window_to_path, prepare_window,
 };
 use crate::error::CacheError;
+use crate::telemetry::{
+    Stage, StageGuard, record_bytes, record_cache_status, record_path, record_requests,
+};
 
 /// Cache for remote raster files fetched from object storage.
 #[derive(Debug)]
@@ -46,7 +49,11 @@ impl RemoteRasterCache {
         fabric_name: &str,
         adapter_version: &str,
     ) -> Result<LocalizedRasterWindow, CacheError> {
-        let prepared = prepare_window(store, remote_path, request).await?;
+        let prepared = {
+            let _guard = StageGuard::enter(Stage::CogPrepareWindow);
+            record_path(Path::new(remote_path.as_ref()));
+            prepare_window(store, remote_path, request).await?
+        };
         let canonical = self.canonical_window_path(
             remote_path,
             request,
@@ -54,7 +61,14 @@ impl RemoteRasterCache {
             fabric_name,
             adapter_version,
         );
-        if cache_hit(&canonical).await? {
+        let hit = {
+            let _guard = StageGuard::enter(Stage::RasterCacheLookup);
+            record_path(&canonical);
+            let hit = cache_hit(&canonical).await?;
+            record_cache_status(if hit { "hit" } else { "miss" });
+            hit
+        };
+        if hit {
             return Ok(LocalizedRasterWindow::cached(canonical));
         }
 
@@ -63,16 +77,37 @@ impl RemoteRasterCache {
                 Entry::Occupied(entry) => {
                     let notify = Arc::clone(entry.get());
                     drop(entry);
+                    {
+                        let _guard = StageGuard::enter(Stage::RasterCacheLookup);
+                        record_path(&canonical);
+                        record_cache_status("wait");
+                    }
                     notify.notified().await;
-                    if cache_hit(&canonical).await? {
+                    let hit = {
+                        let _guard = StageGuard::enter(Stage::RasterCacheLookup);
+                        record_path(&canonical);
+                        let hit = cache_hit(&canonical).await?;
+                        record_cache_status(if hit { "hit" } else { "miss" });
+                        hit
+                    };
+                    if hit {
                         return Ok(LocalizedRasterWindow::cached(canonical));
                     }
                 }
                 Entry::Vacant(entry) => {
                     let notify = Arc::new(Notify::new());
                     entry.insert(Arc::clone(&notify));
-                    let result =
-                        fetch_window_to_path(store, remote_path, prepared, &canonical).await;
+                    let result = {
+                        let _guard = StageGuard::enter(Stage::CogFetchTiles);
+                        record_path(&canonical);
+                        let result =
+                            fetch_window_to_path(store, remote_path, prepared, &canonical).await;
+                        if let Ok(window) = &result {
+                            record_bytes(window.header_bytes() + window.tile_bytes());
+                            record_requests(window.tile_count() as u64);
+                        }
+                        result
+                    };
                     self.in_flight.remove(&canonical);
                     notify.notify_waiters();
                     return result;
