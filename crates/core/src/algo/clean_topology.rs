@@ -272,7 +272,7 @@ mod tests {
         let offset_coords = offset_ring(&coords, 0.1);
 
         assert!(
-            offset_coords.len() >= MIN_RING_VERTICES + 1,
+            offset_coords.len() > MIN_RING_VERTICES,
             "offset ring should have at least {} coords",
             MIN_RING_VERTICES + 1
         );

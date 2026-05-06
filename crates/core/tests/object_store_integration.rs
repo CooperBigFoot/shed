@@ -251,7 +251,7 @@ fn catchments_bytes() -> Vec<u8> {
         miny_b.append_value(0.0);
         maxx_b.append_value(maxx);
         maxy_b.append_value(0.4);
-        geom_b.append_value(&minimal_wkb_polygon(minx as f64, 0.0, maxx as f64, 0.4));
+        geom_b.append_value(minimal_wkb_polygon(minx as f64, 0.0, maxx as f64, 0.4));
     }
 
     let batch = RecordBatch::try_new(

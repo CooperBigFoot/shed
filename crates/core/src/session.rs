@@ -750,7 +750,7 @@ mod tests {
             miny_b.append_value(0.0);
             maxx_b.append_value(maxx);
             maxy_b.append_value(0.5);
-            geom_b.append_value(&minimal_wkb_polygon(minx as f64, 0.0, maxx as f64, 0.5));
+            geom_b.append_value(minimal_wkb_polygon(minx as f64, 0.0, maxx as f64, 0.5));
         }
 
         parquet_bytes(
@@ -798,7 +798,7 @@ mod tests {
         miny_b.append_value(0.1);
         maxx_b.append_value(1.4);
         maxy_b.append_value(0.4);
-        geom_b.append_value(&minimal_wkb_linestring(1.1, 0.25, 1.4, 0.25));
+        geom_b.append_value(minimal_wkb_linestring(1.1, 0.25, 1.4, 0.25));
 
         parquet_bytes(
             schema,

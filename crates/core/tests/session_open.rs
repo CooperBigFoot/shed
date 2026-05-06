@@ -145,7 +145,7 @@ fn write_catchments(root: &Path, atom_count: usize, row_group_size: usize) {
     ]));
 
     let props = WriterProperties::builder()
-        .set_max_row_group_size(row_group_size)
+        .set_max_row_group_row_count(Some(row_group_size))
         .set_statistics_enabled(EnabledStatistics::Chunk)
         .build();
 
@@ -175,7 +175,7 @@ fn write_catchments(root: &Path, atom_count: usize, row_group_size: usize) {
         miny_b.append_value(miny);
         maxx_b.append_value(maxx);
         maxy_b.append_value(maxy);
-        geom_b.append_value(&minimal_wkb_polygon(
+        geom_b.append_value(minimal_wkb_polygon(
             minx as f64,
             miny as f64,
             maxx as f64,
@@ -216,7 +216,7 @@ fn write_snap(root: &Path, atom_count: usize) {
     ]));
 
     let props = WriterProperties::builder()
-        .set_max_row_group_size(8192)
+        .set_max_row_group_row_count(Some(8192))
         .set_statistics_enabled(EnabledStatistics::Chunk)
         .build();
 
@@ -250,7 +250,7 @@ fn write_snap(root: &Path, atom_count: usize) {
         miny_b.append_value(miny);
         maxx_b.append_value(maxx);
         maxy_b.append_value(maxy);
-        geom_b.append_value(&minimal_wkb_linestring(cx - 0.1, cy, cx + 0.1, cy));
+        geom_b.append_value(minimal_wkb_linestring(cx - 0.1, cy, cx + 0.1, cy));
     }
 
     let batch = RecordBatch::try_new(
@@ -292,7 +292,7 @@ fn write_snap_with_degenerate_bbox(root: &Path, atom_count: usize) {
     ]));
 
     let props = WriterProperties::builder()
-        .set_max_row_group_size(8192)
+        .set_max_row_group_row_count(Some(8192))
         .set_statistics_enabled(EnabledStatistics::Chunk)
         .build();
 
@@ -323,7 +323,7 @@ fn write_snap_with_degenerate_bbox(root: &Path, atom_count: usize) {
         miny_b.append_value(py);
         maxx_b.append_value(px); // intentionally equal to minx
         maxy_b.append_value(py); // intentionally equal to miny
-        geom_b.append_value(&minimal_wkb_linestring(
+        geom_b.append_value(minimal_wkb_linestring(
             px as f64 - 0.01,
             py as f64,
             px as f64 + 0.01,
@@ -370,7 +370,7 @@ fn write_snap_with_custom_catchment_ids(root: &Path, catchment_ids: &[i64]) {
     ]));
 
     let props = WriterProperties::builder()
-        .set_max_row_group_size(8192)
+        .set_max_row_group_row_count(Some(8192))
         .set_statistics_enabled(EnabledStatistics::Chunk)
         .build();
 
@@ -405,7 +405,7 @@ fn write_snap_with_custom_catchment_ids(root: &Path, catchment_ids: &[i64]) {
         miny_b.append_value(miny);
         maxx_b.append_value(maxx);
         maxy_b.append_value(maxy);
-        geom_b.append_value(&minimal_wkb_linestring(cx - 0.1, cy, cx + 0.1, cy));
+        geom_b.append_value(minimal_wkb_linestring(cx - 0.1, cy, cx + 0.1, cy));
     }
 
     let batch = RecordBatch::try_new(

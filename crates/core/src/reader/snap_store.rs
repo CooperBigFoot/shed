@@ -1196,7 +1196,7 @@ mod tests {
         let mut maxy_b = Float32Builder::new();
         maxy_b.append_value(2.0);
         let mut geom_b = BinaryBuilder::new();
-        geom_b.append_value(&minimal_wkb_linestring(1.0, 1.0, 2.0, 2.0));
+        geom_b.append_value(minimal_wkb_linestring(1.0, 1.0, 2.0, 2.0));
 
         let batch = RecordBatch::try_new(
             null_schema.clone(),
@@ -1263,7 +1263,7 @@ mod tests {
         let mut maxy_b = Float32Builder::new();
         maxy_b.append_value(2.0);
         let mut geom_b = BinaryBuilder::new();
-        geom_b.append_value(&minimal_wkb_linestring(1.0, 1.0, 2.0, 2.0));
+        geom_b.append_value(minimal_wkb_linestring(1.0, 1.0, 2.0, 2.0));
 
         let batch = RecordBatch::try_new(
             null_schema.clone(),
@@ -1335,7 +1335,7 @@ mod tests {
         miny_b.append_value(1.0);
         maxx_b.append_value(2.0);
         maxy_b.append_value(2.0);
-        geom_b.append_value(&minimal_wkb_linestring(1.0, 1.0, 2.0, 2.0));
+        geom_b.append_value(minimal_wkb_linestring(1.0, 1.0, 2.0, 2.0));
 
         let batch = RecordBatch::try_new(
             schema.clone(),

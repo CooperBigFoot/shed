@@ -353,6 +353,10 @@ mod tests {
         AccumulationTile::from_raw(raw)
     }
 
+    fn idx(row: usize, col: usize, width: usize) -> usize {
+        row * width + col
+    }
+
     fn rect_polygon(x0: f64, y0: f64, x1: f64, y1: f64) -> MultiPolygon<f64> {
         let poly = Polygon::new(
             LineString::from(vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)]),
@@ -375,7 +379,7 @@ mod tests {
             /* r4 */ 0,  0,  0,  0,  0,
         ];
         let mut acc_values = [1.0_f32; 25];
-        acc_values[2 * 5 + 2] = 800.0; // (2,2) = 800
+        acc_values[idx(2, 2, 5)] = 800.0; // (2,2) = 800
 
         let flow_dir = make_flow_tile(5, 5, &fd_values);
         let accumulation = make_acc_tile(5, 5, &acc_values);
@@ -419,13 +423,13 @@ mod tests {
             0, 0, 4, 0, 0,
         ];
         let mut acc_values = [f32::NAN; 25];
-        acc_values[0 * 5 + 0] = 1.0;
-        acc_values[0 * 5 + 1] = 2.0;
-        acc_values[0 * 5 + 2] = 600.0;
-        acc_values[1 * 5 + 2] = 700.0;
-        acc_values[2 * 5 + 2] = 800.0;
-        acc_values[3 * 5 + 2] = 900.0;
-        acc_values[4 * 5 + 2] = 1000.0;
+        acc_values[idx(0, 0, 5)] = 1.0;
+        acc_values[idx(0, 1, 5)] = 2.0;
+        acc_values[idx(0, 2, 5)] = 600.0;
+        acc_values[idx(1, 2, 5)] = 700.0;
+        acc_values[idx(2, 2, 5)] = 800.0;
+        acc_values[idx(3, 2, 5)] = 900.0;
+        acc_values[idx(4, 2, 5)] = 1000.0;
 
         let flow_dir = make_flow_tile(5, 5, &fd_values);
         let accumulation = make_acc_tile(5, 5, &acc_values);
@@ -467,11 +471,11 @@ mod tests {
             0, 0, 4, 0, 0,
         ];
         let mut acc_values = [f32::NAN; 25];
-        acc_values[0 * 5 + 2] = 100.0;
-        acc_values[1 * 5 + 2] = 200.0;
-        acc_values[2 * 5 + 2] = 300.0;
-        acc_values[3 * 5 + 2] = 400.0;
-        acc_values[4 * 5 + 2] = 600.0;
+        acc_values[idx(0, 2, 5)] = 100.0;
+        acc_values[idx(1, 2, 5)] = 200.0;
+        acc_values[idx(2, 2, 5)] = 300.0;
+        acc_values[idx(3, 2, 5)] = 400.0;
+        acc_values[idx(4, 2, 5)] = 600.0;
 
         let flow_dir = make_flow_tile(5, 5, &fd_values);
         let accumulation = make_acc_tile(5, 5, &acc_values);
@@ -522,7 +526,7 @@ mod tests {
         // 3x3, all flow_dir = 0 (nodata), acc: center = 900, rest NaN
         let fd_values = [0u8; 9];
         let mut acc_values = [f32::NAN; 9];
-        acc_values[1 * 3 + 1] = 900.0;
+        acc_values[idx(1, 1, 3)] = 900.0;
 
         let flow_dir = make_flow_tile(3, 3, &fd_values);
         let accumulation = make_acc_tile(3, 3, &acc_values);
@@ -563,7 +567,7 @@ mod tests {
             128,  64,  32,
         ];
         let mut acc_values = [1.0_f32; 9];
-        acc_values[1 * 3 + 1] = 900.0;
+        acc_values[idx(1, 1, 3)] = 900.0;
 
         let flow_dir = make_flow_tile(3, 3, &fd_values);
         let accumulation = make_acc_tile(3, 3, &acc_values);
@@ -605,11 +609,11 @@ mod tests {
             0, 0, 4, 0, 0,
         ];
         let mut acc_values = [f32::NAN; 25];
-        acc_values[0 * 5 + 2] = 1000.0;
-        acc_values[1 * 5 + 2] = 900.0;
-        acc_values[2 * 5 + 2] = 800.0;
-        acc_values[3 * 5 + 2] = 700.0;
-        acc_values[4 * 5 + 2] = 600.0;
+        acc_values[idx(0, 2, 5)] = 1000.0;
+        acc_values[idx(1, 2, 5)] = 900.0;
+        acc_values[idx(2, 2, 5)] = 800.0;
+        acc_values[idx(3, 2, 5)] = 700.0;
+        acc_values[idx(4, 2, 5)] = 600.0;
 
         let flow_dir = make_flow_tile(5, 5, &fd_values);
         let accumulation = make_acc_tile(5, 5, &acc_values);
@@ -639,8 +643,8 @@ mod tests {
             0,  0,  0,
         ];
         let mut acc_values = [f32::NAN; 9];
-        acc_values[1 * 3 + 0] = 600.0;
-        acc_values[1 * 3 + 2] = 800.0;
+        acc_values[idx(1, 0, 3)] = 600.0;
+        acc_values[idx(1, 2, 3)] = 800.0;
 
         let flow_dir = make_flow_tile(3, 3, &fd_values);
         let accumulation = make_acc_tile(3, 3, &acc_values);
@@ -691,7 +695,7 @@ mod tests {
             2, 3, 4,  // NE, N, NW
         ];
         let mut acc_values = [1.0_f32; 9];
-        acc_values[1 * 3 + 1] = 900.0;
+        acc_values[idx(1, 1, 3)] = 900.0;
 
         let geo = simple_geo();
         let flow_dir = make_flow_tile_with(3, 3, &fd_values, geo, FlowDirEncoding::Taudem);
@@ -721,7 +725,7 @@ mod tests {
             128,  64,  32,
         ];
         let mut acc_values = [1.0_f32; 9];
-        acc_values[1 * 3 + 1] = 900.0;
+        acc_values[idx(1, 1, 3)] = 900.0;
 
         let geo = GeoTransform::new(GeoCoord::new(10.0, 50.0), 0.001, -0.001);
         let flow_dir = make_flow_tile_with(3, 3, &fd_values, geo, FlowDirEncoding::Esri);
@@ -778,13 +782,13 @@ mod tests {
                0,  0,  4,  0,  0,
         ];
         let mut acc_values = [f32::NAN; 25];
-        acc_values[0 * 5 + 0] = 1.0;
-        acc_values[0 * 5 + 4] = 1.0;
-        acc_values[1 * 5 + 1] = 2.0;
-        acc_values[1 * 5 + 3] = 2.0;
-        acc_values[2 * 5 + 2] = 600.0;
-        acc_values[3 * 5 + 2] = 700.0;
-        acc_values[4 * 5 + 2] = 800.0;
+        acc_values[idx(0, 0, 5)] = 1.0;
+        acc_values[idx(0, 4, 5)] = 1.0;
+        acc_values[idx(1, 1, 5)] = 2.0;
+        acc_values[idx(1, 3, 5)] = 2.0;
+        acc_values[idx(2, 2, 5)] = 600.0;
+        acc_values[idx(3, 2, 5)] = 700.0;
+        acc_values[idx(4, 2, 5)] = 800.0;
 
         let flow_dir = make_flow_tile(5, 5, &fd_values);
         let accumulation = make_acc_tile(5, 5, &acc_values);
@@ -834,7 +838,7 @@ mod tests {
     fn outlet_outside_tile() {
         let fd_values = [4u8; 9];
         let mut acc_values = [f32::NAN; 9];
-        acc_values[1 * 3 + 1] = 900.0;
+        acc_values[idx(1, 1, 3)] = 900.0;
 
         let flow_dir = make_flow_tile(3, 3, &fd_values);
         let accumulation = make_acc_tile(3, 3, &acc_values);
@@ -857,7 +861,7 @@ mod tests {
         // Terminal polygon covers only top-left 2x2: [0,2] x [0,-2]
         let fd_values = [4u8; 9];
         let mut acc_values = [f32::NAN; 9];
-        acc_values[2 * 3 + 2] = 800.0;
+        acc_values[idx(2, 2, 3)] = 800.0;
 
         let flow_dir = make_flow_tile(3, 3, &fd_values);
         let accumulation = make_acc_tile(3, 3, &acc_values);
@@ -955,7 +959,7 @@ mod tests {
             128,  64,  32,
         ];
         let mut acc_values = [1.0_f32; 9];
-        acc_values[1 * 3 + 1] = 900.0;
+        acc_values[idx(1, 1, 3)] = 900.0;
 
         let flow_dir_direct = make_flow_tile(3, 3, &fd_values);
         let accumulation_direct = make_acc_tile(3, 3, &acc_values);
@@ -1092,7 +1096,7 @@ mod tests {
             128,  64,  32,
         ];
         let mut acc_values = [1.0_f32; 9];
-        acc_values[1 * 3 + 1] = 900.0;
+        acc_values[idx(1, 1, 3)] = 900.0;
 
         struct BboxCapturingSource {
             flow_dir: FlowDirectionTile<Raw>,

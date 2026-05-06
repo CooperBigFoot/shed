@@ -145,7 +145,7 @@ fn write_catchments(root: &Path, specs: &[CatchmentSpec]) {
     ]));
 
     let props = WriterProperties::builder()
-        .set_max_row_group_size(8192)
+        .set_max_row_group_row_count(Some(8192))
         .set_statistics_enabled(EnabledStatistics::Chunk)
         .build();
 
@@ -172,7 +172,7 @@ fn write_catchments(root: &Path, specs: &[CatchmentSpec]) {
         miny_b.append_value(miny as f32);
         maxx_b.append_value(maxx as f32);
         maxy_b.append_value(maxy as f32);
-        geom_b.append_value(&wkb_polygon(minx, miny, maxx, maxy));
+        geom_b.append_value(wkb_polygon(minx, miny, maxx, maxy));
     }
 
     let batch = RecordBatch::try_new(
@@ -219,7 +219,7 @@ fn write_snap(root: &Path, specs: &[SnapSpec<'_>]) {
     ]));
 
     let props = WriterProperties::builder()
-        .set_max_row_group_size(8192)
+        .set_max_row_group_row_count(Some(8192))
         .set_statistics_enabled(EnabledStatistics::Chunk)
         .build();
 
@@ -249,14 +249,14 @@ fn write_snap(root: &Path, specs: &[SnapSpec<'_>]) {
                 miny_b.append_value(*y as f32 - eps);
                 maxx_b.append_value(*x as f32 + eps);
                 maxy_b.append_value(*y as f32 + eps);
-                geom_b.append_value(&wkb_point(*x, *y));
+                geom_b.append_value(wkb_point(*x, *y));
             }
             SnapGeom::Line(x1, y1, x2, y2) => {
                 minx_b.append_value(x1.min(*x2) as f32);
                 miny_b.append_value(y1.min(*y2) as f32);
                 maxx_b.append_value(x1.max(*x2) as f32);
                 maxy_b.append_value(y1.max(*y2) as f32);
-                geom_b.append_value(&wkb_linestring(*x1, *y1, *x2, *y2));
+                geom_b.append_value(wkb_linestring(*x1, *y1, *x2, *y2));
             }
         }
     }

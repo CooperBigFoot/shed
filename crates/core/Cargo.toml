@@ -33,6 +33,7 @@ test-fixtures = []
 
 [dev-dependencies]
 tempfile = "3"
+tracing-core = "0.1"
 
 [[example]]
 name = "bench_delineation"

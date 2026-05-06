@@ -165,6 +165,10 @@ mod tests {
         GeoTransform::new(GeoCoord::new(0.0, 0.0), 1.0, -1.0)
     }
 
+    fn idx(row: usize, col: usize, width: usize) -> usize {
+        row * width + col
+    }
+
     #[test]
     fn small_triangle() {
         // Triangle with vertices at (0,0), (3,0), (0,-2) in geo coords.
@@ -179,15 +183,15 @@ mod tests {
         let mask = rasterize_polygon(&poly, &geo, GridDims::new(4, 4));
 
         // Row 0 (y=-0.5): scanline intersects x in [0, 2.25) → cols 0,1
-        assert!(mask[0 * 4 + 0], "row=0, col=0 should be filled");
-        assert!(mask[0 * 4 + 1], "row=0, col=1 should be filled");
+        assert!(mask[idx(0, 0, 4)], "row=0, col=0 should be filled");
+        assert!(mask[idx(0, 1, 4)], "row=0, col=1 should be filled");
         // Row 1 (y=-1.5): scanline intersects x in [0, 1.5) → col 0 only (ceil(0)..ceil(1.5) = 0..2)
-        assert!(mask[1 * 4 + 0], "row=1, col=0 should be filled");
+        assert!(mask[idx(1, 0, 4)], "row=1, col=0 should be filled");
         // Col 3 should never be filled
-        assert!(!mask[0 * 4 + 3], "row=0, col=3 should not be filled");
-        assert!(!mask[1 * 4 + 3], "row=1, col=3 should not be filled");
+        assert!(!mask[idx(0, 3, 4)], "row=0, col=3 should not be filled");
+        assert!(!mask[idx(1, 3, 4)], "row=1, col=3 should not be filled");
         // Row 3 is outside the triangle
-        assert!(!mask[3 * 4 + 0], "row=3, col=0 should not be filled");
+        assert!(!mask[idx(3, 0, 4)], "row=3, col=0 should not be filled");
     }
 
     #[test]
@@ -236,14 +240,14 @@ mod tests {
         // Rows 0 and 1, cols 0 and 1 should be filled.
         for r in 0..2usize {
             for c in 0..2usize {
-                assert!(mask[r * 3 + c], "row={r}, col={c} should be filled");
+                assert!(mask[idx(r, c, 3)], "row={r}, col={c} should be filled");
             }
             // Col 2 should not be filled.
-            assert!(!mask[r * 3 + 2], "row={r}, col=2 should not be filled");
+            assert!(!mask[idx(r, 2, 3)], "row={r}, col=2 should not be filled");
         }
         // Row 2 should not be filled.
         for c in 0..3usize {
-            assert!(!mask[2 * 3 + c], "row=2, col={c} should not be filled");
+            assert!(!mask[idx(2, c, 3)], "row=2, col={c} should not be filled");
         }
     }
 
@@ -260,7 +264,7 @@ mod tests {
         ];
         let mask = rasterize_polygon(&poly, &geo, GridDims::new(3, 3));
 
-        assert!(mask[1 * 3 + 1], "center pixel (1,1) should be filled");
+        assert!(mask[idx(1, 1, 3)], "center pixel (1,1) should be filled");
         let filled_count = mask.iter().filter(|&&v| v).count();
         assert_eq!(filled_count, 1, "exactly one pixel should be filled");
     }
@@ -287,25 +291,28 @@ mod tests {
 
         // Vertical bar: rows 0-1, col 0
         assert!(
-            mask[0 * 4 + 0],
+            mask[idx(0, 0, 4)],
             "row=0, col=0 should be filled (vertical bar)"
         );
         assert!(
-            mask[1 * 4 + 0],
+            mask[idx(1, 0, 4)],
             "row=1, col=0 should be filled (vertical bar)"
         );
         // Horizontal bar: rows 2-3, cols 0-2
         for r in 2..4usize {
             for c in 0..3usize {
-                assert!(mask[r * 4 + c], "row={r}, col={c} should be filled (L bar)");
+                assert!(
+                    mask[idx(r, c, 4)],
+                    "row={r}, col={c} should be filled (L bar)"
+                );
             }
             // Col 3 outside the L
-            assert!(!mask[r * 4 + 3], "row={r}, col=3 should not be filled");
+            assert!(!mask[idx(r, 3, 4)], "row={r}, col=3 should not be filled");
         }
         // Rows 0-1, cols 1-3 outside the vertical bar
         for r in 0..2usize {
             for c in 1..4usize {
-                assert!(!mask[r * 4 + c], "row={r}, col={c} should not be filled");
+                assert!(!mask[idx(r, c, 4)], "row={r}, col={c} should not be filled");
             }
         }
     }
@@ -356,19 +363,22 @@ mod tests {
         for r in 1..3usize {
             for c in 1..3usize {
                 assert!(
-                    !mask[r * 4 + c],
+                    !mask[idx(r, c, 4)],
                     "hole pixel row={r}, col={c} should be false"
                 );
             }
         }
         // Corner pixels (row 0 / row 3, cols all; rows 1-2 col 0 / col 3) must be true.
         for c in 0..4usize {
-            assert!(mask[0 * 4 + c], "top row pixel col={c} should be true");
-            assert!(mask[3 * 4 + c], "bottom row pixel col={c} should be true");
+            assert!(mask[idx(0, c, 4)], "top row pixel col={c} should be true");
+            assert!(
+                mask[idx(3, c, 4)],
+                "bottom row pixel col={c} should be true"
+            );
         }
         for r in 1..3usize {
-            assert!(mask[r * 4 + 0], "left col pixel row={r} should be true");
-            assert!(mask[r * 4 + 3], "right col pixel row={r} should be true");
+            assert!(mask[idx(r, 0, 4)], "left col pixel row={r} should be true");
+            assert!(mask[idx(r, 3, 4)], "right col pixel row={r} should be true");
         }
     }
 
@@ -401,8 +411,8 @@ mod tests {
         let mp = MultiPolygon::new(vec![p1, p2]);
         let mask = rasterize_multi_polygon(&mp, &geo, GridDims::new(4, 4));
 
-        assert!(mask[0 * 4 + 0], "component 1 pixel (0,0) should be true");
-        assert!(mask[3 * 4 + 3], "component 2 pixel (3,3) should be true");
+        assert!(mask[idx(0, 0, 4)], "component 1 pixel (0,0) should be true");
+        assert!(mask[idx(3, 3, 4)], "component 2 pixel (3,3) should be true");
 
         // All other pixels should be false.
         let filled: Vec<usize> = mask
@@ -453,14 +463,14 @@ mod tests {
         for r in 1..3usize {
             for c in 1..3usize {
                 assert!(
-                    !mask[r * 6 + c],
+                    !mask[idx(r, c, 6)],
                     "hole pixel row={r}, col={c} should be false"
                 );
             }
         }
         // Extra component pixel (row=0, col=5) must be true.
         assert!(
-            mask[0 * 6 + 5],
+            mask[idx(0, 5, 6)],
             "extra component pixel (0,5) should be true"
         );
     }

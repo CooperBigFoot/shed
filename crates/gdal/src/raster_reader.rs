@@ -485,11 +485,12 @@ mod tests {
         dataset
             .set_geo_transform(&[0.0, 1.0, 0.0, 2.0, 0.0, -1.0])
             .expect("geo transform should be set");
-        let mut band = dataset.rasterband(1).expect("band should exist");
-        let mut buffer = Buffer::new((2, 2), vec![1_u8, 2, 4, 8]);
-        band.write((0, 0), (2, 2), &mut buffer)
-            .expect("raster data should be written");
-        drop(band);
+        {
+            let mut band = dataset.rasterband(1).expect("band should exist");
+            let mut buffer = Buffer::new((2, 2), vec![1_u8, 2, 4, 8]);
+            band.write((0, 0), (2, 2), &mut buffer)
+                .expect("raster data should be written");
+        }
         drop(dataset);
 
         let src = GdalRasterSource::new();

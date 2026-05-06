@@ -706,7 +706,7 @@ mod tests {
 
         assert!(result.area_km2().as_f64() > 0.0, "area must be positive");
         assert!(
-            result.geometry().0.len() >= 1,
+            !result.geometry().0.is_empty(),
             "geometry must have at least one polygon"
         );
         assert_eq!(
@@ -715,7 +715,7 @@ mod tests {
             "no rasters registered → NoRastersAvailable"
         );
         assert!(
-            result.upstream_atom_ids().len() >= 1,
+            !result.upstream_atom_ids().is_empty(),
             "at least one atom in upstream"
         );
     }
@@ -772,7 +772,7 @@ mod tests {
             result.upstream_atom_ids().len() == 1,
             "headwater has exactly 1 atom"
         );
-        assert!(result.geometry().0.len() >= 1, "geometry is non-empty");
+        assert!(!result.geometry().0.is_empty(), "geometry is non-empty");
         assert!(result.area_km2().as_f64() > 0.0, "area is positive");
     }
 

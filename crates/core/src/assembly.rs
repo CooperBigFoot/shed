@@ -707,7 +707,7 @@ mod tests {
         ]));
 
         let props = WriterProperties::builder()
-            .set_max_row_group_size(1024)
+            .set_max_row_group_row_count(Some(1024))
             .set_statistics_enabled(EnabledStatistics::Chunk)
             .build();
 
