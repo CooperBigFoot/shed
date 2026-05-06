@@ -1,8 +1,11 @@
 //! Dataset session — loads an HFX dataset for repeated queries.
 
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use bytes::BytesMut;
+use futures_util::StreamExt;
 use geo::Rect;
 use hfx_core::{AtomId, DrainageGraph, Manifest, RasterAvailability, SnapAvailability, Topology};
 use object_store::path::Path as ObjectPath;
@@ -10,16 +13,18 @@ use object_store::{ObjectStore, ObjectStoreExt};
 use tracing::{debug, info, instrument};
 use url::Url;
 
-use crate::cache::RemoteArtifactCache;
+use crate::cache::{ArtifactMeta, RemoteArtifactCache, ValidationSidecar};
 use crate::cog::{LocalizedRasterWindow, RasterWindowRequest};
 use crate::error::SessionError;
-use crate::parquet_cache::ParquetRowGroupCache;
+use crate::parquet_cache::{
+    DEFAULT_PARQUET_CACHE_MAX_BYTES, ParquetFooterCache, ParquetRowGroupCache,
+};
 use crate::raster_cache::RemoteRasterCache;
 use crate::reader;
 use crate::reader::catchment_store::CatchmentStore;
 use crate::reader::snap_store::SnapStore;
 use crate::runtime::RT;
-use crate::source::DatasetSource;
+use crate::source::{DatasetSource, shed_get_ranges_concurrency};
 use crate::source_telemetry::{HttpStatsHandle, HttpStatsSnapshot};
 use crate::telemetry::{Stage, StageGuard, record_bytes, record_path};
 
@@ -101,6 +106,9 @@ pub struct DatasetSession {
     /// Stored here for future `engine.cache_stats()` exposure (deferred to v2).
     #[allow(dead_code)]
     parquet_cache: Option<Arc<ParquetRowGroupCache>>,
+    /// Optional Parquet footer cache shared across catchment and snap readers.
+    #[allow(dead_code)]
+    footer_cache: Option<Arc<ParquetFooterCache>>,
 }
 
 impl DatasetSession {
@@ -117,7 +125,15 @@ impl DatasetSession {
     /// | Local session errors | Propagated from [`DatasetSession::open_path`] |
     #[instrument(skip_all, fields(input = %input))]
     pub fn open(input: &str) -> Result<Self, SessionError> {
-        Self::open_with_cache(input, None)
+        match DatasetSource::parse(input)? {
+            DatasetSource::Local(root) => Self::open_path(&root),
+            DatasetSource::Remote {
+                store,
+                http_stats,
+                root,
+                url,
+            } => Self::open_remote_with_default_caches(store, &root, &url, http_stats),
+        }
     }
 
     /// Open an HFX dataset source with an optional Parquet column-chunk cache.
@@ -137,6 +153,27 @@ impl DatasetSession {
         input: &str,
         cache: Option<Arc<ParquetRowGroupCache>>,
     ) -> Result<Self, SessionError> {
+        Self::open_with_caches(input, cache, None)
+    }
+
+    /// Open an HFX dataset source with optional Parquet row-group and footer caches.
+    ///
+    /// Behaves identically to [`DatasetSession::open`] when both caches are `None`.
+    /// When caches are supplied, remote parquet readers use the shared
+    /// [`crate::parquet_cache::CachingReader`].
+    ///
+    /// # Errors
+    ///
+    /// | Variant | Condition |
+    /// |---|---|
+    /// | Source parsing errors | The dataset source string is malformed or unsupported |
+    /// | Local session errors | Propagated from [`DatasetSession::open_path`] |
+    #[instrument(skip_all, fields(input = %input))]
+    pub fn open_with_caches(
+        input: &str,
+        row_group_cache: Option<Arc<ParquetRowGroupCache>>,
+        footer_cache: Option<Arc<ParquetFooterCache>>,
+    ) -> Result<Self, SessionError> {
         match DatasetSource::parse(input)? {
             DatasetSource::Local(root) => Self::open_path(&root),
             DatasetSource::Remote {
@@ -144,7 +181,14 @@ impl DatasetSession {
                 http_stats,
                 root,
                 url,
-            } => Self::open_remote_with_stats(store, &root, &url, cache, http_stats),
+            } => Self::open_remote_with_stats(
+                store,
+                &root,
+                &url,
+                row_group_cache,
+                footer_cache,
+                http_stats,
+            ),
         }
     }
 
@@ -262,6 +306,7 @@ impl DatasetSession {
             remote_root: None,
             http_stats: None,
             parquet_cache: None,
+            footer_cache: None,
         })
     }
 
@@ -271,7 +316,18 @@ impl DatasetSession {
         url: &Url,
         parquet_cache: Option<Arc<ParquetRowGroupCache>>,
     ) -> Result<Self, SessionError> {
-        Self::open_remote_with_stats(store, root, url, parquet_cache, None)
+        Self::open_remote_with_stats(store, root, url, parquet_cache, None, None)
+    }
+
+    fn open_remote_with_default_caches(
+        store: Arc<dyn ObjectStore>,
+        root: &ObjectPath,
+        url: &Url,
+        http_stats: Option<HttpStatsHandle>,
+    ) -> Result<Self, SessionError> {
+        let parquet_cache = Some(ParquetRowGroupCache::new(DEFAULT_PARQUET_CACHE_MAX_BYTES));
+        let footer_cache = Some(ParquetFooterCache::new());
+        Self::open_remote_with_stats(store, root, url, parquet_cache, footer_cache, http_stats)
     }
 
     fn open_remote_with_stats(
@@ -279,6 +335,7 @@ impl DatasetSession {
         root: &ObjectPath,
         url: &Url,
         parquet_cache: Option<Arc<ParquetRowGroupCache>>,
+        footer_cache: Option<Arc<ParquetFooterCache>>,
         http_stats: Option<HttpStatsHandle>,
     ) -> Result<Self, SessionError> {
         let session_start = std::time::Instant::now();
@@ -346,43 +403,100 @@ impl DatasetSession {
 
         let fabric_name = manifest.fabric_name().to_string();
         let adapter_version = manifest.adapter_version().to_string();
+        let catchments_id_index_path =
+            cache.id_index_path(&fabric_name, &adapter_version, "catchments.parquet");
+        let snap_id_index_path =
+            cache.id_index_path(&fabric_name, &adapter_version, "snap.parquet");
 
         let catchments_path = remote_artifact_path(root, "catchments.parquet");
-        let catchments = CatchmentStore::open_remote_with_cache(
+        let catchments = CatchmentStore::open_remote_with_caches(
             store.clone(),
             catchments_path.clone(),
             catchments_path.as_ref().to_string(),
             fabric_name.clone(),
             adapter_version.clone(),
             parquet_cache.clone(),
+            footer_cache.clone(),
+            Some(catchments_id_index_path),
         )?;
-        let t = std::time::Instant::now();
-        let catchment_id_set = {
-            let _guard = StageGuard::enter(Stage::ValidateGraphCatchments);
-            validate_graph_catchments(&manifest, &graph, &catchments)?
-        };
-        info!(
-            rows = catchment_id_set.len(),
-            duration_ms = t.elapsed().as_millis(),
-            "indexed catchments"
-        );
 
         let snap = if manifest.snap() == SnapAvailability::Present {
             let snap_path = remote_artifact_path(root, "snap.parquet");
-            Some(SnapStore::open_remote_with_cache(
+            Some(SnapStore::open_remote_with_caches(
                 store.clone(),
                 snap_path.clone(),
                 snap_path.as_ref().to_string(),
                 fabric_name.clone(),
                 adapter_version.clone(),
                 parquet_cache.clone(),
+                footer_cache.clone(),
+                Some(snap_id_index_path),
             )?)
         } else {
             None
         };
-        if let Some(ref snap_store) = snap {
-            let _guard = StageGuard::enter(Stage::ValidateSnapRefs);
-            validate_snap_refs(snap_store, &catchment_id_set)?;
+
+        let catchments_meta = catchments.artifact_meta();
+        let snap_meta = snap.as_ref().and_then(SnapStore::artifact_meta);
+        let validation_hit = validation_sidecar_matches(
+            &cache,
+            &fabric_name,
+            &adapter_version,
+            &catchments_meta,
+            snap_meta.as_ref(),
+        );
+
+        let catchment_id_set = if validation_hit {
+            // Phase-B/Wave-2: keep validation stages free of nested ID-index spans.
+            // A validated sidecar skips membership validation, but the session still
+            // materializes catchment IDs for query-time checks outside validation.
+            debug!(
+                fabric = fabric_name,
+                adapter_version, "remote validation sidecar matched current artifact metadata"
+            );
+            catchments
+                .read_all_ids()?
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+        } else {
+            let t = std::time::Instant::now();
+            let catchment_id_set = {
+                let _guard = StageGuard::enter(Stage::ValidateGraphCatchments);
+                validate_graph_catchments(&manifest, &graph, &catchments)?
+            };
+            info!(
+                rows = catchment_id_set.len(),
+                duration_ms = t.elapsed().as_millis(),
+                "indexed catchments"
+            );
+            if let Some(ref snap_store) = snap {
+                let _guard = StageGuard::enter(Stage::ValidateSnapRefs);
+                validate_snap_refs(snap_store, &catchment_id_set)?;
+            }
+            if let Some(sidecar) =
+                validation_sidecar_for_current_metadata(catchments_meta.clone(), snap_meta.clone())
+            {
+                cache.write_validation_sidecar_best_effort(
+                    &fabric_name,
+                    &adapter_version,
+                    &sidecar,
+                );
+            } else {
+                debug!(
+                    fabric = fabric_name,
+                    adapter_version,
+                    "not caching validation sidecar because artifact metadata lacks ETag"
+                );
+            }
+            catchment_id_set
+        };
+
+        if validation_hit {
+            debug!(
+                catchment_ids = catchment_id_set.len(),
+                "skipped remote referential validation"
+            );
         }
 
         let raster_paths = if matches!(manifest.rasters(), RasterAvailability::Present(_)) {
@@ -415,6 +529,7 @@ impl DatasetSession {
             remote_root: Some(root.clone()),
             http_stats,
             parquet_cache,
+            footer_cache,
         })
     }
 
@@ -530,6 +645,8 @@ fn remote_artifact_url_string(url: &Url, artifact: &'static str) -> String {
     format!("{}/{}", url.as_str().trim_end_matches('/'), artifact)
 }
 
+const RANGE_GET_CHUNK_TARGET_BYTES: u64 = 4 * 1024 * 1024;
+
 fn validate_graph_catchments(
     manifest: &Manifest,
     graph: &DrainageGraph,
@@ -612,6 +729,36 @@ fn read_remote_artifact(
 ) -> Result<bytes::Bytes, SessionError> {
     let path_display = path.as_ref().to_string();
     RT.block_on(async {
+        let meta = store.head(&path).await.map_err(|source| {
+            SessionError::remote_artifact_read(artifact, &path_display, source)
+        })?;
+
+        if meta.size > RANGE_GET_CHUNK_TARGET_BYTES {
+            let concurrency = shed_get_ranges_concurrency();
+            let ranges = remote_artifact_ranges(meta.size, concurrency);
+            let chunks = futures_util::stream::iter(
+                ranges
+                    .into_iter()
+                    .map(|range| store.get_range(&path, range)),
+            )
+            .buffered(concurrency)
+            .collect::<Vec<_>>()
+            .await;
+            let capacity = usize::try_from(meta.size).map_err(|_| {
+                SessionError::integrity(format!(
+                    "remote artifact {artifact} at {path_display} is too large to buffer"
+                ))
+            })?;
+            let mut bytes = BytesMut::with_capacity(capacity);
+            for chunk in chunks {
+                let chunk = chunk.map_err(|source| {
+                    SessionError::remote_artifact_read(artifact, &path_display, source)
+                })?;
+                bytes.extend_from_slice(&chunk);
+            }
+            return Ok(bytes.freeze());
+        }
+
         let result = store.get(&path).await.map_err(|source| {
             SessionError::remote_artifact_read(artifact, &path_display, source)
         })?;
@@ -623,11 +770,52 @@ fn read_remote_artifact(
     })
 }
 
+fn remote_artifact_ranges(size: u64, concurrency: usize) -> Vec<Range<u64>> {
+    let chunk_count = size.div_ceil(RANGE_GET_CHUNK_TARGET_BYTES);
+    let range_count = chunk_count.min(concurrency as u64).max(1);
+    let range_size = size.div_ceil(range_count);
+    (0..range_count)
+        .map(|index| {
+            let start = index * range_size;
+            let end = ((index + 1) * range_size).min(size);
+            start..end
+        })
+        .collect()
+}
+
+fn validation_sidecar_matches(
+    cache: &RemoteArtifactCache,
+    fabric_name: &str,
+    adapter_version: &str,
+    catchments: &Option<ArtifactMeta>,
+    snap: Option<&ArtifactMeta>,
+) -> bool {
+    let Some(catchments) = catchments.as_ref() else {
+        return false;
+    };
+    cache
+        .read_validation_sidecar(fabric_name, adapter_version)
+        .is_some_and(|sidecar| sidecar.matches(catchments, snap))
+}
+
+fn validation_sidecar_for_current_metadata(
+    catchments: Option<ArtifactMeta>,
+    snap: Option<ArtifactMeta>,
+) -> Option<ValidationSidecar> {
+    catchments.map(|catchments| ValidationSidecar::current(catchments, snap))
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::ffi::OsString;
+    use std::fmt;
+    use std::future::Future;
     use std::io::Cursor;
+    use std::ops::Range;
     use std::path::Path;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, MutexGuard};
 
     use arrow::array::{
@@ -636,18 +824,122 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::ipc::writer::FileWriter;
     use arrow::record_batch::RecordBatch;
+    use bytes::Bytes;
+    use futures_util::stream::BoxStream;
     use object_store::memory::InMemory;
     use object_store::path::Path as ObjectPath;
-    use object_store::{ObjectStoreExt, PutPayload};
+    use object_store::{
+        CopyOptions, GetOptions, GetRange, GetResult, ListResult, MultipartUpload, ObjectMeta,
+        ObjectStore, ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult,
+        Result,
+    };
     use parquet::arrow::ArrowWriter;
+    use tracing::field::{Field as TracingField, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Metadata, Subscriber};
+    use tracing_core::span::Current;
     use url::Url;
 
-    use super::DatasetSession;
+    use super::{DatasetSession, read_remote_artifact, remote_artifact_ranges};
     use crate::error::SessionError;
+    use crate::parquet_cache::{ParquetFooterCache, ParquetRowGroupCache};
     use crate::runtime::RT;
+    use crate::testutil::DatasetBuilder;
     use hfx_core::{BoundingBox, SnapId};
 
     static CACHE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[derive(Debug, Default)]
+    struct StageNestingState {
+        next_id: u64,
+        stages_by_id: HashMap<u64, String>,
+        stack: Vec<u64>,
+        nested_index_in_validation: Vec<(String, String)>,
+    }
+
+    #[derive(Debug, Clone, Default)]
+    struct StageNestingSubscriber {
+        state: Arc<Mutex<StageNestingState>>,
+    }
+
+    struct StageFieldVisitor {
+        stage: Option<String>,
+    }
+
+    impl Visit for StageFieldVisitor {
+        fn record_str(&mut self, field: &TracingField, value: &str) {
+            if field.name() == "stage" {
+                self.stage = Some(value.to_owned());
+            }
+        }
+
+        fn record_debug(&mut self, field: &TracingField, value: &dyn fmt::Debug) {
+            if field.name() == "stage" {
+                self.stage = Some(format!("{value:?}"));
+            }
+        }
+    }
+
+    impl Subscriber for StageNestingSubscriber {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, span: &Attributes<'_>) -> Id {
+            let mut visitor = StageFieldVisitor { stage: None };
+            span.record(&mut visitor);
+
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.next_id += 1;
+            let id = state.next_id;
+            if let Some(stage) = visitor.stage {
+                if matches!(stage.as_str(), "catchment_id_index" | "snap_id_index") {
+                    let mut nested = Vec::new();
+                    for parent_id in &state.stack {
+                        if let Some(parent_stage) = state.stages_by_id.get(parent_id)
+                            && matches!(
+                                parent_stage.as_str(),
+                                "validate_graph_catchments" | "validate_snap_refs"
+                            )
+                        {
+                            nested.push((parent_stage.clone(), stage.clone()));
+                        }
+                    }
+                    state.nested_index_in_validation.extend(nested);
+                }
+                state.stages_by_id.insert(id, stage);
+            }
+            Id::from_u64(id)
+        }
+
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+        fn event(&self, _event: &Event<'_>) {}
+
+        fn enter(&self, span: &Id) {
+            self.state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .stack
+                .push(span.into_u64());
+        }
+
+        fn exit(&self, span: &Id) {
+            let popped = self
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .stack
+                .pop();
+            assert_eq!(popped, Some(span.into_u64()));
+        }
+
+        fn current_span(&self) -> Current {
+            Current::none()
+        }
+    }
 
     struct CacheEnv {
         _guard: MutexGuard<'static, ()>,
@@ -680,6 +972,178 @@ mod tests {
                     None => std::env::remove_var("HFX_CACHE_DIR"),
                 }
             }
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct StoreCounters {
+        head_calls: AtomicUsize,
+        full_get_calls: AtomicUsize,
+        ranged_get_calls: AtomicUsize,
+        get_ranges_calls: AtomicUsize,
+        last_ranges: Mutex<Vec<Range<u64>>>,
+    }
+
+    #[derive(Debug)]
+    struct CountingStore {
+        inner: Arc<dyn ObjectStore>,
+        counters: Arc<StoreCounters>,
+    }
+
+    impl CountingStore {
+        fn new(inner: Arc<dyn ObjectStore>) -> Self {
+            Self {
+                inner,
+                counters: Arc::new(StoreCounters::default()),
+            }
+        }
+
+        fn head_calls(&self) -> usize {
+            self.counters.head_calls.load(Ordering::SeqCst)
+        }
+
+        fn full_get_calls(&self) -> usize {
+            self.counters.full_get_calls.load(Ordering::SeqCst)
+        }
+
+        fn ranged_get_calls(&self) -> usize {
+            self.counters.ranged_get_calls.load(Ordering::SeqCst)
+        }
+
+        fn get_ranges_calls(&self) -> usize {
+            self.counters.get_ranges_calls.load(Ordering::SeqCst)
+        }
+
+        fn last_ranges(&self) -> Vec<Range<u64>> {
+            self.counters
+                .last_ranges
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        }
+    }
+
+    impl fmt::Display for CountingStore {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "CountingStore({})", self.inner)
+        }
+    }
+
+    impl ObjectStore for CountingStore {
+        fn put_opts<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            location: &'life1 ObjectPath,
+            payload: PutPayload,
+            opts: PutOptions,
+        ) -> Pin<Box<dyn Future<Output = Result<PutResult>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move { self.inner.put_opts(location, payload, opts).await })
+        }
+
+        fn put_multipart_opts<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            location: &'life1 ObjectPath,
+            opts: PutMultipartOptions,
+        ) -> Pin<Box<dyn Future<Output = Result<Box<dyn MultipartUpload>>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move { self.inner.put_multipart_opts(location, opts).await })
+        }
+
+        fn get_opts<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            location: &'life1 ObjectPath,
+            options: GetOptions,
+        ) -> Pin<Box<dyn Future<Output = Result<GetResult>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            if options.head {
+                self.counters.head_calls.fetch_add(1, Ordering::SeqCst);
+            } else if let Some(range) = &options.range {
+                self.counters
+                    .ranged_get_calls
+                    .fetch_add(1, Ordering::SeqCst);
+                if let GetRange::Bounded(range) = range {
+                    self.counters
+                        .last_ranges
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(range.clone());
+                }
+            } else {
+                self.counters.full_get_calls.fetch_add(1, Ordering::SeqCst);
+            }
+            Box::pin(async move { self.inner.get_opts(location, options).await })
+        }
+
+        fn get_ranges<'life0, 'life1, 'life2, 'async_trait>(
+            &'life0 self,
+            location: &'life1 ObjectPath,
+            ranges: &'life2 [Range<u64>],
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<Bytes>>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            'life2: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.counters
+                .get_ranges_calls
+                .fetch_add(1, Ordering::SeqCst);
+            *self
+                .counters
+                .last_ranges
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = ranges.to_vec();
+            Box::pin(async move { self.inner.get_ranges(location, ranges).await })
+        }
+
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, Result<ObjectPath>>,
+        ) -> BoxStream<'static, Result<ObjectPath>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(&self, prefix: Option<&ObjectPath>) -> BoxStream<'static, Result<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        fn list_with_delimiter<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            prefix: Option<&'life1 ObjectPath>,
+        ) -> Pin<Box<dyn Future<Output = Result<ListResult>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move { self.inner.list_with_delimiter(prefix).await })
+        }
+
+        fn copy_opts<'life0, 'life1, 'life2, 'async_trait>(
+            &'life0 self,
+            from: &'life1 ObjectPath,
+            to: &'life2 ObjectPath,
+            options: CopyOptions,
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            'life2: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move { self.inner.copy_opts(from, to, options).await })
         }
     }
 
@@ -870,6 +1334,67 @@ mod tests {
         writer.into_inner().unwrap().into_inner()
     }
 
+    #[test]
+    fn remote_artifact_ranges_cover_object_with_configured_parallelism() {
+        let ranges = remote_artifact_ranges(10 * 1024 * 1024, 2);
+
+        assert_eq!(ranges, vec![0..5_242_880, 5_242_880..10_485_760]);
+    }
+
+    #[test]
+    fn read_remote_artifact_uses_single_get_for_small_objects() {
+        let path = ObjectPath::from("dataset/root/manifest.json");
+        let base_store = Arc::new(InMemory::new());
+        let payload = b"{\"format_version\":\"0.1\"}".to_vec();
+        RT.block_on(async {
+            base_store
+                .put(&path, PutPayload::from(payload.clone()))
+                .await
+                .unwrap();
+        });
+        let counting_store = CountingStore::new(base_store);
+
+        let bytes = read_remote_artifact(&counting_store, path, "manifest.json").unwrap();
+
+        assert_eq!(bytes.as_ref(), payload.as_slice());
+        assert_eq!(counting_store.head_calls(), 1);
+        assert_eq!(counting_store.full_get_calls(), 1);
+        assert_eq!(counting_store.ranged_get_calls(), 0);
+        assert_eq!(counting_store.get_ranges_calls(), 0);
+    }
+
+    #[test]
+    fn read_remote_artifact_uses_ranges_for_large_objects() {
+        let path = ObjectPath::from("dataset/root/graph.arrow");
+        let base_store = Arc::new(InMemory::new());
+        let payload = (0..10 * 1024 * 1024)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        RT.block_on(async {
+            base_store
+                .put(&path, PutPayload::from(payload.clone()))
+                .await
+                .unwrap();
+        });
+        let counting_store = CountingStore::new(base_store);
+
+        let bytes = read_remote_artifact(&counting_store, path, "graph.arrow").unwrap();
+
+        assert_eq!(bytes.as_ref(), payload.as_slice());
+        assert_eq!(counting_store.head_calls(), 1);
+        assert_eq!(counting_store.full_get_calls(), 0);
+        assert_eq!(counting_store.get_ranges_calls(), 0);
+        assert!(counting_store.ranged_get_calls() > 1);
+        let ranges = counting_store.last_ranges();
+        assert!(ranges.len() > 1);
+        assert!(ranges.len() <= 16);
+        assert_eq!(ranges.first().unwrap().start, 0);
+        assert_eq!(ranges.last().unwrap().end, payload.len() as u64);
+        for pair in ranges.windows(2) {
+            assert_eq!(pair[0].end, pair[1].start);
+        }
+    }
+
     fn put_remote_manifest_and_graph(store: &Arc<InMemory>, root: &ObjectPath, snap: bool) {
         put_remote_manifest_graph_with_rasters(store, root, snap, false);
     }
@@ -929,6 +1454,98 @@ mod tests {
                 .join("graph.arrow")
                 .is_file()
         );
+        assert!(
+            cache_dir
+                .path()
+                .join("testfabric")
+                .join("test-v1")
+                .join("catchments.idindex.arrow")
+                .is_file()
+        );
+        assert!(
+            cache_dir
+                .path()
+                .join("testfabric")
+                .join("test-v1")
+                .join("validated.json")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn local_open_does_not_allocate_parquet_caches() {
+        let (_dir, root) = DatasetBuilder::new(2).build();
+        let session = DatasetSession::open(root.to_str().unwrap()).unwrap();
+
+        assert!(session.parquet_cache.is_none());
+        assert!(session.footer_cache.is_none());
+    }
+
+    #[test]
+    fn remote_default_open_enables_parquet_caches() {
+        let cache_dir = tempfile::TempDir::new().unwrap();
+        let _cache_env = CacheEnv::set(cache_dir.path());
+        let store = Arc::new(InMemory::new());
+        let root = ObjectPath::from("dataset/root");
+        put_remote_manifest_and_graph(&store, &root, false);
+        put_remote_catchments(&store, &root);
+        let url = Url::parse("s3://shed-test/dataset/root").unwrap();
+
+        let session =
+            DatasetSession::open_remote_with_default_caches(store, &root, &url, None).unwrap();
+
+        assert!(session.parquet_cache.is_some());
+        assert!(session.footer_cache.is_some());
+    }
+
+    #[test]
+    fn explicit_none_caches_disable_remote_parquet_caches() {
+        let cache_dir = tempfile::TempDir::new().unwrap();
+        let _cache_env = CacheEnv::set(cache_dir.path());
+        let store = Arc::new(InMemory::new());
+        let root = ObjectPath::from("dataset/root");
+        put_remote_manifest_and_graph(&store, &root, false);
+        put_remote_catchments(&store, &root);
+        let url = Url::parse("s3://shed-test/dataset/root").unwrap();
+
+        let session =
+            DatasetSession::open_remote_with_stats(store, &root, &url, None, None, None).unwrap();
+
+        assert!(session.parquet_cache.is_none());
+        assert!(session.footer_cache.is_none());
+    }
+
+    #[test]
+    fn repeated_remote_query_with_cache_avoids_second_range_reads() {
+        let cache_dir = tempfile::TempDir::new().unwrap();
+        let _cache_env = CacheEnv::set(cache_dir.path());
+        let base_store = Arc::new(InMemory::new());
+        let root = ObjectPath::from("dataset/root");
+        put_remote_manifest_and_graph(&base_store, &root, false);
+        put_remote_catchments(&base_store, &root);
+        let counting_store = Arc::new(CountingStore::new(base_store));
+        let object_store = Arc::clone(&counting_store) as Arc<dyn ObjectStore>;
+        let url = Url::parse("s3://shed-test/dataset/root").unwrap();
+        let row_group_cache = Some(ParquetRowGroupCache::new(1024 * 1024));
+        let footer_cache = Some(ParquetFooterCache::new());
+        let session = DatasetSession::open_remote_with_stats(
+            object_store,
+            &root,
+            &url,
+            row_group_cache,
+            footer_cache,
+            None,
+        )
+        .unwrap();
+        let bbox = BoundingBox::new(0.75, 0.0, 1.75, 1.0).unwrap();
+
+        assert_eq!(session.catchments().query_by_bbox(&bbox).unwrap().len(), 1);
+        let ranged_after_first = counting_store.ranged_get_calls();
+        let get_ranges_after_first = counting_store.get_ranges_calls();
+        assert_eq!(session.catchments().query_by_bbox(&bbox).unwrap().len(), 1);
+
+        assert_eq!(counting_store.ranged_get_calls(), ranged_after_first);
+        assert_eq!(counting_store.get_ranges_calls(), get_ranges_after_first);
     }
 
     #[test]
@@ -1044,5 +1661,101 @@ mod tests {
                 .await
                 .unwrap();
         });
+    }
+
+    #[test]
+    fn second_remote_open_uses_persistent_indexes_and_validation_sidecar() {
+        let cache_dir = tempfile::TempDir::new().unwrap();
+        let _cache_env = CacheEnv::set(cache_dir.path());
+        let base_store = Arc::new(InMemory::new());
+        let root = ObjectPath::from("dataset/root");
+        put_remote_manifest_and_graph(&base_store, &root, true);
+        put_remote_catchments(&base_store, &root);
+        RT.block_on(async {
+            base_store
+                .put(
+                    &root.clone().join("snap.parquet"),
+                    PutPayload::from(snap_bytes()),
+                )
+                .await
+                .unwrap();
+        });
+        let counting_store = Arc::new(CountingStore::new(base_store));
+        let object_store = Arc::clone(&counting_store) as Arc<dyn ObjectStore>;
+        let url = Url::parse("s3://shed-test/dataset/root").unwrap();
+
+        DatasetSession::open_remote(object_store.clone(), &root, &url, None).unwrap();
+        let first_ranged_gets = counting_store.ranged_get_calls();
+        assert!(
+            cache_dir
+                .path()
+                .join("testfabric")
+                .join("test-v1")
+                .join("catchments.idindex.arrow")
+                .is_file()
+        );
+        assert!(
+            cache_dir
+                .path()
+                .join("testfabric")
+                .join("test-v1")
+                .join("snap.idindex.arrow")
+                .is_file()
+        );
+        assert!(
+            cache_dir
+                .path()
+                .join("testfabric")
+                .join("test-v1")
+                .join("validated.json")
+                .is_file()
+        );
+
+        DatasetSession::open_remote(object_store, &root, &url, None).unwrap();
+        let second_ranged_gets = counting_store.ranged_get_calls() - first_ranged_gets;
+
+        assert!(
+            second_ranged_gets < first_ranged_gets,
+            "second open should avoid parquet ID scans after persistent index hits"
+        );
+    }
+
+    #[test]
+    fn remote_open_does_not_nest_id_index_stages_inside_validation_stages() {
+        let cache_dir = tempfile::TempDir::new().unwrap();
+        let _cache_env = CacheEnv::set(cache_dir.path());
+        let base_store = Arc::new(InMemory::new());
+        let root = ObjectPath::from("dataset/root");
+        put_remote_manifest_and_graph(&base_store, &root, true);
+        put_remote_catchments(&base_store, &root);
+        RT.block_on(async {
+            base_store
+                .put(
+                    &root.clone().join("snap.parquet"),
+                    PutPayload::from(snap_bytes()),
+                )
+                .await
+                .unwrap();
+        });
+        let url = Url::parse("s3://shed-test/dataset/root").unwrap();
+
+        let subscriber = StageNestingSubscriber::default();
+        let state = subscriber.state.clone();
+        let dispatch = tracing::Dispatch::new(subscriber);
+
+        tracing::dispatcher::with_default(&dispatch, || {
+            DatasetSession::open_remote(base_store.clone(), &root, &url, None).unwrap();
+            DatasetSession::open_remote(base_store, &root, &url, None).unwrap();
+        });
+
+        let nested = state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .nested_index_in_validation
+            .clone();
+        assert!(
+            nested.is_empty(),
+            "ID-index stages must not be nested inside validation stages: {nested:?}"
+        );
     }
 }

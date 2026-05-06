@@ -55,8 +55,9 @@ Engine(
     snap_threshold: int | None = None,
     clean_epsilon: float | None = None,
     refine: bool = True,
-    parquet_cache: bool = False,
-    parquet_cache_max_mb: int = 2048,
+    repair_geometry: Literal["auto", "gdal", "clean"] | Literal[False] | None = "auto",
+    parquet_cache: bool | None = None,
+    parquet_cache_max_mb: int = 512,
 ) -> None
 ```
 
@@ -70,15 +71,16 @@ Opens an HFX dataset and constructs a delineation engine.
 | `snap_threshold` | `int \| None` | `None` | Minimum upstream-pixel count for stream-network snapping |
 | `clean_epsilon` | `float \| None` | `None` | Topology-cleaning epsilon in degrees |
 | `refine` | `bool` | `True` | Whether raster-based terminal refinement is enabled |
-| `parquet_cache` | `bool` | `False` | Enable in-memory Parquet column-chunk cache for repeated delineations on the same dataset |
-| `parquet_cache_max_mb` | `int` | `2048` | Maximum cache size in MiB; must be > 0 when `parquet_cache=True` |
+| `repair_geometry` | `"auto" \| "gdal" \| "clean" \| False \| None` | `"auto"` | Geometry repair mode. `"auto"`, `"clean"`, `False`, and `None` use pure-Rust topology cleaning; `"gdal"` opts into GDAL repair |
+| `parquet_cache` | `bool \| None` | `None` | Enable in-memory Parquet column-chunk cache for repeated delineations. `None` enables caching for remote URLs and disables it for local paths |
+| `parquet_cache_max_mb` | `int` | `512` | Maximum cache size in MiB; must be > 0 when `parquet_cache=True` |
 
 ### Exceptions
 
 - `DatasetError` when the dataset cannot be opened or read.
 - `ValueError` when a configuration argument is invalid, such as an unknown
-  `snap_strategy`, a non-positive `snap_radius`, or `parquet_cache_max_mb=0`
-  when `parquet_cache=True`.
+  `snap_strategy`, unknown `repair_geometry`, a non-positive `snap_radius`, or
+  `parquet_cache_max_mb=0` when `parquet_cache=True`.
 
 ### Methods
 

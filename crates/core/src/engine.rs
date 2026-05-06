@@ -363,6 +363,11 @@ impl Engine {
         }
     }
 
+    /// Return object-store request counters when network benchmarking is enabled.
+    pub fn http_stats(&self) -> Option<crate::source_telemetry::HttpStatsSnapshot> {
+        self.session.http_stats()
+    }
+
     /// Delineate the watershed upstream of `outlet`.
     ///
     /// # Errors

@@ -12,7 +12,7 @@ use arrow::array::{BinaryBuilder, Float32Builder, Int64Builder, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use bytes::Bytes;
 use futures_util::stream::BoxStream;
-use hfx_core::AtomId;
+use hfx_core::{AtomId, BoundingBox};
 use object_store::memory::InMemory;
 use object_store::path::Path as ObjectPath;
 use object_store::{
@@ -22,6 +22,7 @@ use object_store::{
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::{EnabledStatistics, WriterProperties};
 
+use crate::parquet_cache::ParquetFooterCache;
 use crate::reader::catchment_store::CatchmentStore;
 use crate::runtime::RT;
 
@@ -201,6 +202,86 @@ fn open_remote_indexes_ids_with_one_streaming_scan() {
     result_ids.sort_by_key(|id| id.get());
 
     assert_eq!(result_ids, query_ids);
+}
+
+#[test]
+fn footer_cache_reused_for_second_open_and_query() {
+    let path = ObjectPath::from("catchments.parquet");
+    let base_store = Arc::new(InMemory::new());
+    let payload = write_catchments_fixture();
+    RT.block_on(async {
+        base_store
+            .put(&path, PutPayload::from(payload))
+            .await
+            .expect("fixture parquet should be written");
+    });
+
+    let counting_store = Arc::new(CountingStore::new(base_store));
+    let object_store = Arc::clone(&counting_store) as Arc<dyn ObjectStore>;
+    let footer_cache = ParquetFooterCache::new();
+
+    let first_store = CatchmentStore::open_remote_with_caches(
+        object_store.clone(),
+        path.clone(),
+        "memory://catchments.parquet".into(),
+        "testfabric".to_owned(),
+        "test-v1".to_owned(),
+        None,
+        Some(footer_cache.clone()),
+        None,
+    )
+    .expect("first remote catchment store should open");
+
+    assert_eq!(footer_cache.miss_count(), 1);
+    assert_eq!(
+        footer_cache.hit_count(),
+        1,
+        "ID indexing should reuse the footer fetched during open"
+    );
+
+    let bbox = BoundingBox::new(0.0, 0.0, 1.0, 1.0).unwrap();
+    let first_query_misses = footer_cache.miss_count();
+    first_store
+        .query_by_bbox(&bbox)
+        .expect("first query should succeed");
+    assert_eq!(
+        footer_cache.miss_count(),
+        first_query_misses,
+        "query builder should not refetch footer after open"
+    );
+    assert_eq!(
+        footer_cache.hit_count(),
+        2,
+        "first query should hit the shared footer cache"
+    );
+
+    let second_store = CatchmentStore::open_remote_with_caches(
+        object_store,
+        path,
+        "memory://catchments.parquet".into(),
+        "testfabric".to_owned(),
+        "test-v1".to_owned(),
+        None,
+        Some(footer_cache.clone()),
+        None,
+    )
+    .expect("second remote catchment store should open");
+    assert_eq!(
+        footer_cache.miss_count(),
+        1,
+        "second open should reuse the first footer cache entry"
+    );
+    assert_eq!(
+        footer_cache.hit_count(),
+        4,
+        "second open and ID indexing should both hit the footer cache"
+    );
+
+    second_store
+        .query_by_bbox(&bbox)
+        .expect("second query should succeed");
+    assert_eq!(footer_cache.miss_count(), 1);
+    assert_eq!(footer_cache.hit_count(), 5);
 }
 
 fn catchments_schema() -> Arc<Schema> {

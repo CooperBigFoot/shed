@@ -36,6 +36,10 @@ engine = pyshed.Engine("/path/to/hfx/dataset", snap_radius=5000)
 result = engine.delineate(lat=47.3769, lon=8.5417)
 ```
 
+Geometry repair defaults to the pure-Rust topology cleaner. Pass
+`repair_geometry="gdal"` to opt into the GDAL repairer; `repair_geometry="auto"`,
+`"clean"`, `False`, and `None` all use the default cleaner.
+
 `Engine` also accepts dataset root URLs backed by the object-store integration:
 
 ```python
@@ -91,9 +95,9 @@ engine = pyshed.Engine(
 )
 ```
 
-The cache is off by default. `parquet_cache_max_mb` defaults to `2048` when
-`parquet_cache=True`. Cache state is per-`Engine` instance and is not persisted
-to disk.
+The cache is enabled by default for remote dataset URLs and disabled by default
+for local paths. `parquet_cache_max_mb` defaults to `512` when caching is
+enabled. Cache state is per-`Engine` instance and is not persisted to disk.
 
 ### Batch delineation with progress
 

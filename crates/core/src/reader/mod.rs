@@ -2,6 +2,7 @@
 
 pub mod catchment_store;
 pub mod graph;
+pub(crate) mod id_index;
 pub mod manifest;
 pub mod snap_store;
 

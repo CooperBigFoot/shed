@@ -6,7 +6,7 @@ hfx-core = "=0.2.0"
 
 [package]
 name = "shed"
-version = "0.1.107"
+version = "0.1.108"
 edition = "2024"
 
 [dependencies]

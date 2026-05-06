@@ -6,13 +6,19 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use shed_core::Engine;
 use shed_core::algo::GeoCoord;
-use shed_core::parquet_cache::ParquetRowGroupCache;
+use shed_core::parquet_cache::{
+    DEFAULT_PARQUET_CACHE_MAX_BYTES, ParquetFooterCache, ParquetRowGroupCache,
+};
 use shed_core::session::DatasetSession;
 use shed_gdal::{GdalGeometryRepair, GdalRasterSource};
 
-use crate::config::EngineConfig;
+use crate::config::{EngineConfig, RepairGeometry};
 use crate::error::engine_err_to_py;
 use crate::result::{PyAreaOnlyResult, PyDelineationResult};
+
+const MAX_PARQUET_CACHE_MB: u64 = 1_048_576;
+const BYTES_PER_MIB: u64 = 1024 * 1024;
+const DEFAULT_PARQUET_CACHE_MAX_MB: u64 = DEFAULT_PARQUET_CACHE_MAX_BYTES / BYTES_PER_MIB;
 
 /// Validate that `lat` is in [-90, 90] and `lon` is in [-180, 180].
 fn validate_coord(lat: f64, lon: f64) -> PyResult<()> {
@@ -27,6 +33,37 @@ fn validate_coord(lat: f64, lon: f64) -> PyResult<()> {
         )));
     }
     Ok(())
+}
+
+fn is_remote_dataset_path(path: &str) -> bool {
+    ["http://", "https://", "s3://", "gs://", "az://", "r2://"]
+        .iter()
+        .any(|scheme| path.starts_with(scheme))
+}
+
+fn resolve_parquet_cache_enabled(dataset_path: &str, explicit: Option<bool>) -> bool {
+    explicit.unwrap_or_else(|| is_remote_dataset_path(dataset_path))
+}
+
+fn resolve_parquet_cache_max_bytes(enabled: bool, max_mb: u64) -> PyResult<Option<u64>> {
+    if !enabled {
+        return Ok(None);
+    }
+
+    if max_mb == 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "parquet_cache_max_mb must be > 0 when parquet_cache=True",
+        ));
+    }
+    if max_mb > MAX_PARQUET_CACHE_MB {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "parquet_cache_max_mb must be <= {MAX_PARQUET_CACHE_MB}"
+        )));
+    }
+
+    max_mb.checked_mul(BYTES_PER_MIB).map(Some).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err("parquet_cache_max_mb overflows bytes")
+    })
 }
 
 enum PyDelineateOutput {
@@ -67,6 +104,17 @@ impl PyEngine {
     /// refine:
     ///     Whether to run the raster-based terminal refinement step. Default
     ///     is `True`.
+    /// repair_geometry:
+    ///     Optional geometry repair mode: `"auto"` (default), `"clean"`, or
+    ///     `False` use pure-Rust topology cleaning; `"gdal"` opts into GDAL
+    ///     geometry repair. `None` is treated as `"auto"`.
+    /// parquet_cache:
+    ///     Whether to cache Parquet row groups. Defaults to `True` for remote
+    ///     dataset paths (`http://`, `https://`, `s3://`, `gs://`, `az://`,
+    ///     `r2://`) and `False` for local paths. Pass `False` explicitly to
+    ///     opt out for remote datasets.
+    /// parquet_cache_max_mb:
+    ///     Maximum cache budget in MiB when `parquet_cache` is enabled.
     #[new]
     #[pyo3(signature = (dataset_path, **kwargs))]
     fn new(
@@ -80,12 +128,11 @@ impl PyEngine {
             "snap_threshold",
             "clean_epsilon",
             "refine",
+            "repair_geometry",
             "parquet_cache",
             "parquet_cache_max_mb",
         ];
         crate::kwargs::validate_kwargs(kwargs, ALLOWED, crate::kwargs::KwargContext::EngineNew)?;
-        const MAX_PARQUET_CACHE_MB: u64 = 1_048_576;
-        const BYTES_PER_MIB: u64 = 1024 * 1024;
 
         // Extract typed values from kwargs (None when missing, defaults applied below).
         let snap_radius: Option<f64> = kwargs
@@ -109,41 +156,26 @@ impl PyEngine {
             .map(|v| v.extract())
             .transpose()?
             .unwrap_or(true);
-        let parquet_cache_enabled: bool = kwargs
+        let repair_geometry = RepairGeometry::parse(
+            kwargs
+                .and_then(|k| k.get_item("repair_geometry").ok().flatten())
+                .as_ref(),
+        )?;
+        let parquet_cache_explicit: Option<bool> = kwargs
             .and_then(|k| k.get_item("parquet_cache").ok().flatten())
             .map(|v| v.extract())
-            .transpose()?
-            .unwrap_or(false);
+            .transpose()?;
+        let parquet_cache_enabled =
+            resolve_parquet_cache_enabled(dataset_path, parquet_cache_explicit);
         let parquet_cache_max_mb: u64 = kwargs
             .and_then(|k| k.get_item("parquet_cache_max_mb").ok().flatten())
             .map(|v| v.extract())
             .transpose()?
-            .unwrap_or(2048);
+            .unwrap_or(DEFAULT_PARQUET_CACHE_MAX_MB);
 
         // Validate cache budget before releasing the GIL.
-        let parquet_cache_max_bytes = if parquet_cache_enabled {
-            if parquet_cache_max_mb == 0 {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "parquet_cache_max_mb must be > 0 when parquet_cache=True",
-                ));
-            }
-            if parquet_cache_max_mb > MAX_PARQUET_CACHE_MB {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "parquet_cache_max_mb must be <= {MAX_PARQUET_CACHE_MB}"
-                )));
-            }
-            Some(
-                parquet_cache_max_mb
-                    .checked_mul(BYTES_PER_MIB)
-                    .ok_or_else(|| {
-                        pyo3::exceptions::PyValueError::new_err(
-                            "parquet_cache_max_mb overflows bytes",
-                        )
-                    })?,
-            )
-        } else {
-            None
-        };
+        let parquet_cache_max_bytes =
+            resolve_parquet_cache_max_bytes(parquet_cache_enabled, parquet_cache_max_mb)?;
 
         // Validate config before releasing the GIL (config errors are cheap/immediate).
         let config = EngineConfig::new(
@@ -152,9 +184,11 @@ impl PyEngine {
             snap_threshold,
             clean_epsilon,
             refine,
+            repair_geometry,
         )?;
 
-        let cache = parquet_cache_max_bytes.map(ParquetRowGroupCache::new);
+        let row_group_cache = parquet_cache_max_bytes.map(ParquetRowGroupCache::new);
+        let footer_cache = parquet_cache_max_bytes.map(|_| ParquetFooterCache::new());
 
         if let Some(max_bytes) = parquet_cache_max_bytes {
             tracing::info!(max_bytes = max_bytes, "parquet_cache enabled");
@@ -165,13 +199,16 @@ impl PyEngine {
         // during slow remote cold-starts.
         let dataset_path = dataset_path.to_owned();
         let session = py
-            .allow_threads(move || DatasetSession::open_with_cache(&dataset_path, cache))
+            .allow_threads(move || {
+                DatasetSession::open_with_caches(&dataset_path, row_group_cache, footer_cache)
+            })
             .map_err(crate::error::dataset_err)?;
 
-        let engine = Engine::builder(session)
-            .with_raster_source(GdalRasterSource::new())
-            .with_geometry_repair(GdalGeometryRepair::new())
-            .build();
+        let mut builder = Engine::builder(session).with_raster_source(GdalRasterSource::new());
+        if config.requests_gdal_geometry_repair() {
+            builder = builder.with_geometry_repair(GdalGeometryRepair::new());
+        }
+        let engine = builder.build();
 
         Ok(Self {
             engine: Arc::new(engine),
@@ -463,4 +500,87 @@ fn sequential_delineate_with_progress(
     }
 
     Ok(py_results)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_dataset_schemes_are_detected() {
+        for path in [
+            "http://example.com/hfx",
+            "https://example.com/hfx",
+            "s3://bucket/hfx",
+            "gs://bucket/hfx",
+            "az://container/hfx",
+            "r2://bucket/hfx",
+        ] {
+            assert!(is_remote_dataset_path(path), "{path} should be remote");
+        }
+    }
+
+    #[test]
+    fn local_and_file_dataset_paths_are_not_remote() {
+        for path in [
+            "/data/hfx",
+            "./data/hfx",
+            "../data/hfx",
+            "file:///data/hfx",
+            "hfx",
+            "S3://bucket/hfx",
+        ] {
+            assert!(!is_remote_dataset_path(path), "{path} should be local");
+        }
+    }
+
+    #[test]
+    fn unset_parquet_cache_enables_for_remote_paths() {
+        assert!(resolve_parquet_cache_enabled("s3://bucket/hfx", None));
+        assert!(!resolve_parquet_cache_enabled("/data/hfx", None));
+    }
+
+    #[test]
+    fn explicit_parquet_cache_value_is_honored() {
+        assert!(!resolve_parquet_cache_enabled(
+            "https://example.com/hfx",
+            Some(false)
+        ));
+        assert!(resolve_parquet_cache_enabled("/data/hfx", Some(true)));
+    }
+
+    #[test]
+    fn enabled_parquet_cache_validates_max_mb() {
+        assert_eq!(
+            resolve_parquet_cache_max_bytes(true, 1).unwrap(),
+            Some(BYTES_PER_MIB)
+        );
+
+        let zero_message = resolve_parquet_cache_max_bytes(true, 0)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            zero_message.contains("parquet_cache_max_mb must be > 0 when parquet_cache=True"),
+            "{zero_message}"
+        );
+
+        let too_large_message = resolve_parquet_cache_max_bytes(true, MAX_PARQUET_CACHE_MB + 1)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            too_large_message.contains(&format!(
+                "parquet_cache_max_mb must be <= {MAX_PARQUET_CACHE_MB}"
+            )),
+            "{too_large_message}"
+        );
+    }
+
+    #[test]
+    fn disabled_parquet_cache_ignores_max_mb() {
+        assert_eq!(resolve_parquet_cache_max_bytes(false, 0).unwrap(), None);
+        assert_eq!(
+            resolve_parquet_cache_max_bytes(false, MAX_PARQUET_CACHE_MB + 1).unwrap(),
+            None
+        );
+    }
 }

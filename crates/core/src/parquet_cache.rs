@@ -7,16 +7,16 @@
 //! the byte range requested. Weights are the number of bytes in the cached
 //! [`bytes::Bytes`] value.
 //!
+//! [`ParquetFooterCache`] is a thread-safe metadata map keyed directly by
+//! [`ArtifactIdent`]. It stores `Arc<ParquetMetaData>` values so repeated
+//! stream-builder construction can share footer metadata without copying it.
+//!
 //! [`CachingReader`] wraps a [`ParquetObjectReader`] and implements
-//! [`AsyncFileReader`], intercepting `get_bytes` calls to serve cache hits
-//! without a network round-trip.
+//! [`AsyncFileReader`], intercepting `get_bytes` calls to serve row-group cache
+//! hits and `get_metadata` calls to serve footer cache hits without a network
+//! round-trip.
 //!
-//! # v1 Known Limitations
-//!
-//! - **Metadata is not cached.** Each `ParquetRecordBatchStreamBuilder::new(...)` call
-//!   fetches the footer once. Caching `Arc<ParquetMetaData>` across stream-builder
-//!   instances would eliminate redundant ~1 MiB tail GETs, but requires a separate
-//!   `Cache<ArtifactIdent, Arc<ParquetMetaData>>` map. Deferred to v2.
+//! # Known Limitations
 //!
 //! - **In-memory only.** No persistent on-disk backing, no cross-process sharing.
 //!
@@ -30,6 +30,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
+use dashmap::DashMap;
 use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
 use moka::sync::Cache;
@@ -38,6 +39,9 @@ use parquet::arrow::async_reader::AsyncFileReader;
 use parquet::arrow::async_reader::ParquetObjectReader;
 use parquet::errors::{ParquetError, Result as ParquetResult};
 use parquet::file::metadata::ParquetMetaData;
+
+/// Default in-memory budget for remote Parquet row-group caching.
+pub const DEFAULT_PARQUET_CACHE_MAX_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Identifies which remote artifact a cached chunk belongs to.
 ///
@@ -61,7 +65,7 @@ pub struct ArtifactIdent {
     pub last_modified: DateTime<Utc>,
 }
 
-/// Cache key for one column-chunk byte range (or the footer sentinel).
+/// Cache key for one column-chunk byte range.
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct ChunkKey {
     /// Identifies the remote artifact this chunk belongs to.
@@ -70,20 +74,6 @@ pub struct ChunkKey {
     pub chunk_offset: u64,
     /// Number of bytes in the range.
     pub chunk_length: u64,
-}
-
-impl ChunkKey {
-    /// Sentinel key used to cache the Parquet footer / metadata.
-    ///
-    /// `chunk_offset = u64::MAX` and `chunk_length = 0` are never a valid
-    /// column-chunk range, so they safely identify the footer entry.
-    pub fn footer(ident: ArtifactIdent) -> Self {
-        Self {
-            ident,
-            chunk_offset: u64::MAX,
-            chunk_length: 0,
-        }
-    }
 }
 
 /// Bounded in-memory weighted-LRU cache of Parquet column-chunk byte ranges.
@@ -188,17 +178,104 @@ impl Drop for ParquetRowGroupCache {
     }
 }
 
+/// Thread-safe in-memory cache of Parquet footer metadata.
+///
+/// This cache is intentionally separate from [`ParquetRowGroupCache`]: footers
+/// are keyed by artifact identity only and always stored as shared
+/// `Arc<ParquetMetaData>` values.
+pub struct ParquetFooterCache {
+    inner: DashMap<ArtifactIdent, Arc<ParquetMetaData>>,
+    hits: AtomicU64,
+    misses: AtomicU64,
+}
+
+impl std::fmt::Debug for ParquetFooterCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParquetFooterCache")
+            .field("entries", &self.inner.len())
+            .field("hits", &self.hits.load(Ordering::Relaxed))
+            .field("misses", &self.misses.load(Ordering::Relaxed))
+            .finish()
+    }
+}
+
+impl ParquetFooterCache {
+    /// Create a new footer metadata cache.
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: DashMap::new(),
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+        })
+    }
+
+    /// Return cached metadata for `ident`.
+    pub fn get(&self, ident: &ArtifactIdent) -> Option<Arc<ParquetMetaData>> {
+        let metadata = self.inner.get(ident).map(|entry| Arc::clone(entry.value()));
+        if metadata.is_some() {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+        }
+        metadata
+    }
+
+    /// Insert metadata for `ident`.
+    pub fn insert(&self, ident: ArtifactIdent, metadata: Arc<ParquetMetaData>) {
+        self.inner.insert(ident, metadata);
+    }
+
+    /// Return the number of cached footer entries.
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Return true when no footer entries are cached.
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Return the cumulative hit count.
+    pub fn hit_count(&self) -> u64 {
+        self.hits.load(Ordering::Relaxed)
+    }
+
+    /// Return the cumulative miss count.
+    pub fn miss_count(&self) -> u64 {
+        self.misses.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for ParquetFooterCache {
+    fn drop(&mut self) {
+        let hits = self.hits.load(Ordering::Relaxed);
+        let misses = self.misses.load(Ordering::Relaxed);
+        let total = hits + misses;
+        let hit_rate = if total > 0 {
+            hits as f64 / total as f64
+        } else {
+            0.0
+        };
+        tracing::info!(
+            entries = self.inner.len(),
+            hits = hits,
+            misses = misses,
+            hit_rate = hit_rate,
+            "parquet_footer_cache stats"
+        );
+    }
+}
+
 /// [`AsyncFileReader`] that wraps a [`ParquetObjectReader`] and intercepts
-/// `get_bytes` calls against a shared [`ParquetRowGroupCache`].
+/// row-group byte reads and footer metadata reads against shared caches.
 ///
-/// On a cache hit the bytes are served directly without a network round-trip.
-/// On a miss the inner reader fetches the bytes, which are then inserted into
-/// the cache before being returned.
-///
-/// `get_metadata` is **not** cached in v1 — see module-level doc for rationale.
+/// On a cache hit the value is served directly without a network round-trip.
+/// On a miss the inner reader fetches the value, which is then inserted into
+/// the corresponding cache before being returned.
 pub struct CachingReader {
     inner: ParquetObjectReader,
-    cache: Arc<ParquetRowGroupCache>,
+    row_group_cache: Option<Arc<ParquetRowGroupCache>>,
+    footer_cache: Option<Arc<ParquetFooterCache>>,
     ident: ArtifactIdent,
 }
 
@@ -211,7 +288,23 @@ impl CachingReader {
     ) -> Self {
         Self {
             inner,
-            cache,
+            row_group_cache: Some(cache),
+            footer_cache: None,
+            ident,
+        }
+    }
+
+    /// Create a caching reader with optional row-group and footer caches.
+    pub fn new_with_caches(
+        inner: ParquetObjectReader,
+        row_group_cache: Option<Arc<ParquetRowGroupCache>>,
+        footer_cache: Option<Arc<ParquetFooterCache>>,
+        ident: ArtifactIdent,
+    ) -> Self {
+        Self {
+            inner,
+            row_group_cache,
+            footer_cache,
             ident,
         }
     }
@@ -219,13 +312,17 @@ impl CachingReader {
 
 impl AsyncFileReader for CachingReader {
     fn get_bytes(&mut self, range: Range<u64>) -> BoxFuture<'_, ParquetResult<Bytes>> {
+        let Some(cache) = self.row_group_cache.clone() else {
+            return self.inner.get_bytes(range);
+        };
+
         let key = ChunkKey {
             ident: self.ident.clone(),
             chunk_offset: range.start,
             chunk_length: range.end - range.start,
         };
 
-        if let Some(bytes) = self.cache.get(&key) {
+        if let Some(bytes) = cache.get(&key) {
             tracing::debug!(
                 artifact = key.ident.artifact,
                 offset = key.chunk_offset,
@@ -236,8 +333,7 @@ impl AsyncFileReader for CachingReader {
         }
 
         // Cache miss — record it and fetch from the inner reader.
-        self.cache.misses.fetch_add(1, Ordering::Relaxed);
-        let cache = self.cache.clone();
+        cache.misses.fetch_add(1, Ordering::Relaxed);
         let inner_fut = self.inner.get_bytes(range);
         async move {
             let bytes = inner_fut.await?;
@@ -258,6 +354,10 @@ impl AsyncFileReader for CachingReader {
         &mut self,
         ranges: Vec<Range<u64>>,
     ) -> BoxFuture<'_, ParquetResult<Vec<Bytes>>> {
+        let Some(cache) = self.row_group_cache.clone() else {
+            return self.inner.get_byte_ranges(ranges);
+        };
+
         let mut ordered = vec![None; ranges.len()];
         let mut missing_indexes = Vec::new();
         let mut missing_keys = Vec::new();
@@ -270,7 +370,7 @@ impl AsyncFileReader for CachingReader {
                 chunk_length: range.end - range.start,
             };
 
-            if let Some(bytes) = self.cache.get(&key) {
+            if let Some(bytes) = cache.get(&key) {
                 tracing::debug!(
                     artifact = key.ident.artifact,
                     offset = key.chunk_offset,
@@ -286,7 +386,7 @@ impl AsyncFileReader for CachingReader {
         }
 
         let missing_count = missing_ranges.len();
-        self.cache
+        cache
             .misses
             .fetch_add(missing_count as u64, Ordering::Relaxed);
 
@@ -301,7 +401,6 @@ impl AsyncFileReader for CachingReader {
             .boxed();
         }
 
-        let cache = self.cache.clone();
         let inner_fut = self.inner.get_byte_ranges(missing_ranges);
         async move {
             let fetched = inner_fut.await?;
@@ -344,11 +443,24 @@ impl AsyncFileReader for CachingReader {
         &'a mut self,
         options: Option<&'a ArrowReaderOptions>,
     ) -> BoxFuture<'a, ParquetResult<Arc<ParquetMetaData>>> {
-        // v1: delegate metadata fetch to inner without caching. Each
-        // ParquetRecordBatchStreamBuilder construction re-fetches the footer once,
-        // but footer size is typically <1 MiB and is dominated by column-chunk I/O
-        // in practice. Metadata caching is deferred to v2.
-        self.inner.get_metadata(options)
+        let Some(footer_cache) = self.footer_cache.clone() else {
+            return self.inner.get_metadata(options);
+        };
+
+        if let Some(metadata) = footer_cache.get(&self.ident) {
+            tracing::debug!(artifact = self.ident.artifact, "parquet_footer_cache hit");
+            return std::future::ready(Ok(metadata)).boxed();
+        }
+
+        let ident = self.ident.clone();
+        let inner_fut = self.inner.get_metadata(options);
+        async move {
+            let metadata = inner_fut.await?;
+            tracing::debug!(artifact = ident.artifact, "parquet_footer_cache miss");
+            footer_cache.insert(ident, Arc::clone(&metadata));
+            Ok(metadata)
+        }
+        .boxed()
     }
 }
 
@@ -454,20 +566,6 @@ mod tests {
     }
 
     #[test]
-    fn footer_sentinel_key_is_distinct() {
-        let ident = make_ident();
-        let footer_key = ChunkKey::footer(ident.clone());
-        let regular_key = ChunkKey {
-            ident: ident.clone(),
-            chunk_offset: u64::MAX,
-            chunk_length: 1, // different length
-        };
-        assert_ne!(footer_key, regular_key);
-        assert_eq!(footer_key.chunk_offset, u64::MAX);
-        assert_eq!(footer_key.chunk_length, 0);
-    }
-
-    #[test]
     fn caching_reader_get_byte_ranges_mixes_hits_and_misses_in_order() {
         // ParquetObjectReader does not expose its request/coalescing count, so
         // this regression test cannot directly assert the single bulk miss
@@ -546,6 +644,77 @@ mod tests {
             2,
             "miss count must not change on the warm pass"
         );
+    }
+
+    #[test]
+    fn footer_cache_get_metadata_hits_on_second_reader() {
+        use std::io::Cursor;
+
+        use arrow::array::{Int64Builder, RecordBatch};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use object_store::PutPayload;
+        use object_store::memory::InMemory;
+        use object_store::path::Path as ObjectPath;
+        use object_store::{ObjectStore, ObjectStoreExt};
+        use parquet::arrow::ArrowWriter;
+        use parquet::arrow::async_reader::ParquetObjectReader;
+
+        use crate::runtime::RT;
+
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let mut ids = Int64Builder::new();
+        ids.append_value(1);
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(ids.finish())]).unwrap();
+        let cursor = Cursor::new(Vec::new());
+        let mut writer = ArrowWriter::try_new(cursor, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        let payload = writer.into_inner().unwrap().into_inner();
+        let payload_len = payload.len() as u64;
+
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = ObjectPath::from("test/footer.parquet");
+        RT.block_on(async {
+            store
+                .put(&path, PutPayload::from(payload))
+                .await
+                .expect("fixture parquet should be written");
+        });
+
+        let footer_cache = ParquetFooterCache::new();
+        let ident = make_ident();
+        let inner =
+            ParquetObjectReader::new(store.clone(), path.clone()).with_file_size(payload_len);
+        let mut first_reader =
+            CachingReader::new_with_caches(inner, None, Some(footer_cache.clone()), ident.clone());
+        let first_metadata = RT
+            .block_on(async { first_reader.get_metadata(None).await })
+            .expect("first metadata read should succeed");
+
+        assert_eq!(footer_cache.miss_count(), 1);
+        assert_eq!(footer_cache.hit_count(), 0);
+        assert_eq!(footer_cache.len(), 1);
+
+        let inner = ParquetObjectReader::new(store, path).with_file_size(payload_len);
+        let mut second_reader =
+            CachingReader::new_with_caches(inner, None, Some(footer_cache.clone()), ident.clone());
+        let second_metadata = RT
+            .block_on(async { second_reader.get_metadata(None).await })
+            .expect("second metadata read should succeed");
+
+        assert!(Arc::ptr_eq(&first_metadata, &second_metadata));
+        assert_eq!(footer_cache.miss_count(), 1);
+        assert_eq!(footer_cache.hit_count(), 1);
+
+        let mut etag_bump = ident.clone();
+        etag_bump.etag = Some("def456".to_owned());
+        assert!(footer_cache.get(&etag_bump).is_none());
+
+        let mut changed_ident = ident;
+        changed_ident.adapter_version = "v2".to_owned();
+        assert!(footer_cache.get(&changed_ident).is_none());
+
+        assert_eq!(footer_cache.hit_count(), 1);
+        assert_eq!(footer_cache.miss_count(), 3);
     }
 
     #[test]

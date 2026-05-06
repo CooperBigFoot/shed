@@ -17,6 +17,18 @@ use crate::source_telemetry::{HttpStatsHandle, wrap_if_enabled};
 
 const PUBLIC_R2_CUSTOM_DOMAIN: &str = "basin-delineations-public.upstream.tech";
 const PUBLIC_R2_BUCKET_NAME: &str = "basin-delineations-public";
+const DEFAULT_RANGE_GET_CONCURRENCY: usize = 8;
+const MIN_RANGE_GET_CONCURRENCY: usize = 1;
+const MAX_RANGE_GET_CONCURRENCY: usize = 16;
+
+/// Return configured parallel range-read concurrency for large remote artifacts.
+pub fn shed_get_ranges_concurrency() -> usize {
+    std::env::var("SHED_RANGE_GET_CONCURRENCY")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_RANGE_GET_CONCURRENCY)
+        .clamp(MIN_RANGE_GET_CONCURRENCY, MAX_RANGE_GET_CONCURRENCY)
+}
 
 // Retry/timeout policy mirrors reformatters' download.py public-data fetch defaults.
 fn shed_retry_config() -> RetryConfig {
@@ -234,10 +246,11 @@ mod tests {
     use std::ffi::OsString;
     use std::sync::{Mutex, MutexGuard};
 
-    use super::DatasetSource;
+    use super::{DatasetSource, shed_get_ranges_concurrency};
     use crate::error::SessionError;
 
     static AWS_ENV_LOCK: Mutex<()> = Mutex::new(());
+    static RANGE_CONCURRENCY_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     struct AwsEnv {
         _guard: MutexGuard<'static, ()>,
@@ -286,6 +299,71 @@ mod tests {
                 }
             }
         }
+    }
+
+    struct RangeConcurrencyEnv {
+        _guard: MutexGuard<'static, ()>,
+        previous: Option<OsString>,
+    }
+
+    impl RangeConcurrencyEnv {
+        fn set(value: Option<&str>) -> Self {
+            let guard = RANGE_CONCURRENCY_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let previous = std::env::var_os("SHED_RANGE_GET_CONCURRENCY");
+
+            // SAFETY: these tests serialize SHED_RANGE_GET_CONCURRENCY mutations
+            // with RANGE_CONCURRENCY_ENV_LOCK and restore before unlocking.
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var("SHED_RANGE_GET_CONCURRENCY", value),
+                    None => std::env::remove_var("SHED_RANGE_GET_CONCURRENCY"),
+                }
+            }
+
+            Self {
+                _guard: guard,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for RangeConcurrencyEnv {
+        fn drop(&mut self) {
+            // SAFETY: RANGE_CONCURRENCY_ENV_LOCK is still held while the prior
+            // environment value is restored.
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var("SHED_RANGE_GET_CONCURRENCY", value),
+                    None => std::env::remove_var("SHED_RANGE_GET_CONCURRENCY"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn range_get_concurrency_defaults_to_eight() {
+        let _env = RangeConcurrencyEnv::set(None);
+
+        assert_eq!(shed_get_ranges_concurrency(), 8);
+    }
+
+    #[test]
+    fn range_get_concurrency_clamps_configured_value() {
+        let _env = RangeConcurrencyEnv::set(Some("0"));
+        assert_eq!(shed_get_ranges_concurrency(), 1);
+
+        drop(_env);
+        let _env = RangeConcurrencyEnv::set(Some("32"));
+        assert_eq!(shed_get_ranges_concurrency(), 16);
+    }
+
+    #[test]
+    fn range_get_concurrency_uses_default_for_invalid_value() {
+        let _env = RangeConcurrencyEnv::set(Some("fast"));
+
+        assert_eq!(shed_get_ranges_concurrency(), 8);
     }
 
     #[test]

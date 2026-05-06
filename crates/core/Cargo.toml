@@ -33,9 +33,14 @@ dhat-heap = ["dep:dhat"]
 test-fixtures = []
 
 [dev-dependencies]
+criterion = "0.5"
 tempfile = "3"
 tracing-core = "0.1"
 
 [[example]]
 name = "bench_delineation"
 required-features = ["test-fixtures"]
+
+[[bench]]
+name = "dissolve_strategy"
+harness = false

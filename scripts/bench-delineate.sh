@@ -5,13 +5,17 @@ usage() {
   cat >&2 <<'EOF'
 usage:
   scripts/bench-delineate.sh --mode cold|warm|hot --dataset r2|local|<url-or-path> \
-    --outlet zurich|hammerfest|<lat>,<lon> --iterations N --out <jsonl> [--cache-dir <path>] [--release] [--measure-rss]
+    --outlet zurich|repparfjord|hammerfest|<lat>,<lon> --iterations N --out <jsonl> \
+    [--search-radius-m <metres>] [--cache-dir <path>] [--release] [--measure-rss]
 
 canonical:
   scripts/bench-delineate.sh --release --measure-rss --mode cold --dataset r2 --outlet zurich --iterations 3 --out scratchpad/benchmarks/cold-r2-zurich.jsonl
-  scripts/bench-delineate.sh --release --measure-rss --mode cold --dataset r2 --outlet hammerfest --iterations 3 --out scratchpad/benchmarks/cold-r2-hammerfest.jsonl
+  scripts/bench-delineate.sh --release --measure-rss --mode cold --dataset r2 --outlet repparfjord --iterations 3 --out scratchpad/benchmarks/cold-r2-repparfjord.jsonl
+  scripts/bench-delineate.sh --release --measure-rss --mode cold --dataset r2 --outlet hammerfest --search-radius-m 5000 --iterations 3 --out scratchpad/benchmarks/cold-r2-hammerfest.jsonl
   scripts/bench-delineate.sh --release --measure-rss --mode warm --dataset r2 --outlet zurich --iterations 5 --out scratchpad/benchmarks/warm-r2-zurich.jsonl
   scripts/bench-delineate.sh --release --measure-rss --mode hot --dataset r2 --outlet zurich --iterations 10 --out scratchpad/benchmarks/hot-r2-zurich.jsonl
+
+note: hammerfest may fail at the default 1000 m resolver radius; pass --search-radius-m when benchmarking it.
 EOF
 }
 

@@ -7,6 +7,19 @@ per-commit Rust crate versioning).
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-05-06
+
+### Changed
+
+- Enabled remote parquet cache defaults for faster repeated startup and range
+  access against hosted HFX datasets.
+- Added persistent ID indexes with validation sidecars, plus row-group and
+  footer caching to reduce repeated parquet metadata work.
+- Improved benchmark harness telemetry for outlet selection and search-radius
+  behavior.
+- Defaulted the `repair_geometry` kwarg to clean topology and selected the
+  dissolve strategy from benchmark results.
+
 ## [0.1.10] - 2026-05-04
 
 ### Changed

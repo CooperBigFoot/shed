@@ -12,7 +12,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{Map, Value, json};
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
-use tracing::{Subscriber, debug};
+use tracing::{Event, Subscriber, debug};
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
@@ -74,6 +74,12 @@ impl RecordValues for Attributes<'_> {
 impl RecordValues for Record<'_> {
     fn record(&self, visitor: &mut dyn Visit) {
         Record::record(self, visitor);
+    }
+}
+
+impl RecordValues for Event<'_> {
+    fn record(&self, visitor: &mut dyn Visit) {
+        Event::record(self, visitor);
     }
 }
 
@@ -155,7 +161,16 @@ impl JsonlLayer {
             json!(format!("{:?}", thread::current().id())),
         );
 
-        for key in ["stage", "bytes", "requests", "cache_status", "path"] {
+        for key in [
+            "stage",
+            "bytes",
+            "requests",
+            "cache_status",
+            "path",
+            "row_groups",
+            "rows",
+            "matches",
+        ] {
             if let Some(value) = span.fields.values.get(key) {
                 record.insert(key.to_owned(), value.clone());
             }
@@ -213,6 +228,29 @@ where
         stage.fields.record(values);
     }
 
+    fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
+        let Some(scope) = ctx.event_scope(event) else {
+            return;
+        };
+        let mut nearest_stage_id = None;
+        for span in scope.from_root() {
+            if span.extensions().get::<StageSpan>().is_some() {
+                nearest_stage_id = Some(span.id());
+            }
+        }
+        let Some(stage_id) = nearest_stage_id else {
+            return;
+        };
+        let Some(span) = ctx.span(&stage_id) else {
+            return;
+        };
+        let mut extensions = span.extensions_mut();
+        let Some(stage) = extensions.get_mut::<StageSpan>() else {
+            return;
+        };
+        stage.fields.record(event);
+    }
+
     fn on_close(&self, id: Id, ctx: Context<'_, S>) {
         let Some(span) = ctx.span(&id) else {
             return;
@@ -233,7 +271,8 @@ mod tests {
     use tracing_subscriber::prelude::*;
 
     use crate::telemetry::{
-        Stage, StageGuard, record_bytes, record_cache_status, record_path, record_requests,
+        Stage, StageGuard, record_bytes, record_cache_status, record_matches, record_path,
+        record_requests, record_row_groups, record_rows,
     };
 
     use super::JsonlLayer;
@@ -293,6 +332,9 @@ mod tests {
             record_requests(3);
             record_cache_status("hit");
             record_path("/tmp/shed/cache.bin");
+            record_row_groups(8);
+            record_rows(144);
+            record_matches(13);
         });
         drop(guard);
 
@@ -303,5 +345,8 @@ mod tests {
         assert_eq!(records[0]["requests"], 3);
         assert_eq!(records[0]["cache_status"], "hit");
         assert_eq!(records[0]["path"], "/tmp/shed/cache.bin");
+        assert_eq!(records[0]["row_groups"], 8);
+        assert_eq!(records[0]["rows"], 144);
+        assert_eq!(records[0]["matches"], 13);
     }
 }

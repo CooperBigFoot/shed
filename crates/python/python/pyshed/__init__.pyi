@@ -107,8 +107,9 @@ class Engine:
         snap_threshold: int | None = None,
         clean_epsilon: float | None = None,
         refine: bool = True,
-        parquet_cache: bool = False,
-        parquet_cache_max_mb: int = 2048,
+        repair_geometry: Literal["auto", "gdal", "clean"] | Literal[False] | None = "auto",
+        parquet_cache: bool | None = None,
+        parquet_cache_max_mb: int = 512,
     ) -> None: ...
 
     @overload

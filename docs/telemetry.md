@@ -64,6 +64,12 @@ telemetry layer does not emit iteration fields unless a harness adds them.
 | `WatershedAssembly` | `watershed_assembly` |
 | `ResultCompose` | `result_compose` |
 
+Stage taxonomy invariant: validation stages must not include ID-index scans.
+`CatchmentIdIndex` and `SnapIdIndex` cover index open/build/load work.
+`ValidateGraphCatchments` and `ValidateSnapRefs` cover only membership checks, or
+are skipped entirely when the validated sidecar matches current artifact
+metadata.
+
 ## Stability
 
 The stable stage names and core field names above are part of the benchmark

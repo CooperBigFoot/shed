@@ -40,6 +40,7 @@ fn registry_hint(name: &str, ctx: &KwargContext) -> Option<String> {
         "snap_threshold",
         "clean_epsilon",
         "refine",
+        "repair_geometry",
         "parquet_cache",
         "parquet_cache_max_mb",
     ];

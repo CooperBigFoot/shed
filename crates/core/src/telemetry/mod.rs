@@ -5,7 +5,8 @@
 //!   `stage_duration` or `stage_field`.
 //! - `stage` is always one of [`Stage`]'s lower_snake_case names.
 //! - `duration_ms` is emitted when a stage guard drops.
-//! - `bytes`, `requests`, `cache_status`, and `path` are optional span fields.
+//! - `bytes`, `requests`, `cache_status`, `path`, `row_groups`, `rows`, and
+//!   `matches` are optional span fields.
 //! - Timestamp and thread fields may be added by the tracing layer.
 //! - These field names and stage names are stable for downstream parsers.
 
@@ -111,6 +112,9 @@ pub fn stage_span(stage: Stage) -> Span {
         requests = field::Empty,
         cache_status = field::Empty,
         path = field::Empty,
+        row_groups = field::Empty,
+        rows = field::Empty,
+        matches = field::Empty,
     )
 }
 
@@ -162,6 +166,24 @@ pub fn record_path(path: impl AsRef<Path>) {
     Span::current().record("path", field::display(path.as_ref().display()));
 }
 
+/// Record selected row-group count on the current span.
+pub fn record_row_groups(row_groups: u64) {
+    Span::current().record("row_groups", row_groups);
+    tracing::event!(Level::INFO, row_groups);
+}
+
+/// Record row count on the current span.
+pub fn record_rows(rows: u64) {
+    Span::current().record("rows", rows);
+    tracing::event!(Level::INFO, rows);
+}
+
+/// Record matched row count on the current span.
+pub fn record_matches(matches: u64) {
+    Span::current().record("matches", matches);
+    tracing::event!(Level::INFO, matches);
+}
+
 fn duration_ms(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
@@ -180,8 +202,8 @@ mod tests {
     use tracing_core::span::Current;
 
     use crate::telemetry::{
-        Stage, StageGuard, record_bytes, record_cache_status, record_path, record_requests,
-        stage_span,
+        Stage, StageGuard, record_bytes, record_cache_status, record_matches, record_path,
+        record_requests, record_row_groups, record_rows, stage_span,
     };
 
     #[derive(Debug)]
@@ -403,6 +425,9 @@ mod tests {
             record_requests(3);
             record_cache_status("hit");
             record_path("/tmp/shed/cache.bin");
+            record_row_groups(8);
+            record_rows(144);
+            record_matches(13);
         });
 
         let span = recorded_stage_span(&state);
@@ -417,5 +442,8 @@ mod tests {
             span.fields.get("path"),
             Some(&"/tmp/shed/cache.bin".to_owned())
         );
+        assert_eq!(span.fields.get("row_groups"), Some(&"8".to_owned()));
+        assert_eq!(span.fields.get("rows"), Some(&"144".to_owned()));
+        assert_eq!(span.fields.get("matches"), Some(&"13".to_owned()));
     }
 }

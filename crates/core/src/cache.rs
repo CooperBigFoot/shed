@@ -5,11 +5,12 @@ use std::path::{Path, PathBuf};
 use bytes::Bytes;
 use hfx_core::{DrainageGraph, Manifest};
 use object_store::path::Path as ObjectPath;
-use tracing::debug;
+use tracing::{debug, warn};
 use url::Url;
 
 use crate::error::SessionError;
 use crate::reader;
+use crate::reader::id_index::IdIndex;
 
 const CACHE_ENV: &str = "HFX_CACHE_DIR";
 const CACHE_NAMESPACE: &str = "hfx";
@@ -25,6 +26,31 @@ pub(crate) struct CachedRemoteArtifacts {
 #[derive(Debug, Clone)]
 pub(crate) struct RemoteArtifactCache {
     root: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct ValidationSidecar {
+    pub(crate) catchments_etag: String,
+    pub(crate) catchments_size: u64,
+    pub(crate) snap_etag: Option<String>,
+    pub(crate) snap_size: Option<u64>,
+    pub(crate) validated_at: u64,
+    pub(crate) shed_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ArtifactMeta {
+    pub(crate) etag: String,
+    pub(crate) size: u64,
+}
+
+impl ArtifactMeta {
+    pub(crate) fn from_parts(etag: Option<&str>, size: u64) -> Option<Self> {
+        etag.map(|etag| Self {
+            etag: etag.to_owned(),
+            size,
+        })
+    }
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
@@ -51,6 +77,32 @@ impl RemoteArtifactCache {
     /// Return the filesystem root used by this cache.
     pub(crate) fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub(crate) fn artifact_cache_dir(&self, fabric_name: &str, adapter_version: &str) -> PathBuf {
+        self.root.join(fabric_name).join(adapter_version)
+    }
+
+    pub(crate) fn id_index_path(
+        &self,
+        fabric_name: &str,
+        adapter_version: &str,
+        artifact: &str,
+    ) -> PathBuf {
+        IdIndex::cache_path(
+            &self
+                .artifact_cache_dir(fabric_name, adapter_version)
+                .join(artifact),
+        )
+    }
+
+    pub(crate) fn validation_sidecar_path(
+        &self,
+        fabric_name: &str,
+        adapter_version: &str,
+    ) -> PathBuf {
+        self.artifact_cache_dir(fabric_name, adapter_version)
+            .join("validated.json")
     }
 
     /// Return the parsed cache entry mapped to this exact remote source.
@@ -82,10 +134,7 @@ impl RemoteArtifactCache {
             return Ok(None);
         }
 
-        let cache_dir = self
-            .root
-            .join(index.fabric_name)
-            .join(index.adapter_version);
+        let cache_dir = self.artifact_cache_dir(&index.fabric_name, &index.adapter_version);
 
         Ok(read_entry(&cache_dir))
     }
@@ -99,10 +148,7 @@ impl RemoteArtifactCache {
         manifest_bytes: &[u8],
         graph_bytes: &Bytes,
     ) -> Result<(), SessionError> {
-        let cache_dir = self
-            .root
-            .join(manifest.fabric_name())
-            .join(manifest.adapter_version());
+        let cache_dir = self.artifact_cache_dir(manifest.fabric_name(), manifest.adapter_version());
 
         std::fs::create_dir_all(&cache_dir)
             .map_err(|source| SessionError::cache_io("create_dir_all", &cache_dir, source))?;
@@ -152,6 +198,59 @@ impl RemoteArtifactCache {
             .join(".sources")
             .join(format!("{:016x}.json", fnv1a64(key.as_bytes())))
     }
+
+    pub(crate) fn read_validation_sidecar(
+        &self,
+        fabric_name: &str,
+        adapter_version: &str,
+    ) -> Option<ValidationSidecar> {
+        let path = self.validation_sidecar_path(fabric_name, adapter_version);
+        let bytes = std::fs::read(&path).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    pub(crate) fn write_validation_sidecar_best_effort(
+        &self,
+        fabric_name: &str,
+        adapter_version: &str,
+        sidecar: &ValidationSidecar,
+    ) {
+        let path = self.validation_sidecar_path(fabric_name, adapter_version);
+        let result = (|| -> Result<(), SessionError> {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|source| SessionError::cache_io("create_dir_all", parent, source))?;
+            }
+            let bytes = serde_json::to_vec(sidecar).map_err(|source| {
+                SessionError::cache_json("serialize validation sidecar", &path, source)
+            })?;
+            write_cache_file(&path, &bytes)
+        })();
+        if let Err(error) = result {
+            warn!(path = %path.display(), error = %error, "failed to write validation sidecar");
+        }
+    }
+}
+
+impl ValidationSidecar {
+    pub(crate) fn current(catchments: ArtifactMeta, snap: Option<ArtifactMeta>) -> Self {
+        Self {
+            catchments_etag: catchments.etag,
+            catchments_size: catchments.size,
+            snap_etag: snap.as_ref().map(|meta| meta.etag.clone()),
+            snap_size: snap.map(|meta| meta.size),
+            validated_at: validated_at_unix_seconds(),
+            shed_version: env!("CARGO_PKG_VERSION").to_owned(),
+        }
+    }
+
+    pub(crate) fn matches(&self, catchments: &ArtifactMeta, snap: Option<&ArtifactMeta>) -> bool {
+        self.catchments_etag == catchments.etag
+            && self.catchments_size == catchments.size
+            && self.snap_etag.as_deref() == snap.map(|meta| meta.etag.as_str())
+            && self.snap_size == snap.map(|meta| meta.size)
+            && self.shed_version == env!("CARGO_PKG_VERSION")
+    }
 }
 
 fn read_entry(path: &Path) -> Option<CachedRemoteArtifacts> {
@@ -188,6 +287,13 @@ fn write_cache_file(path: &Path, bytes: &[u8]) -> Result<(), SessionError> {
     std::fs::write(path, bytes).map_err(|source| SessionError::cache_io("write", path, source))
 }
 
+fn validated_at_unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
 pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in bytes {
@@ -195,4 +301,55 @@ pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ArtifactMeta, RemoteArtifactCache, ValidationSidecar};
+
+    #[test]
+    fn id_index_path_uses_artifact_cache_dir() {
+        let cache = RemoteArtifactCache {
+            root: "/tmp/cache".into(),
+        };
+
+        assert_eq!(
+            cache.id_index_path("fabric", "adapter", "catchments.parquet"),
+            std::path::Path::new("/tmp/cache/fabric/adapter/catchments.idindex.arrow")
+        );
+    }
+
+    #[test]
+    fn validation_sidecar_matches_exact_metadata_and_version() {
+        let catchments = ArtifactMeta {
+            etag: "catch-etag".into(),
+            size: 123,
+        };
+        let snap = ArtifactMeta {
+            etag: "snap-etag".into(),
+            size: 456,
+        };
+        let sidecar = ValidationSidecar::current(catchments.clone(), Some(snap.clone()));
+
+        assert!(sidecar.matches(&catchments, Some(&snap)));
+        assert!(!sidecar.matches(
+            &ArtifactMeta {
+                etag: "other".into(),
+                size: 123,
+            },
+            Some(&snap)
+        ));
+        assert!(!sidecar.matches(&catchments, None));
+    }
+
+    #[test]
+    fn validation_sidecar_matches_absent_snap() {
+        let catchments = ArtifactMeta {
+            etag: "catch-etag".into(),
+            size: 123,
+        };
+        let sidecar = ValidationSidecar::current(catchments.clone(), None);
+
+        assert!(sidecar.matches(&catchments, None));
+    }
 }

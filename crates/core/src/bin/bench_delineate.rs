@@ -10,7 +10,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{Map, Value, json};
 use shed_core::algo::GeoCoord;
 use shed_core::session::DatasetSession;
-use shed_core::{DelineationOptions, Engine};
+use shed_core::source_telemetry::HttpStatsSnapshot;
+use shed_core::{DelineationOptions, Engine, ResolverConfig, SearchRadiusMetres};
 use tracing_subscriber::prelude::*;
 
 const R2_DATASET: &str = "https://basin-delineations-public.upstream.tech/grit/1.0.0/";
@@ -28,6 +29,7 @@ struct Config {
     dataset: String,
     outlet: GeoCoord,
     outlet_label: String,
+    search_radius: SearchRadiusMetres,
     iterations: usize,
     out: PathBuf,
     cache_root: Option<PathBuf>,
@@ -100,7 +102,13 @@ fn run_warm(
     out: &mut impl Write,
 ) -> Result<Vec<IterationSummary>, Box<dyn Error>> {
     let warm_cache = unique_child_dir(cache_dir, "warm")?;
-    let _ = run_once(dataset, config.outlet, &warm_cache, None)?;
+    let _ = run_once(
+        dataset,
+        config.outlet,
+        config.search_radius,
+        &warm_cache,
+        None,
+    )?;
 
     let mut summaries = Vec::with_capacity(config.iterations);
     for iteration in 0..config.iterations {
@@ -120,7 +128,7 @@ fn run_hot(
     let _env = BenchEnv::set(&hot_cache, None);
     let session = DatasetSession::open(dataset)?;
     let engine = Engine::builder(session).build();
-    let options = DelineationOptions::default();
+    let options = delineation_options(config);
 
     let mut summaries = Vec::with_capacity(config.iterations);
     for iteration in 0..config.iterations {
@@ -137,6 +145,9 @@ fn run_hot(
         let summary = IterationSummary {
             iteration,
             wall_time_ms,
+            // Hot mode reuses one Engine, whose object-store counters are
+            // cumulative. Keep per-iteration records scoped to fresh-engine
+            // cold/warm runs until the engine exposes resettable deltas.
             http_stats: None,
         };
         copy_stage_records(out, &trace, iteration, wall_time_ms)?;
@@ -154,7 +165,13 @@ fn measure_fresh_engine(
     out: &mut impl Write,
 ) -> Result<IterationSummary, Box<dyn Error>> {
     let trace = temp_trace_path(iteration)?;
-    let summary = run_once(dataset, config.outlet, cache_dir, Some(&trace))?;
+    let summary = run_once(
+        dataset,
+        config.outlet,
+        config.search_radius,
+        cache_dir,
+        Some(&trace),
+    )?;
     copy_stage_records(out, &trace, iteration, summary.wall_time_ms)?;
     Ok(IterationSummary {
         iteration,
@@ -165,33 +182,78 @@ fn measure_fresh_engine(
 fn run_once(
     dataset: &str,
     outlet: GeoCoord,
+    search_radius: SearchRadiusMetres,
     cache_dir: &Path,
     trace: Option<&Path>,
 ) -> Result<IterationSummary, Box<dyn Error>> {
     let _env = BenchEnv::set(cache_dir, trace);
     let start = Instant::now();
-    if let Some(trace_path) = trace {
+    let http_stats = if let Some(trace_path) = trace {
         let (layer, guard) = shed_core::telemetry::jsonl::JsonlLayer::from_path(trace_path)?;
         let subscriber = tracing_subscriber::registry().with(layer);
-        tracing::subscriber::with_default(subscriber, || run_engine_once(dataset, outlet))?;
+        let http_stats = tracing::subscriber::with_default(subscriber, || {
+            run_engine_once(dataset, outlet, search_radius)
+        })?;
         drop(guard);
+        http_stats
     } else {
-        run_engine_once(dataset, outlet)?;
-    }
+        run_engine_once(dataset, outlet, search_radius)?
+    };
+    let wall_time_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     Ok(IterationSummary {
         iteration: 0,
-        wall_time_ms: start.elapsed().as_secs_f64() * 1000.0,
-        http_stats: None,
+        wall_time_ms,
+        http_stats: http_stats.map(http_stats_value),
     })
 }
 
-fn run_engine_once(dataset: &str, outlet: GeoCoord) -> Result<(), Box<dyn Error>> {
+fn run_engine_once(
+    dataset: &str,
+    outlet: GeoCoord,
+    search_radius: SearchRadiusMetres,
+) -> Result<Option<HttpStatsSnapshot>, Box<dyn Error>> {
     let session = DatasetSession::open(dataset)?;
     let engine = Engine::builder(session).build();
-    let options = DelineationOptions::default();
+    let options = options_for_search_radius(search_radius);
     engine.delineate(outlet, &options)?;
-    Ok(())
+    Ok(engine.http_stats())
+}
+
+fn http_stats_value(snapshot: HttpStatsSnapshot) -> Value {
+    let per_path = snapshot
+        .per_path
+        .into_iter()
+        .map(|(path, counters)| {
+            (
+                path,
+                json!({
+                    "requests": counters.requests,
+                    "bytes_in": counters.bytes_in,
+                    "bytes_out": counters.bytes_out,
+                }),
+            )
+        })
+        .collect();
+
+    Value::Object(Map::from_iter([
+        ("total_requests".to_owned(), json!(snapshot.total_requests)),
+        ("total_bytes_in".to_owned(), json!(snapshot.total_bytes_in)),
+        (
+            "total_bytes_out".to_owned(),
+            json!(snapshot.total_bytes_out),
+        ),
+        ("per_path".to_owned(), Value::Object(per_path)),
+    ]))
+}
+
+fn delineation_options(config: &Config) -> DelineationOptions {
+    options_for_search_radius(config.search_radius)
+}
+
+fn options_for_search_radius(search_radius: SearchRadiusMetres) -> DelineationOptions {
+    DelineationOptions::default()
+        .with_resolver_config(ResolverConfig::new().with_search_radius(search_radius))
 }
 
 fn copy_stage_records(
@@ -228,6 +290,7 @@ fn header_record(config: &Config, dataset: &str, cache_dir: &Path) -> Value {
             "lat": config.outlet.lat,
             "lon": config.outlet.lon,
         },
+        "search_radius_m": config.search_radius.as_f64(),
         "iterations": config.iterations,
         "cache_dir": cache_dir.display().to_string(),
         "tool": {
@@ -338,45 +401,54 @@ fn unique_suffix() -> Result<String, Box<dyn Error>> {
 
 impl Config {
     fn from_args() -> Result<Self, Box<dyn Error>> {
-        let mut args = env::args().skip(1);
-        let mut mode = None;
-        let mut dataset = None;
-        let mut outlet = None;
-        let mut iterations = None;
-        let mut out = None;
-        let mut cache_root = None;
-
-        while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "--mode" => mode = Some(parse_mode(&next_value(&mut args, "--mode")?)?),
-                "--dataset" => dataset = Some(next_value(&mut args, "--dataset")?),
-                "--outlet" => outlet = Some(parse_outlet(&next_value(&mut args, "--outlet")?)?),
-                "--iterations" => {
-                    iterations = Some(parse_iterations(&next_value(&mut args, "--iterations")?)?)
-                }
-                "--out" => out = Some(PathBuf::from(next_value(&mut args, "--out")?)),
-                "--cache-dir" => {
-                    cache_root = Some(PathBuf::from(next_value(&mut args, "--cache-dir")?))
-                }
-                "--help" | "-h" => {
-                    print_usage();
-                    std::process::exit(0);
-                }
-                _ => return Err(format!("unknown argument: {arg}").into()),
-            }
-        }
-
-        let (outlet, outlet_label) = outlet.unwrap_or((zurich(), "zurich".to_owned()));
-        Ok(Self {
-            mode: mode.ok_or("--mode is required")?,
-            dataset: dataset.ok_or("--dataset is required")?,
-            outlet,
-            outlet_label,
-            iterations: iterations.unwrap_or(1),
-            out: out.ok_or("--out is required")?,
-            cache_root,
-        })
+        parse_config_args(env::args().skip(1))
     }
+}
+
+fn parse_config_args(args: impl IntoIterator<Item = String>) -> Result<Config, Box<dyn Error>> {
+    let mut args = args.into_iter();
+    let mut mode = None;
+    let mut dataset = None;
+    let mut outlet = None;
+    let mut search_radius = SearchRadiusMetres::DEFAULT;
+    let mut iterations = None;
+    let mut out = None;
+    let mut cache_root = None;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--mode" => mode = Some(parse_mode(&next_value(&mut args, "--mode")?)?),
+            "--dataset" => dataset = Some(next_value(&mut args, "--dataset")?),
+            "--outlet" => outlet = Some(parse_outlet(&next_value(&mut args, "--outlet")?)?),
+            "--search-radius-m" => {
+                search_radius = parse_search_radius_m(&next_value(&mut args, "--search-radius-m")?)?
+            }
+            "--iterations" => {
+                iterations = Some(parse_iterations(&next_value(&mut args, "--iterations")?)?)
+            }
+            "--out" => out = Some(PathBuf::from(next_value(&mut args, "--out")?)),
+            "--cache-dir" => {
+                cache_root = Some(PathBuf::from(next_value(&mut args, "--cache-dir")?))
+            }
+            "--help" | "-h" => {
+                print_usage();
+                std::process::exit(0);
+            }
+            _ => return Err(format!("unknown argument: {arg}").into()),
+        }
+    }
+
+    let (outlet, outlet_label) = outlet.unwrap_or((zurich(), "zurich".to_owned()));
+    Ok(Config {
+        mode: mode.ok_or("--mode is required")?,
+        dataset: dataset.ok_or("--dataset is required")?,
+        outlet,
+        outlet_label,
+        search_radius,
+        iterations: iterations.unwrap_or(1),
+        out: out.ok_or("--out is required")?,
+        cache_root,
+    })
 }
 
 fn next_value(
@@ -399,16 +471,24 @@ fn parse_mode(value: &str) -> Result<Mode, Box<dyn Error>> {
 fn parse_outlet(value: &str) -> Result<(GeoCoord, String), Box<dyn Error>> {
     match value {
         "zurich" => Ok((zurich(), value.to_owned())),
+        "repparfjord" => Ok((repparfjord(), value.to_owned())),
         "hammerfest" => Ok((hammerfest(), value.to_owned())),
         _ => {
             let Some((lat, lon)) = value.split_once(',') else {
-                return Err("--outlet must be zurich, hammerfest, or <lat>,<lon>".into());
+                return Err(
+                    "--outlet must be zurich, repparfjord, hammerfest, or <lat>,<lon>".into(),
+                );
             };
             let lat = lat.parse::<f64>()?;
             let lon = lon.parse::<f64>()?;
             Ok((GeoCoord::new(lon, lat), value.to_owned()))
         }
     }
+}
+
+fn parse_search_radius_m(value: &str) -> Result<SearchRadiusMetres, Box<dyn Error>> {
+    let metres = value.parse::<f64>()?;
+    Ok(SearchRadiusMetres::new(metres)?)
 }
 
 fn parse_iterations(value: &str) -> Result<usize, Box<dyn Error>> {
@@ -421,6 +501,10 @@ fn parse_iterations(value: &str) -> Result<usize, Box<dyn Error>> {
 
 fn zurich() -> GeoCoord {
     GeoCoord::new(8.5417, 47.3769)
+}
+
+fn repparfjord() -> GeoCoord {
+    GeoCoord::new(23.04, 69.97)
 }
 
 fn hammerfest() -> GeoCoord {
@@ -445,7 +529,7 @@ fn warm_note(mode: Mode) -> Option<&'static str> {
 
 fn print_usage() {
     eprintln!(
-        "usage: bench_delineate --mode cold|warm|hot --dataset r2|local|<url-or-path> \\\n+         --outlet zurich|hammerfest|<lat>,<lon> --iterations N --out <jsonl> \\\n+         [--cache-dir <path>]"
+        "usage: bench_delineate --mode cold|warm|hot --dataset r2|local|<url-or-path> \\\n         --outlet zurich|repparfjord|hammerfest|<lat>,<lon> --iterations N --out <jsonl> \\\n         [--search-radius-m <metres>] [--cache-dir <path>]\n\ncanonical:\n  bench_delineate --mode cold --dataset r2 --outlet zurich --iterations 3 --out scratchpad/benchmarks/cold-r2-zurich.jsonl\n  bench_delineate --mode cold --dataset r2 --outlet repparfjord --iterations 3 --out scratchpad/benchmarks/cold-r2-repparfjord.jsonl\n  bench_delineate --mode cold --dataset r2 --outlet hammerfest --search-radius-m 5000 --iterations 3 --out scratchpad/benchmarks/cold-r2-hammerfest.jsonl\n\nnote: hammerfest may fail at the default 1000 m resolver radius; pass --search-radius-m when benchmarking it."
     );
 }
 
@@ -491,5 +575,89 @@ unsafe fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
     match value {
         Some(value) => unsafe { env::set_var(name, value) },
         None => unsafe { env::remove_var(name) },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use serde_json::json;
+    use shed_core::source_telemetry::{HttpStatsSnapshot, PathCounters};
+
+    fn args(extra: &[&str]) -> Vec<String> {
+        let mut args = vec![
+            "--mode",
+            "hot",
+            "--dataset",
+            "r2",
+            "--iterations",
+            "1",
+            "--out",
+            "bench.jsonl",
+        ];
+        args.extend_from_slice(extra);
+        args.into_iter().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn parse_config_accepts_search_radius_m() {
+        let config =
+            crate::parse_config_args(args(&["--search-radius-m", "5000"])).expect("valid config");
+
+        assert_eq!(config.search_radius.as_f64(), 5000.0);
+    }
+
+    #[test]
+    fn parse_config_accepts_repparfjord_outlet_shorthand() {
+        let config =
+            crate::parse_config_args(args(&["--outlet", "repparfjord"])).expect("valid config");
+
+        assert_eq!(config.outlet, crate::repparfjord());
+        assert_eq!(config.outlet_label, "repparfjord");
+    }
+
+    #[test]
+    fn iteration_record_includes_http_stats_when_present() {
+        let mut per_path = BTreeMap::new();
+        per_path.insert(
+            "catchments.parquet".to_owned(),
+            PathCounters {
+                requests: 3,
+                bytes_in: 42,
+                bytes_out: 0,
+            },
+        );
+        let summary = crate::IterationSummary {
+            iteration: 2,
+            wall_time_ms: 12.5,
+            http_stats: Some(crate::http_stats_value(HttpStatsSnapshot {
+                total_requests: 3,
+                total_bytes_in: 42,
+                total_bytes_out: 0,
+                per_path,
+            })),
+        };
+
+        assert_eq!(
+            crate::iteration_record(&summary),
+            json!({
+                "kind": "iteration",
+                "iteration": 2,
+                "wall_time_ms": 12.5,
+                "http": {
+                    "total_requests": 3,
+                    "total_bytes_in": 42,
+                    "total_bytes_out": 0,
+                    "per_path": {
+                        "catchments.parquet": {
+                            "requests": 3,
+                            "bytes_in": 42,
+                            "bytes_out": 0,
+                        },
+                    },
+                },
+            })
+        );
     }
 }
