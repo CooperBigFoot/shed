@@ -15,6 +15,10 @@ const FIXTURE_DIR: &str = "tests/fixtures/parity";
 
 #[derive(Debug, Deserialize)]
 struct GoldenRecord {
+    #[serde(default)]
+    oracle: String,
+    #[serde(default)]
+    case_name: String,
     canonical_wkb_hex: String,
     area_km2: f64,
     input_outlet: Outlet,
@@ -27,6 +31,12 @@ struct GoldenRecord {
     refinement_outcome: RefinementOutcome,
     canonicalizer_version: String,
     comparison_policy: ComparisonPolicy,
+    #[serde(default)]
+    remote_input_identity: Option<RemoteInputIdentity>,
+    #[serde(default)]
+    window_measurement: Option<WindowMeasurement>,
+    #[serde(default)]
+    carve_measurement: Option<serde_json::Value>,
     #[serde(default)]
     raster_interpretation: Option<RasterInterpretation>,
     #[serde(default)]
@@ -118,6 +128,43 @@ struct Attestation {
     proof_command: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct RemoteInputIdentity {
+    pinned_url: String,
+    artifacts: Vec<RemoteArtifactIdentity>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteArtifactIdentity {
+    path: String,
+    etag: String,
+    content_length: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct WindowMeasurement {
+    terminal_bbox: RectRecord,
+    search_radius_m: f64,
+    flow_dir: RasterWindowStats,
+    flow_acc: RasterWindowStats,
+    http_total_bytes_in: u64,
+    windowing_ceiling_bytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RasterWindowStats {
+    tile_count: u64,
+    bytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RectRecord {
+    min_x: f64,
+    min_y: f64,
+    max_x: f64,
+    max_y: f64,
+}
+
 #[test]
 fn committed_seed_golden_validates_schema_and_canonical_wkb() {
     let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -152,6 +199,68 @@ fn committed_synthetic_refined_b_golden_validates_schema_and_canonical_wkb() {
     assert_record_contract(&record);
     assert_synthetic_refined_b_contract(&record);
     assert_canonical_wkb_idempotent(&decode_hex(&record.canonical_wkb_hex));
+}
+
+#[test]
+fn committed_grit_nonrefined_a_goldens_validate_schema_and_metadata_offline() {
+    let records = read_golden_array("goldens/v01_grit_nonrefined/oracle_a_grit_nonrefined.json");
+    assert_eq!(records.len(), 2);
+    let names = records
+        .iter()
+        .map(|record| record.case_name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["zurich", "repparfjord"]);
+
+    for record in &records {
+        assert_record_contract(record);
+        assert_eq!(record.oracle, "A");
+        assert_eq!(record.refinement_outcome.status, "NotApplied");
+        assert_eq!(
+            record.refinement_outcome.reason.as_deref(),
+            Some("no rasters available")
+        );
+        assert!(record.raster_interpretation.is_none());
+        assert!(record.window_measurement.is_none());
+        assert!(record.carve_measurement.is_none());
+        assert_remote_identity(
+            record,
+            "https://basin-delineations-public.upstream.tech/grit/1.0.0/",
+            &["manifest.json", "catchments.parquet", "graph.arrow"],
+        );
+        assert_canonical_wkb_idempotent(&decode_hex(&record.canonical_wkb_hex));
+    }
+}
+
+#[test]
+fn committed_merit_refined_c_goldens_validate_schema_and_metadata_offline() {
+    let records = read_golden_array("goldens/v01_merit_refined/oracle_c_merit_refined.json");
+    assert_eq!(records.len(), 1);
+    let names = records
+        .iter()
+        .map(|record| record.case_name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["rhine_basel"]);
+
+    for record in &records {
+        assert_record_contract(record);
+        assert_eq!(record.oracle, "C");
+        assert_eq!(record.refinement_outcome.status, "Applied");
+        assert!(record.carve_measurement.is_none());
+        assert_remote_identity(
+            record,
+            "https://basin-delineations-public.upstream.tech/merit-basins/0.1.0/",
+            &[
+                "manifest.json",
+                "catchments.parquet",
+                "graph.arrow",
+                "snap.parquet",
+                "flow_dir.tif",
+                "flow_acc.tif",
+            ],
+        );
+        assert_merit_refined_c_contract(record);
+        assert_canonical_wkb_idempotent(&decode_hex(&record.canonical_wkb_hex));
+    }
 }
 
 #[test]
@@ -264,6 +373,83 @@ fn assert_synthetic_refined_b_contract(record: &GoldenRecord) {
             .contains("tile-identical")
     );
     assert!(attestation.proof_command.contains("shed-gdal"));
+}
+
+fn assert_remote_identity(record: &GoldenRecord, pinned_url: &str, expected_paths: &[&str]) {
+    let identity = record
+        .remote_input_identity
+        .as_ref()
+        .expect("real oracle should record remote input identity");
+    assert_eq!(identity.pinned_url, pinned_url);
+    let paths = identity
+        .artifacts
+        .iter()
+        .map(|artifact| artifact.path.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(paths, expected_paths);
+    for artifact in &identity.artifacts {
+        assert!(!artifact.etag.is_empty());
+        assert!(artifact.content_length > 0);
+    }
+}
+
+fn assert_merit_refined_c_contract(record: &GoldenRecord) {
+    let raster = record
+        .raster_interpretation
+        .as_ref()
+        .expect("C golden should record MERIT raster interpretation");
+    assert!(raster.origin.contains("remote COG"));
+    assert!(raster.pixel_interpretation.contains("PixelIsArea"));
+    assert_eq!(raster.flow_direction.sample_type, "uint8");
+    assert_eq!(raster.flow_direction.encoding, "ESRI D8");
+    assert_eq!(raster.flow_accumulation.sample_type, "float32");
+
+    let window = record
+        .window_measurement
+        .as_ref()
+        .expect("C golden should record window measurement");
+    assert_eq!(window.search_radius_m, 5000.0);
+    assert!(window.flow_dir.tile_count > 0);
+    assert!(window.flow_acc.tile_count > 0);
+    assert!(window.flow_dir.bytes > 0);
+    assert!(window.flow_acc.bytes > 0);
+    assert!(window.http_total_bytes_in <= window.windowing_ceiling_bytes);
+    assert!(window.windowing_ceiling_bytes <= 500 * 1024 * 1024);
+    assert_rect_valid(&window.terminal_bbox);
+
+    let attestation = record
+        .attestation
+        .as_ref()
+        .expect("C golden should record GDAL parity attestation");
+    assert!(
+        attestation
+            .local_tiff_raster_source_gdal_tile_parity
+            .contains("tile-identical")
+    );
+    assert!(
+        attestation
+            .proof_command
+            .contains("merit_c_windows_tiff_match_gdal")
+    );
+}
+
+fn assert_rect_valid(rect: &RectRecord) {
+    assert!(rect.min_x.is_finite());
+    assert!(rect.min_y.is_finite());
+    assert!(rect.max_x.is_finite());
+    assert!(rect.max_y.is_finite());
+    assert!(rect.min_x < rect.max_x);
+    assert!(rect.min_y < rect.max_y);
+}
+
+fn read_golden_array(relative: &str) -> Vec<GoldenRecord> {
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(FIXTURE_DIR)
+        .join(relative);
+    serde_json::from_str(
+        &fs::read_to_string(fixture_path).expect("golden fixture should be readable"),
+    )
+    .expect("golden array should match the golden schema")
 }
 
 fn assert_canonical_wkb_idempotent(canonical: &[u8]) {
