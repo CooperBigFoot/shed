@@ -30,6 +30,12 @@ The JSON records include pinned URL identity for `manifest.json`,
 artifact test validates only the recorded strings and never re-fetches remote
 artifacts.
 
+Offline comparison command:
+
+```bash
+cargo test -p shed-core --test parity_golden_artifacts
+```
+
 Refresh command:
 
 ```bash

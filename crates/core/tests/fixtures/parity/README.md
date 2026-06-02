@@ -42,6 +42,25 @@ canonicalizer version and invalidates captured goldens.
 - `comparison_policy`: coordinate absolute epsilon plus `area_km2`
   absolute/relative epsilon tied to canonical WKB precision
 
+## Commands
+
+Offline comparison gate:
+
+```bash
+cargo build -p shed-core
+cargo test -p shed-core --test parity_v01_oracle_capture
+cargo test -p shed-core --test parity_golden_artifacts
+```
+
+Network-gated capture and refresh:
+
+```bash
+SHED_PARITY_R2_CAPTURE=1 cargo test -p shed-core --test parity_v01_oracle_capture -- --ignored --nocapture
+```
+
+Golden refresh is intentionally explicit. Do not regenerate or re-bless M1
+goldens during offline comparison work.
+
 ## Synthetic Refined Raster Fixture
 
 `v01_synthetic_refined/` is oracle B's committed v0.1 input fixture. It mirrors
@@ -64,8 +83,21 @@ the existing `simple_convergent_5x5` refinement geometry with real TIFF bytes.
   `(0, -5, 5, 0)`, outlet `(2.5, -2.5)`, snap threshold `500`, and center
   accumulation `800`
 
+M2 must not mutate or move this M1 B fixture in place. The v0.2.1 work creates a
+separate fixture copy and reuses the exact same `flow_dir.tif` and
+`flow_acc.tif` bytes. The durable artifact test re-hashes only those two TIFFs
+at this committed M1 path so accidental byte drift fails offline after M2.
+
+The B TIFFs are the deterministic, byte-identical M1-to-M4 parity path. For M4
+real-data D8 parity, use `merit/0.2.0`; `merit-basins/0.1.0` is the M1
+real-data v0.1 oracle C input, not the M4 v0.2.1 target.
+
 GDAL parity proof command:
 
 ```bash
 cargo test -p shed-gdal --test raster_decode_parity synthetic_b_tiff_matches_gdal -- --ignored --nocapture
 ```
+
+M1 already proved TIFF-vs-GDAL tile identity for B and for the accepted C
+`rhine_basel` windows. M4 may reuse the B proof for the byte-identical raster
+bytes, or re-run the proof if the reader implementation changes.

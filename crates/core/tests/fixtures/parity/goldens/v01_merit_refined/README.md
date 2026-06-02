@@ -25,7 +25,8 @@ After the deterministic dissolve fix, it still showed residual run-to-run
 canonical-WKB drift at continental scale. The suspected source is downstream of
 shed's dissolve path, likely floating-point nondeterminism in
 `geo::BooleanOps::union`; this is tracked as follow-up work rather than part of
-the Step 4b gate.
+the Step 4b gate. The durable artifact test requires only C `rhine_basel`; it
+must not treat Mekong as a missing required case.
 
 The accepted C record asserts the public-result invariants available from
 `DelineationResult`: `RefinementOutcome::Applied`, finite `refined_outlet`
@@ -54,6 +55,15 @@ window, it verifies matching tile geotransforms, sample values, nodata handling,
 and direct terminal-carve output. The C oracle is therefore scoped as: core TIFF
 reader carve proven tile-identical to the GDAL production decode for the
 localized C window.
+
+M4 handoff: `merit/0.2.0`, not this `merit-basins/0.1.0` v0.1 source, is the
+real-data v0.2.1 D8 parity target. This M1 oracle records inert v0.1 behavior
+and remote identity only; offline comparison must not fetch or re-hash its
+remote artifacts.
+
+M1 already proved TIFF-vs-GDAL tile identity for the accepted `rhine_basel`
+windows. M4 may reuse the synthetic B proof for byte-identical B rasters, and
+may re-run the C proof if the reader implementation changes.
 
 Refresh command:
 

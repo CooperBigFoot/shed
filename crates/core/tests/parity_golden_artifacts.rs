@@ -1,7 +1,13 @@
 //! Loader-independent validation for committed parity golden artifacts.
+//!
+//! This test intentionally imports no `DatasetBuilder`, `DatasetSession`,
+//! `Engine`, `AtomId`, `hfx_core`, or other v0.1-loader-only type. That
+//! invariant is load-bearing: this artifact harness must keep passing after M2
+//! deletes the v0.1 loader and leaves the committed M1 goldens as inert bytes.
 
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 use geo::{MultiPolygon, polygon};
 use geozero::ToGeo;
@@ -139,6 +145,8 @@ struct RemoteArtifactIdentity {
     path: String,
     etag: String,
     content_length: u64,
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -198,6 +206,7 @@ fn committed_synthetic_refined_b_golden_validates_schema_and_canonical_wkb() {
 
     assert_record_contract(&record);
     assert_synthetic_refined_b_contract(&record);
+    assert_b_raster_fixture_bytes_match_recorded_hashes(&record);
     assert_canonical_wkb_idempotent(&decode_hex(&record.canonical_wkb_hex));
 }
 
@@ -222,6 +231,7 @@ fn committed_grit_nonrefined_a_goldens_validate_schema_and_metadata_offline() {
         assert!(record.raster_interpretation.is_none());
         assert!(record.window_measurement.is_none());
         assert!(record.carve_measurement.is_none());
+        assert_remote_provenance_is_inert(record);
         assert_remote_identity(
             record,
             "https://basin-delineations-public.upstream.tech/grit/1.0.0/",
@@ -244,8 +254,10 @@ fn committed_merit_refined_c_goldens_validate_schema_and_metadata_offline() {
     for record in &records {
         assert_record_contract(record);
         assert_eq!(record.oracle, "C");
+        assert_eq!(record.case_name, "rhine_basel");
         assert_eq!(record.refinement_outcome.status, "Applied");
         assert!(record.carve_measurement.is_none());
+        assert_remote_provenance_is_inert(record);
         assert_remote_identity(
             record,
             "https://basin-delineations-public.upstream.tech/merit-basins/0.1.0/",
@@ -259,6 +271,7 @@ fn committed_merit_refined_c_goldens_validate_schema_and_metadata_offline() {
             ],
         );
         assert_merit_refined_c_contract(record);
+        assert_c_raster_remote_identity_has_no_content_hashes(record);
         assert_canonical_wkb_idempotent(&decode_hex(&record.canonical_wkb_hex));
     }
 }
@@ -286,13 +299,19 @@ fn in_test_geometry_canonical_wkb_is_idempotent_without_loader_dependencies() {
 }
 
 fn assert_record_contract(record: &GoldenRecord) {
+    assert!(!record.canonical_wkb_hex.is_empty());
+    assert_eq!(record.canonical_wkb_hex.len() % 2, 0);
+    assert!(
+        record
+            .canonical_wkb_hex
+            .chars()
+            .all(|c| c.is_ascii_hexdigit())
+    );
     assert_eq!(record.canonicalizer_version, CANONICAL_WKB_VERSION);
     assert_eq!(CANONICAL_WKB_DECIMAL_PRECISION, 6);
-    assert!(record.area_km2.is_finite() && record.area_km2 >= 0.0);
-    assert!(record.input_outlet.lon.is_finite());
-    assert!(record.input_outlet.lat.is_finite());
-    assert!(record.resolved_outlet.lon.is_finite());
-    assert!(record.resolved_outlet.lat.is_finite());
+    assert!(record.area_km2.is_finite() && record.area_km2 > 0.0);
+    assert_outlet_finite(&record.input_outlet);
+    assert_outlet_finite(&record.resolved_outlet);
     assert!(record.terminal_id >= 0);
     assert!(record.upstream_ids.windows(2).all(|ids| ids[0] < ids[1]));
     assert!(!record.upstream_ids.is_empty());
@@ -301,7 +320,12 @@ fn assert_record_contract(record: &GoldenRecord) {
     assert!(record.resolver_config.search_radius_m >= 0.0);
     assert!(!record.refinement_outcome.status.is_empty());
     if record.refinement_outcome.status == "Applied" {
-        assert!(record.refined_outlet.is_some());
+        assert_outlet_finite(
+            record
+                .refined_outlet
+                .as_ref()
+                .expect("Applied refinement should record refined outlet"),
+        );
     } else {
         assert!(record.refined_outlet.is_none());
     }
@@ -314,6 +338,11 @@ fn assert_record_contract(record: &GoldenRecord) {
 }
 
 fn assert_synthetic_refined_b_contract(record: &GoldenRecord) {
+    assert_eq!(record.refinement_outcome.status, "Applied");
+    assert_eq!(record.terminal_id, 1);
+    assert_eq!(record.upstream_ids, [1]);
+    assert!(record.area_km2 > 0.0);
+
     let raster = record
         .raster_interpretation
         .as_ref()
@@ -329,6 +358,13 @@ fn assert_synthetic_refined_b_contract(record: &GoldenRecord) {
     assert_eq!(raster.extent.x_max, 5.0);
     assert_eq!(raster.extent.y_min, -5.0);
     assert_eq!(raster.extent.y_max, 0.0);
+    assert_outlet_in_raster_extent(
+        record
+            .refined_outlet
+            .as_ref()
+            .expect("B golden should record refined outlet"),
+        &raster.extent,
+    );
     assert!(raster.pixel_interpretation.contains("PixelIsArea"));
     assert_eq!(raster.flow_direction.sample_type, "uint8");
     assert_eq!(raster.flow_direction.encoding, "ESRI D8");
@@ -362,6 +398,8 @@ fn assert_synthetic_refined_b_contract(record: &GoldenRecord) {
         assert_eq!(file.sha256.len(), 64);
         assert!(file.sha256.chars().all(|c| c.is_ascii_hexdigit()));
     }
+    assert_b_fixture_file_metadata(record, "flow_dir.tif", 371);
+    assert_b_fixture_file_metadata(record, "flow_acc.tif", 446);
 
     let attestation = record
         .attestation
@@ -390,10 +428,18 @@ fn assert_remote_identity(record: &GoldenRecord, pinned_url: &str, expected_path
     for artifact in &identity.artifacts {
         assert!(!artifact.etag.is_empty());
         assert!(artifact.content_length > 0);
+        assert!(
+            artifact.extra.is_empty(),
+            "unexpected remote identity metadata for {}: {:?}",
+            artifact.path,
+            artifact.extra
+        );
     }
 }
 
 fn assert_merit_refined_c_contract(record: &GoldenRecord) {
+    assert!(record.area_km2 > 0.0);
+
     let raster = record
         .raster_interpretation
         .as_ref()
@@ -409,6 +455,10 @@ fn assert_merit_refined_c_contract(record: &GoldenRecord) {
         .as_ref()
         .expect("C golden should record window measurement");
     assert_eq!(window.search_radius_m, 5000.0);
+    assert_eq!(
+        window.search_radius_m,
+        record.resolver_config.search_radius_m
+    );
     assert!(window.flow_dir.tile_count > 0);
     assert!(window.flow_acc.tile_count > 0);
     assert!(window.flow_dir.bytes > 0);
@@ -431,6 +481,87 @@ fn assert_merit_refined_c_contract(record: &GoldenRecord) {
             .proof_command
             .contains("merit_c_windows_tiff_match_gdal")
     );
+}
+
+fn assert_outlet_finite(outlet: &Outlet) {
+    assert!(outlet.lon.is_finite());
+    assert!(outlet.lat.is_finite());
+    assert!((-180.0..=180.0).contains(&outlet.lon));
+    assert!((-90.0..=90.0).contains(&outlet.lat));
+}
+
+fn assert_outlet_in_raster_extent(outlet: &Outlet, extent: &RasterExtent) {
+    assert!((extent.x_min..=extent.x_max).contains(&outlet.lon));
+    assert!((extent.y_min..=extent.y_max).contains(&outlet.lat));
+}
+
+fn assert_remote_provenance_is_inert(record: &GoldenRecord) {
+    let provenance = record
+        .fixture_provenance
+        .as_ref()
+        .expect("remote oracle should record inert fixture provenance marker");
+    assert_eq!(provenance.content_hash_algorithm, "sha256");
+    assert!(
+        provenance.files.is_empty(),
+        "remote oracle provenance must remain inert and must not carry hashes"
+    );
+}
+
+fn assert_b_fixture_file_metadata(record: &GoldenRecord, path: &str, size_bytes: u64) {
+    let file = find_fixture_file(record, path);
+    assert_eq!(file.size_bytes, size_bytes);
+    assert_eq!(file.sha256.len(), 64);
+    assert!(file.sha256.chars().all(|c| c.is_ascii_hexdigit()));
+}
+
+fn assert_b_raster_fixture_bytes_match_recorded_hashes(record: &GoldenRecord) {
+    for raster_path in ["flow_dir.tif", "flow_acc.tif"] {
+        let recorded = find_fixture_file(record, raster_path);
+        let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(FIXTURE_DIR)
+            .join("v01_synthetic_refined")
+            .join(raster_path);
+        let metadata = fs::metadata(&fixture_path).unwrap_or_else(|error| {
+            panic!("B raster fixture should exist at {fixture_path:?}: {error}")
+        });
+        assert_eq!(metadata.len(), recorded.size_bytes);
+        assert_eq!(sha256_file(&fixture_path), recorded.sha256);
+    }
+}
+
+fn find_fixture_file<'a>(record: &'a GoldenRecord, path: &str) -> &'a FileProvenance {
+    record
+        .fixture_provenance
+        .as_ref()
+        .expect("B golden should record fixture provenance")
+        .files
+        .iter()
+        .find(|file| file.path == path)
+        .unwrap_or_else(|| panic!("B fixture provenance should record {path}"))
+}
+
+fn assert_c_raster_remote_identity_has_no_content_hashes(record: &GoldenRecord) {
+    let identity = record
+        .remote_input_identity
+        .as_ref()
+        .expect("C golden should record remote input identity");
+    for raster_path in ["flow_dir.tif", "flow_acc.tif"] {
+        let artifact = identity
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.path == raster_path)
+            .unwrap_or_else(|| panic!("C remote identity should record {raster_path}"));
+        assert!(artifact.etag.starts_with('"'));
+        assert!(
+            artifact.etag.trim_matches('"').contains('-'),
+            "C raster ETag should be recorded as the remote multipart ETag"
+        );
+        assert!(artifact.content_length > 0);
+        assert!(
+            artifact.extra.is_empty(),
+            "C raster identity must be ETag plus Content-Length only"
+        );
+    }
 }
 
 fn assert_rect_valid(rect: &RectRecord) {
@@ -487,6 +618,25 @@ fn decode_hex(hex: &str) -> Vec<u8> {
             (high << 4) | low
         })
         .collect()
+}
+
+fn sha256_file(path: &Path) -> String {
+    let output = Command::new("shasum")
+        .args(["-a", "256"])
+        .arg(path)
+        .output()
+        .unwrap_or_else(|error| panic!("shasum should run for {path:?}: {error}"));
+    assert!(
+        output.status.success(),
+        "shasum failed for {path:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("shasum output should be utf8")
+        .split_whitespace()
+        .next()
+        .expect("shasum output should include a hash")
+        .to_string()
 }
 
 fn hex_digit(byte: u8) -> u8 {
