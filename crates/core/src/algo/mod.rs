@@ -27,6 +27,7 @@ pub mod trace;
 pub mod upstream;
 
 // ── Geometry processing ──────────────────────────────────────────────────────
+pub mod canonical_wkb;
 pub mod clean_topology;
 pub mod dissolve;
 pub mod hole_fill;
@@ -68,6 +69,9 @@ pub use trace::trace_upstream;
 pub use upstream::{TraversalError, UpstreamAtoms, collect_upstream};
 
 // ── Re-exports: geometry processing ──────────────────────────────────────────
+pub use canonical_wkb::{
+    CANONICAL_WKB_DECIMAL_PRECISION, CANONICAL_WKB_VERSION, canonical_wkb_multi_polygon,
+};
 pub use clean_topology::clean_topology;
 pub use dissolve::{DissolveError, dissolve};
 pub use hole_fill::{DEFAULT_FILL_THRESHOLD_PX, HoleFillMode, fill_holes};
