@@ -1,0 +1,30 @@
+{
+  "canonical_wkb_hex": "01060000000100000001030000000100000005000000000000000000000000000000000014c0000000000000144000000000000014c00000000000001440000000000000000000000000000000000000000000000000000000000000000000000000000014c0",
+  "area_km2": 307541.81354758184,
+  "input_outlet": {
+    "lon": 2.5,
+    "lat": -2.5
+  },
+  "resolved_outlet": {
+    "lon": 2.5,
+    "lat": -2.5
+  },
+  "terminal_id": 1,
+  "upstream_ids": [
+    1
+  ],
+  "resolution_method": "point-in-polygon(candidates_considered=1,tie_break=none)",
+  "resolver_config": {
+    "search_radius_m": 1000.0
+  },
+  "refinement_outcome": {
+    "status": "Disabled",
+    "reason": null
+  },
+  "canonicalizer_version": "shed-canonical-wkb-v1",
+  "comparison_policy": {
+    "coordinate_abs_epsilon": 1e-6,
+    "area_km2_abs_epsilon": 1e-6,
+    "area_km2_rel_epsilon": 1e-6
+  }
+}

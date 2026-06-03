@@ -212,6 +212,22 @@ fn committed_synthetic_refined_b_golden_validates_schema_and_canonical_wkb() {
 }
 
 #[test]
+fn committed_v021_synthetic_nonrefined_golden_validates_schema_and_canonical_wkb() {
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(FIXTURE_DIR)
+        .join("goldens/v021_synthetic_nonrefined/v021_synthetic_nonrefined.json");
+    let record: GoldenRecord = serde_json::from_str(
+        &fs::read_to_string(fixture_path)
+            .expect("v0.2.1 non-refined golden fixture should be readable"),
+    )
+    .expect("v0.2.1 non-refined golden should match the golden schema");
+
+    assert_record_contract(&record);
+    assert_v021_synthetic_nonrefined_contract(&record);
+    assert_canonical_wkb_idempotent(&decode_hex(&record.canonical_wkb_hex));
+}
+
+#[test]
 fn converted_v021_synthetic_refined_tiffs_match_m1_b_bytes() {
     for raster_path in ["flow_dir.tif", "flow_acc.tif"] {
         let m1_path = parity_fixture_path(M1_SYNTHETIC_REFINED_DIR).join(raster_path);
@@ -429,6 +445,24 @@ fn assert_synthetic_refined_b_contract(record: &GoldenRecord) {
             .contains("tile-identical")
     );
     assert!(attestation.proof_command.contains("shed-gdal"));
+}
+
+fn assert_v021_synthetic_nonrefined_contract(record: &GoldenRecord) {
+    assert_eq!(record.refinement_outcome.status, "Disabled");
+    assert!(record.refinement_outcome.reason.is_none());
+    assert!(record.refined_outlet.is_none());
+    assert_eq!(record.terminal_id, 1);
+    assert_eq!(record.upstream_ids, [1]);
+    assert_eq!(
+        record.resolution_method,
+        "point-in-polygon(candidates_considered=1,tie_break=none)"
+    );
+    assert_eq!(record.resolver_config.search_radius_m, 1000.0);
+    assert_eq!(record.input_outlet.lon, 2.5);
+    assert_eq!(record.input_outlet.lat, -2.5);
+    assert_eq!(record.resolved_outlet.lon, 2.5);
+    assert_eq!(record.resolved_outlet.lat, -2.5);
+    assert_eq!(record.canonical_wkb_hex.len(), 204);
 }
 
 fn assert_remote_identity(record: &GoldenRecord, pinned_url: &str, expected_paths: &[&str]) {
