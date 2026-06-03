@@ -61,6 +61,8 @@ pub struct GenericAuxDecl {
     pub schema: String,
     /// Artifact key → resolved dataset-root-relative path.
     pub artifacts: BTreeMap<String, String>,
+    /// Raw metadata retained without semantic parsing.
+    pub metadata: serde_json::Value,
 }
 
 /// shed-side classified auxiliary declarations parsed from `manifest.auxiliary[]`.
@@ -183,9 +185,7 @@ fn build_manifest(raw: RawManifest) -> Result<ParsedManifest, SessionError> {
     let topology = Topology::from_str(&topology_str).map_err(|_| {
         SessionError::manifest_field_invalid(
             "topology",
-            format!(
-                "unsupported topology {topology_str:?}, expected \"tree\" or \"dag\""
-            ),
+            format!("unsupported topology {topology_str:?}, expected \"tree\" or \"dag\""),
         )
     })?;
 
@@ -306,17 +306,18 @@ fn parse_auxiliary(raw: RawAuxiliary) -> Result<(AuxiliaryDecl, ClassifiedAux), 
     })?;
 
     let classified = match &schema_id {
-        AuxiliarySchemaId::Blessed(BlessedAuxSchema::D8RasterV1) => {
-            ClassifiedAux::D8(parse_d8_metadata(&schema_str, &raw.artifacts, &raw.metadata)?)
-        }
-        AuxiliarySchemaId::Blessed(BlessedAuxSchema::SnapV1) => {
-            ClassifiedAux::Snap(parse_snap_metadata(&schema_str, &raw.artifacts, &raw.metadata)?)
-        }
+        AuxiliarySchemaId::Blessed(BlessedAuxSchema::D8RasterV1) => ClassifiedAux::D8(
+            parse_d8_metadata(&schema_str, &raw.artifacts, &raw.metadata)?,
+        ),
+        AuxiliarySchemaId::Blessed(BlessedAuxSchema::SnapV1) => ClassifiedAux::Snap(
+            parse_snap_metadata(&schema_str, &raw.artifacts, &raw.metadata)?,
+        ),
         AuxiliarySchemaId::Provisional(_) | AuxiliarySchemaId::ThirdParty(_) => {
             // Generic handle: raw path + metadata only, no semantic parsing.
             ClassifiedAux::Generic(GenericAuxDecl {
                 schema: schema_str,
                 artifacts: raw.artifacts,
+                metadata: raw.metadata,
             })
         }
     };
@@ -418,14 +419,19 @@ fn parse_snap_metadata(
     }
     let mut references_levels = Vec::with_capacity(levels_raw.len());
     for v in levels_raw {
-        let n = v.as_i64().ok_or_else(|| SessionError::SnapAuxMetadataInvalid {
-            name: name.clone(),
-            reason: "metadata.references_levels entries must be integers".to_string(),
-        })?;
+        let n = v
+            .as_i64()
+            .ok_or_else(|| SessionError::SnapAuxMetadataInvalid {
+                name: name.clone(),
+                reason: "metadata.references_levels entries must be integers".to_string(),
+            })?;
         if !(0..=i64::from(i16::MAX)).contains(&n) {
             return Err(SessionError::SnapAuxMetadataInvalid {
                 name: name.clone(),
-                reason: format!("metadata.references_levels entry {n} out of range [0, {}]", i16::MAX),
+                reason: format!(
+                    "metadata.references_levels entry {n} out of range [0, {}]",
+                    i16::MAX
+                ),
             });
         }
         references_levels.push(n as i16);
@@ -527,7 +533,10 @@ mod tests {
         value["crs"] = json!("EPSG:32632");
         let path = write_manifest(&dir, &value);
         let err = read_manifest(&path).unwrap_err();
-        assert!(matches!(err, SessionError::UnsupportedCrs { .. }), "got {err}");
+        assert!(
+            matches!(err, SessionError::UnsupportedCrs { .. }),
+            "got {err}"
+        );
     }
 
     #[test]
@@ -572,7 +581,12 @@ mod tests {
         let path = write_manifest(&dir, &value);
         let err = read_manifest(&path).unwrap_err();
         assert!(
-            matches!(err, SessionError::ManifestFieldMissing { field: "unit_count" }),
+            matches!(
+                err,
+                SessionError::ManifestFieldMissing {
+                    field: "unit_count"
+                }
+            ),
             "unexpected error: {err}"
         );
     }
@@ -583,7 +597,10 @@ mod tests {
         let path = dir.path().join("manifest.json");
         std::fs::write(&path, b"{broken").unwrap();
         let err = read_manifest(&path).unwrap_err();
-        assert!(matches!(err, SessionError::ManifestJsonParse { .. }), "got {err}");
+        assert!(
+            matches!(err, SessionError::ManifestJsonParse { .. }),
+            "got {err}"
+        );
     }
 
     #[test]
