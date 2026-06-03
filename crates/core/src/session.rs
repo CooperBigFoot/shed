@@ -1,5 +1,6 @@
 //! Dataset session — loads an HFX dataset for repeated queries.
 
+use std::collections::{BTreeSet, HashMap};
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -96,6 +97,7 @@ pub struct DatasetSession {
     manifest: Manifest,
     aux_declarations: AuxDeclarations,
     graph: hfx_core::DrainageGraph,
+    catchment_levels: HashMap<UnitId, Level>,
     catchments: CatchmentStore,
     snap: Option<SnapStore>,
     raster_paths: Option<RasterPaths>,
@@ -282,6 +284,7 @@ impl DatasetSession {
             manifest,
             aux_declarations,
             graph,
+            catchment_levels,
             catchments,
             snap,
             raster_paths,
@@ -515,6 +518,7 @@ impl DatasetSession {
             manifest,
             aux_declarations,
             graph,
+            catchment_levels,
             catchments,
             snap,
             raster_paths,
@@ -555,6 +559,26 @@ impl DatasetSession {
     /// Return a reference to the in-memory drainage graph.
     pub fn graph(&self) -> &hfx_core::DrainageGraph {
         &self.graph
+    }
+
+    /// Return the validated HFX level for a drainage unit.
+    pub fn level_of(&self, unit_id: UnitId) -> Option<Level> {
+        self.catchment_levels.get(&unit_id).copied()
+    }
+
+    /// Return the sorted set of HFX levels present in the loaded dataset.
+    pub fn levels(&self) -> Vec<Level> {
+        self.catchment_levels
+            .values()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// Return the finest HFX level present in the loaded dataset.
+    pub fn max_level(&self) -> Option<Level> {
+        self.catchment_levels.values().copied().max()
     }
 
     /// Return a reference to the catchment store for on-demand queries.
@@ -740,7 +764,7 @@ fn validate_graph_catchments(
     manifest: &Manifest,
     graph: &DrainageGraph,
     catchments: &CatchmentStore,
-) -> Result<std::collections::HashMap<UnitId, Level>, SessionError> {
+) -> Result<HashMap<UnitId, Level>, SessionError> {
     let expected = manifest.unit_count().get();
     let actual = catchments.total_rows();
     if expected != actual {
@@ -758,7 +782,7 @@ fn validate_graph_catchments(
         .query_by_ids(&catchment_ids)?
         .into_iter()
         .map(|unit| (unit.id(), unit.level()))
-        .collect::<std::collections::HashMap<_, _>>();
+        .collect::<HashMap<_, _>>();
 
     if graph.len() != catchment_ids.len() {
         return Err(SessionError::GraphReferentialIntegrity {
@@ -846,7 +870,7 @@ fn validate_graph_catchments(
 fn validate_snap_refs(
     snap_store: &SnapStore,
     decl: &SnapDecl,
-    catchment_levels: &std::collections::HashMap<UnitId, Level>,
+    catchment_levels: &HashMap<UnitId, Level>,
 ) -> Result<(), SessionError> {
     let snap_refs = snap_store.read_all_snap_refs()?;
     for snap_ref in &snap_refs {

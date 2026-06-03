@@ -30,5 +30,6 @@ pub fn engine_err_to_py(e: shed_core::EngineError) -> PyErr {
         EngineError::RasterLocalize { .. } => DatasetError::new_err(e.to_string()),
         EngineError::Refinement { .. } => ShedError::new_err(e.to_string()),
         EngineError::Assembly { .. } => PyAssemblyError::new_err(e.to_string()),
+        EngineError::SessionLevelIndexEmpty { .. } => DatasetError::new_err(e.to_string()),
     }
 }

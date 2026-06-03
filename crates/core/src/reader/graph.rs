@@ -1,11 +1,13 @@
 //! Graph reader — loads HFX v0.2.1 graph.parquet into a DrainageGraph.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use arrow::array::{Array, Int16Array, Int64Array, LargeListArray, ListArray};
 use arrow::datatypes::DataType;
 use hfx_core::{AdjacencyRow, DrainageGraph, GraphError, Level, UnitId};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::file::statistics::Statistics;
 use tracing::{debug, info, instrument};
 
 use crate::error::SessionError;
@@ -27,11 +29,12 @@ const BBOX_COLUMNS: [&str; 4] = ["bbox_minx", "bbox_miny", "bbox_maxx", "bbox_ma
 #[instrument(skip_all, fields(path = %path.display()))]
 pub fn load_graph(path: &Path) -> Result<DrainageGraph, SessionError> {
     let file = std::fs::File::open(path).map_err(|e| SessionError::io(ARTIFACT, e))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|source| SessionError::ParquetParse {
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|source| {
+        SessionError::ParquetParse {
             artifact: ARTIFACT,
             source,
-        })?;
+        }
+    })?;
     read_graph_from_builder(builder)
 }
 
@@ -42,12 +45,63 @@ pub fn load_graph(path: &Path) -> Result<DrainageGraph, SessionError> {
 /// See [`load_graph`].
 #[instrument(skip_all, fields(byte_len = bytes.len()))]
 pub fn load_graph_from_bytes(bytes: bytes::Bytes) -> Result<DrainageGraph, SessionError> {
-    let builder = ParquetRecordBatchReaderBuilder::try_new(bytes)
-        .map_err(|source| SessionError::ParquetParse {
+    let builder = ParquetRecordBatchReaderBuilder::try_new(bytes).map_err(|source| {
+        SessionError::ParquetParse {
             artifact: ARTIFACT,
             source: source.into(),
-        })?;
+        }
+    })?;
     read_graph_from_builder(builder)
+}
+
+/// Derive graph levels from Parquet row-group `level` statistics without rows.
+///
+/// This is the offline-testable bounded path needed by the GRIT readiness tier:
+/// it reads only the graph footer metadata and returns the levels visible in
+/// row-group min/max statistics. Row groups without `level` statistics are
+/// skipped, so callers must treat an empty result as "statistics unavailable",
+/// not as proof that the dataset has no graph levels. Network exercise and
+/// bounded unit lookup remain Step 10 wiring.
+#[instrument(skip_all, fields(path = %path.display()))]
+pub fn levels_from_row_group_statistics(path: &Path) -> Result<Vec<Level>, SessionError> {
+    let file = std::fs::File::open(path).map_err(|e| SessionError::io(ARTIFACT, e))?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|source| {
+        SessionError::ParquetParse {
+            artifact: ARTIFACT,
+            source,
+        }
+    })?;
+    validate_schema(builder.schema())?;
+
+    let level_col = builder
+        .schema()
+        .fields()
+        .iter()
+        .position(|field| field.name() == "level")
+        .ok_or_else(|| SessionError::graph_schema("missing required column \"level\""))?;
+
+    let mut levels = BTreeSet::new();
+    for row_group in builder.metadata().row_groups() {
+        let Some(stats) = row_group.column(level_col).statistics() else {
+            continue;
+        };
+        if let Some(level) = int16_stat_min(stats)? {
+            levels.insert(level);
+        }
+        if let Some(level) = int16_stat_max(stats)? {
+            levels.insert(level);
+        }
+    }
+
+    Ok(levels.into_iter().collect())
+}
+
+/// Return the maximum graph level visible from row-group `level` statistics.
+///
+/// See [`levels_from_row_group_statistics`] for the bounded-path contract and
+/// the handling of files whose row groups lack level statistics.
+pub fn max_level_from_row_group_statistics(path: &Path) -> Result<Option<Level>, SessionError> {
+    Ok(levels_from_row_group_statistics(path)?.into_iter().max())
 }
 
 fn read_graph_from_builder<R>(
@@ -106,7 +160,11 @@ where
 
             let raw_id = id_arr.value(i);
             let id = UnitId::new(raw_id).map_err(|e| {
-                SessionError::invalid_row(ARTIFACT, row_idx, format!("invalid unit id {raw_id}: {e}"))
+                SessionError::invalid_row(
+                    ARTIFACT,
+                    row_idx,
+                    format!("invalid unit id {raw_id}: {e}"),
+                )
             })?;
             let raw_level = level_arr.value(i);
             let level = Level::new(raw_level).map_err(|e| {
@@ -134,6 +192,35 @@ where
     })?;
     info!(row_count, "graph.parquet loaded");
     Ok(graph)
+}
+
+fn int16_stat_min(stats: &Statistics) -> Result<Option<Level>, SessionError> {
+    match stats {
+        Statistics::Int32(typed) => typed.min_opt().copied().map(level_from_stat).transpose(),
+        _ => Ok(None),
+    }
+}
+
+fn int16_stat_max(stats: &Statistics) -> Result<Option<Level>, SessionError> {
+    match stats {
+        Statistics::Int32(typed) => typed.max_opt().copied().map(level_from_stat).transpose(),
+        _ => Ok(None),
+    }
+}
+
+fn level_from_stat(raw: i32) -> Result<Level, SessionError> {
+    let raw = i16::try_from(raw).map_err(|_| {
+        SessionError::parquet_schema(
+            ARTIFACT,
+            format!("row-group level statistic {raw} does not fit Int16"),
+        )
+    })?;
+    Level::new(raw).map_err(|e| {
+        SessionError::parquet_schema(
+            ARTIFACT,
+            format!("invalid row-group level statistic {raw}: {e}"),
+        )
+    })
 }
 
 fn validate_schema(schema: &arrow::datatypes::SchemaRef) -> Result<(), SessionError> {

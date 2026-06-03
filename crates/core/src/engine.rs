@@ -8,20 +8,20 @@ use tracing::instrument;
 
 use crate::algo::coord::GeoCoord;
 use crate::algo::{
-    collect_upstream, encode_wkb_multi_polygon, refine_terminal_from_source, AreaKm2, CleanEpsilon,
-    GeometryRepair, HoleFillMode, RasterSource, RefinementError, SnapThreshold, TraversalError,
-    WkbDecodeError, WkbEncodeError, DEFAULT_CLEANING_EPSILON,
+    AreaKm2, CleanEpsilon, DEFAULT_CLEANING_EPSILON, GeometryRepair, HoleFillMode, RasterSource,
+    RefinementError, SnapThreshold, TraversalError, WkbDecodeError, WkbEncodeError,
+    collect_upstream, encode_wkb_multi_polygon, refine_terminal_from_source,
 };
-use crate::assembly::{assemble_watershed, AssemblyOptions};
+use crate::assembly::{AssemblyOptions, assemble_watershed};
 use crate::error::SessionError;
 use crate::reader::catchment_store::CatchmentGeometryQueryError;
 use crate::resolver::{
-    resolve_outlet, OutletResolutionError, ResolutionMethod, ResolvedOutlet, ResolverConfig,
+    OutletResolutionError, ResolutionMethod, ResolvedOutlet, ResolverConfig, resolve_outlet,
 };
 use crate::session::{DatasetSession, RasterKind};
-use crate::staged::RefinementMode;
+use crate::staged::{LevelSelection, RefinementMode, SelectedLevel};
 use crate::telemetry::{
-    record_bytes, record_cache_status, record_path, record_requests, Stage, StageGuard,
+    Stage, StageGuard, record_bytes, record_cache_status, record_path, record_requests,
 };
 
 // ── RefinementOutcome ─────────────────────────────────────────────────────────
@@ -320,6 +320,20 @@ pub enum EngineError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+
+    /// Fired when a loaded dataset has no stored session level index entries.
+    ///
+    /// This is unreachable after M2 graph/catchment validation for a valid HFX
+    /// dataset. Treat it as an integrity error if tests can trigger it.
+    #[error(
+        "session level index is empty for loaded dataset {fabric:?} with {unit_count} manifest units"
+    )]
+    SessionLevelIndexEmpty {
+        /// Manifest fabric name for the loaded dataset.
+        fabric: String,
+        /// Manifest unit count for the loaded dataset.
+        unit_count: u64,
+    },
 }
 
 // ── EngineBuilder ─────────────────────────────────────────────────────────────
@@ -382,6 +396,26 @@ impl Engine {
     /// Return object-store request counters when network benchmarking is enabled.
     pub fn http_stats(&self) -> Option<crate::source_telemetry::HttpStatsSnapshot> {
         self.session.http_stats()
+    }
+
+    /// Select the HFX drainage-unit level for a staged delineation run.
+    ///
+    /// # Errors
+    ///
+    /// | Variant | When |
+    /// |---|---|
+    /// | [`EngineError::SessionLevelIndexEmpty`] | The loaded session has no stored level-index entries |
+    pub fn select_level(&self, choice: LevelSelection) -> Result<SelectedLevel, EngineError> {
+        match choice {
+            LevelSelection::Finest => self
+                .session
+                .max_level()
+                .map(SelectedLevel::from_proven_level)
+                .ok_or_else(|| EngineError::SessionLevelIndexEmpty {
+                    fabric: self.session.manifest().fabric_name().to_string(),
+                    unit_count: self.session.manifest().unit_count().get(),
+                }),
+        }
     }
 
     /// Delineate the watershed upstream of `outlet`.

@@ -88,6 +88,11 @@ pub struct SelectedLevel {
 }
 
 impl SelectedLevel {
+    /// Construct a selected level after the dataset session proves it exists.
+    pub(crate) fn from_proven_level(level: Level) -> Self {
+        Self { level }
+    }
+
     /// Return the selected HFX level.
     pub fn level(self) -> Level {
         self.level
