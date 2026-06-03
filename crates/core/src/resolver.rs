@@ -9,7 +9,7 @@
 use std::fmt;
 
 use geo::{Contains, Intersects};
-use hfx_core::{UnitId, BoundingBox, CatchmentUnit, StemRole, SnapId, Weight};
+use hfx_core::{BoundingBox, CatchmentUnit, SnapId, StemRole, UnitId, Weight};
 use tracing::{debug, info, instrument, warn};
 
 use crate::algo::coord::GeoCoord;
@@ -1060,6 +1060,94 @@ mod tests {
 
         let result = resolve_outlet(&session, GeoCoord::new(0.2, 0.2), &config).unwrap();
         assert_eq!(result.unit_id, UnitId::new(2).unwrap());
+    }
+
+    #[test]
+    fn weight_first_preserves_mainstem_then_distance_tie_breakers() {
+        let mainstem_catchments = vec![
+            TestCatchment {
+                id: 1,
+                area_km2: 10.0,
+                up_area_km2: None,
+                polygon: (0.0, 0.0, 0.4, 0.4),
+            },
+            TestCatchment {
+                id: 2,
+                area_km2: 10.0,
+                up_area_km2: None,
+                polygon: (0.5, 0.0, 0.9, 0.4),
+            },
+        ];
+        let mainstem_targets = vec![
+            TestSnapTarget {
+                id: 11,
+                catchment_id: 1,
+                weight: 50.0,
+                is_mainstem: false,
+                geometry: TestSnapGeometry::Point(0.2, 0.2),
+            },
+            TestSnapTarget {
+                id: 22,
+                catchment_id: 2,
+                weight: 50.0,
+                is_mainstem: true,
+                geometry: TestSnapGeometry::Point(0.205, 0.2),
+            },
+        ];
+        let (_dir, root) = DatasetBuilder::new(2)
+            .with_custom_catchments(mainstem_catchments)
+            .with_custom_snap_targets(mainstem_targets)
+            .build();
+        let session = DatasetSession::open_path(&root).unwrap();
+        let config = ResolverConfig::new().with_snap_strategy(SnapStrategy::WeightFirst);
+
+        let mainstem_result = resolve_outlet(&session, GeoCoord::new(0.2, 0.2), &config).unwrap();
+        assert!(matches!(
+            mainstem_result.method,
+            ResolutionMethod::Snap {
+                snap_id,
+                strategy: SnapStrategy::WeightFirst,
+                ..
+            } if snap_id == hfx_core::SnapId::new(22).unwrap()
+        ));
+
+        let distance_catchments = vec![TestCatchment {
+            id: 3,
+            area_km2: 10.0,
+            up_area_km2: None,
+            polygon: (1.0, 0.0, 1.4, 0.4),
+        }];
+        let distance_targets = vec![
+            TestSnapTarget {
+                id: 44,
+                catchment_id: 3,
+                weight: 40.0,
+                is_mainstem: true,
+                geometry: TestSnapGeometry::Point(0.205, 0.2),
+            },
+            TestSnapTarget {
+                id: 33,
+                catchment_id: 3,
+                weight: 40.0,
+                is_mainstem: true,
+                geometry: TestSnapGeometry::Point(0.201, 0.2),
+            },
+        ];
+        let (_dir, root) = DatasetBuilder::new(1)
+            .with_custom_catchments(distance_catchments)
+            .with_custom_snap_targets(distance_targets)
+            .build();
+        let session = DatasetSession::open_path(&root).unwrap();
+
+        let distance_result = resolve_outlet(&session, GeoCoord::new(0.202, 0.2), &config).unwrap();
+        assert!(matches!(
+            distance_result.method,
+            ResolutionMethod::Snap {
+                snap_id,
+                strategy: SnapStrategy::WeightFirst,
+                ..
+            } if snap_id == hfx_core::SnapId::new(33).unwrap()
+        ));
     }
 
     #[test]

@@ -8,7 +8,8 @@ use arrow::array::{Array, BinaryArray, Float32Array, Int64Array, LargeBinaryArra
 use arrow::datatypes::DataType;
 use chrono::{DateTime, Utc};
 use futures_util::{StreamExt, stream};
-use hfx_core::{UnitId, BoundingBox, StemRole, SnapId, SnapTarget, Weight, WkbGeometry};
+use geo::{BoundingRect, Geometry};
+use hfx_core::{BoundingBox, SnapId, SnapTarget, StemRole, UnitId, Weight, WkbGeometry};
 use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt};
@@ -17,9 +18,10 @@ use parquet::arrow::arrow_reader::ArrowReaderMetadata;
 use parquet::arrow::async_reader::{
     AsyncFileReader, ParquetObjectReader, ParquetRecordBatchStreamBuilder,
 };
-use tracing::{debug, info, instrument, warn};
+use tracing::{Instrument, debug, info, instrument, warn};
 
 use super::id_index::IdIndex;
+use crate::algo::wkb::decode_wkb;
 use crate::cache::ArtifactMeta;
 use crate::error::SessionError;
 use crate::parquet_cache::{
@@ -117,20 +119,25 @@ struct SnapBboxRowGroupReadContext {
     cache_ident: Option<ArtifactIdent>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SnapUnitRef {
+    pub(crate) snap_id: SnapId,
+    pub(crate) unit_id: UnitId,
+}
+
 /// Lazy reader for snap.parquet with row-group bbox pruning.
 #[derive(Debug)]
 pub struct SnapStore {
     store: Arc<dyn ObjectStore>,
     path: ObjectPath,
-    path_display: String,
     file_size: u64,
     file_etag: Option<String>,
     row_groups: Vec<RowGroupBbox>,
     groups_without_stats: Vec<usize>,
     total_rows: u64,
-    all_unit_ids: Vec<UnitId>,
     #[allow(dead_code)]
-    bbox_col_indices: BboxColIndices,
+    bbox_col_indices: Option<BboxColIndices>,
+    all_snap_refs: Vec<SnapUnitRef>,
     /// Optional column-chunk cache shared across all readers for this engine.
     parquet_cache: Option<Arc<ParquetRowGroupCache>>,
     /// Optional footer metadata cache shared across all readers for this engine.
@@ -308,18 +315,8 @@ impl SnapStore {
                 "column \"stem_role\" must be Utf8 when present",
             ));
         }
-        let minx_idx = require_column(schema, "bbox_minx", &DataType::Float32, ARTIFACT)?;
-        let miny_idx = require_column(schema, "bbox_miny", &DataType::Float32, ARTIFACT)?;
-        let maxx_idx = require_column(schema, "bbox_maxx", &DataType::Float32, ARTIFACT)?;
-        let maxy_idx = require_column(schema, "bbox_maxy", &DataType::Float32, ARTIFACT)?;
+        let bbox_col_indices = optional_bbox_col_indices(schema)?;
         require_column(schema, "geometry", &DataType::Binary, ARTIFACT)?;
-
-        let bbox_col_indices = BboxColIndices {
-            minx: minx_idx,
-            miny: miny_idx,
-            maxx: maxx_idx,
-            maxy: maxy_idx,
-        };
 
         let mut row_groups = Vec::new();
         let mut groups_without_stats = Vec::new();
@@ -329,17 +326,22 @@ impl SnapStore {
             let row_count = rg.num_rows() as usize;
             total_rows += rg.num_rows() as u64;
 
-            match extract_row_group_bbox(rg, &bbox_col_indices) {
-                Some(bbox) => row_groups.push(RowGroupBbox {
-                    index: i,
-                    bbox,
-                    row_count,
-                }),
+            match bbox_col_indices
+                .as_ref()
+                .and_then(|indices| extract_row_group_bbox(rg, indices))
+            {
+                Some(bbox) => {
+                    row_groups.push(RowGroupBbox {
+                        index: i,
+                        bbox,
+                        row_count,
+                    });
+                }
                 None => groups_without_stats.push(i),
             }
         }
 
-        let all_unit_ids = read_or_build_id_index(
+        let all_snap_refs = read_or_build_id_index(
             &store,
             &path,
             file_size,
@@ -355,21 +357,20 @@ impl SnapStore {
             row_groups = row_groups.len(),
             groups_without_stats = groups_without_stats.len(),
             total_rows,
-            indexed_ids = all_unit_ids.len(),
+            indexed_ids = all_snap_refs.len(),
             "snap store opened"
         );
 
         Ok(Self {
             store,
             path,
-            path_display,
             file_size,
             file_etag: head_meta.e_tag,
             row_groups,
             groups_without_stats,
             total_rows,
-            all_unit_ids,
             bbox_col_indices,
+            all_snap_refs,
             parquet_cache,
             footer_cache,
             cache_ident,
@@ -388,9 +389,11 @@ impl SnapStore {
     /// | File cannot be re-opened | [`SessionError::Io`] |
     /// | Row group read fails | [`SessionError::RowGroupReadError`] |
     /// | Row fails domain validation | [`SessionError::InvalidRow`] |
-    #[instrument(skip_all, fields(path = %self.path_display))]
     pub fn query_by_bbox(&self, query_bbox: &BoundingBox) -> Result<Vec<SnapTarget>, SessionError> {
-        RT.block_on(self.query_by_bbox_async(query_bbox))
+        RT.block_on(
+            self.query_by_bbox_async(query_bbox)
+                .instrument(tracing::Span::current()),
+        )
     }
 
     async fn query_by_bbox_async(
@@ -488,7 +491,15 @@ impl SnapStore {
     /// | Row contains a null `unit_id` | [`SessionError::InvalidRow`] |
     /// | `unit_id` value fails domain validation | [`SessionError::InvalidRow`] |
     pub fn read_all_unit_ids(&self) -> Result<Vec<hfx_core::UnitId>, SessionError> {
-        Ok(self.all_unit_ids.clone())
+        Ok(self
+            .all_snap_refs
+            .iter()
+            .map(|snap_ref| snap_ref.unit_id)
+            .collect())
+    }
+
+    pub(crate) fn read_all_snap_refs(&self) -> Result<Vec<SnapUnitRef>, SessionError> {
+        Ok(self.all_snap_refs.clone())
     }
 
     /// Return the total number of snap target rows across all row groups.
@@ -512,15 +523,15 @@ impl SnapStore {
     }
 }
 
-fn read_all_unit_ids_from_store(
+fn read_all_snap_refs_from_store(
     store: &Arc<dyn ObjectStore>,
     path: &ObjectPath,
     file_size: u64,
     parquet_cache: Option<Arc<ParquetRowGroupCache>>,
     footer_cache: Option<Arc<ParquetFooterCache>>,
     cache_ident: Option<ArtifactIdent>,
-) -> Result<Vec<hfx_core::UnitId>, SessionError> {
-    RT.block_on(read_all_unit_ids_from_store_async(
+) -> Result<Vec<SnapUnitRef>, SessionError> {
+    RT.block_on(read_all_snap_refs_from_store_async(
         store,
         path,
         file_size,
@@ -541,16 +552,15 @@ fn read_or_build_id_index(
     cache_ident: Option<ArtifactIdent>,
     id_index_path: Option<&Path>,
     path_display: &str,
-) -> Result<Vec<hfx_core::UnitId>, SessionError> {
+) -> Result<Vec<SnapUnitRef>, SessionError> {
     if let (Some(index_path), Some(etag)) = (id_index_path, file_etag) {
         match IdIndex::load_from_path(index_path, file_size, Some(etag)) {
             Ok(Some(index)) if index.id_row_groups.is_none() => {
                 debug!(
                     path = %index_path.display(),
                     ids = index.ids.len(),
-                    "loaded snap id index from cache"
+                    "cached snap id index lacks snap ids; rebuilding"
                 );
-                return Ok(index.ids);
             }
             Ok(Some(_)) => {
                 debug!(
@@ -577,7 +587,7 @@ fn read_or_build_id_index(
     let ids = {
         let _guard = StageGuard::enter(Stage::SnapIdIndex);
         record_path(path_display);
-        read_all_unit_ids_from_store(
+        read_all_snap_refs_from_store(
             store,
             path,
             file_size,
@@ -589,7 +599,7 @@ fn read_or_build_id_index(
 
     if let (Some(index_path), Some(etag)) = (id_index_path, file_etag) {
         let index = IdIndex {
-            ids: ids.clone(),
+            ids: ids.iter().map(|snap_ref| snap_ref.unit_id).collect(),
             id_row_groups: None,
         };
         if let Err(error) = index.write_to_path(index_path, file_size, Some(etag)) {
@@ -605,14 +615,14 @@ fn read_or_build_id_index(
 }
 
 #[instrument(skip(store, parquet_cache, footer_cache, cache_ident), fields(path = %path))]
-async fn read_all_unit_ids_from_store_async(
+async fn read_all_snap_refs_from_store_async(
     store: &Arc<dyn ObjectStore>,
     path: &ObjectPath,
     file_size: u64,
     parquet_cache: Option<Arc<ParquetRowGroupCache>>,
     footer_cache: Option<Arc<ParquetFooterCache>>,
     cache_ident: Option<ArtifactIdent>,
-) -> Result<Vec<hfx_core::UnitId>, SessionError> {
+) -> Result<Vec<SnapUnitRef>, SessionError> {
     let started = Instant::now();
     let builder = ParquetRecordBatchStreamBuilder::new(object_reader_with_cache(
         store,
@@ -637,13 +647,31 @@ async fn read_all_unit_ids_from_store_async(
             source: e,
         })?;
     let parquet_schema = reader_metadata.parquet_schema();
-    let col_idx = parquet_schema
+    let id_col_idx = parquet_schema
+        .columns()
+        .iter()
+        .position(|c| c.name() == "id")
+        .ok_or_else(|| SessionError::parquet_schema(ARTIFACT, "missing column \"id\""))?;
+    let unit_id_col_idx = parquet_schema
         .columns()
         .iter()
         .position(|c| c.name() == "unit_id")
         .ok_or_else(|| SessionError::parquet_schema(ARTIFACT, "missing column \"unit_id\""))?;
+    let geometry_col_idx = parquet_schema
+        .columns()
+        .iter()
+        .position(|c| c.name() == "geometry")
+        .ok_or_else(|| SessionError::parquet_schema(ARTIFACT, "missing column \"geometry\""))?;
+    let stem_role_col_idx = parquet_schema
+        .columns()
+        .iter()
+        .position(|c| c.name() == "stem_role");
 
-    let mask = ProjectionMask::roots(parquet_schema, [col_idx]);
+    let mut projection = vec![id_col_idx, unit_id_col_idx, geometry_col_idx];
+    if let Some(stem_role_col_idx) = stem_role_col_idx {
+        projection.push(stem_role_col_idx);
+    }
+    let mask = ProjectionMask::roots(parquet_schema, projection);
     let selected_row_groups: Vec<usize> = (0..num_row_groups).collect();
     let rg_absolute_starts = absolute_row_starts(&metadata, &selected_row_groups);
     let read_context = UnitIdRowGroupReadContext {
@@ -656,38 +684,39 @@ async fn read_all_unit_ids_from_store_async(
         footer_cache,
         cache_ident,
     };
-    let row_group_results = stream::iter(selected_row_groups.into_iter().zip(rg_absolute_starts))
-        .map(|(row_group, absolute_start)| {
-            let read_context = read_context.clone();
-            async move {
-                read_unit_id_row_group_async(read_context, row_group, absolute_start).await
-            }
-        })
-        .buffered(ID_INDEX_ROW_GROUP_CONCURRENCY)
-        .collect::<Vec<_>>()
-        .await;
+    let row_group_results =
+        stream::iter(selected_row_groups.into_iter().zip(rg_absolute_starts))
+            .map(|(row_group, absolute_start)| {
+                let read_context = read_context.clone();
+                async move {
+                    read_snap_refs_row_group_async(read_context, row_group, absolute_start).await
+                }
+            })
+            .buffered(ID_INDEX_ROW_GROUP_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
 
-    let mut ids = Vec::new();
+    let mut refs = Vec::new();
     // Mirrors `catchment_store::read_all_ids_with_row_groups_async`. Keep both in sync.
     // DO NOT construct ParquetRecordBatchStreamBuilder::new inside this loop.
     for row_group_result in row_group_results {
-        let row_group_ids = row_group_result?;
-        ids.extend(row_group_ids);
+        let row_group_refs = row_group_result?;
+        refs.extend(row_group_refs);
     }
     info!(
-        num_ids = ids.len(),
+        num_ids = refs.len(),
         num_row_groups,
         elapsed_ms = started.elapsed().as_millis(),
         "id index built"
     );
-    Ok(ids)
+    Ok(refs)
 }
 
-async fn read_unit_id_row_group_async(
+async fn read_snap_refs_row_group_async(
     context: UnitIdRowGroupReadContext,
     row_group: usize,
     absolute_start: usize,
-) -> Result<Vec<hfx_core::UnitId>, SessionError> {
+) -> Result<Vec<SnapUnitRef>, SessionError> {
     let builder = ParquetRecordBatchStreamBuilder::new_with_metadata(
         object_reader_with_cache(
             &context.store,
@@ -709,7 +738,7 @@ async fn read_unit_id_row_group_async(
             source: e,
         })?;
 
-    let mut ids = Vec::new();
+    let mut refs = Vec::new();
     let mut offset_in_group = 0usize;
     while let Some(reader) =
         stream
@@ -728,35 +757,86 @@ async fn read_unit_id_row_group_async(
                 source: parquet::errors::ParquetError::ArrowError(e.to_string()),
             })?;
             let absolute_row = absolute_start + offset_in_group;
-            let col = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<arrow::array::Int64Array>()
+            let id_col = batch
+                .column_by_name("id")
+                .and_then(|column| column.as_any().downcast_ref::<arrow::array::Int64Array>())
+                .ok_or_else(|| SessionError::parquet_schema(ARTIFACT, "id column is not Int64"))?;
+            let unit_id_col = batch
+                .column_by_name("unit_id")
+                .and_then(|column| column.as_any().downcast_ref::<arrow::array::Int64Array>())
                 .ok_or_else(|| {
                     SessionError::parquet_schema(ARTIFACT, "unit_id column is not Int64")
                 })?;
+            let stem_role_col = batch
+                .column_by_name("stem_role")
+                .map(|column| {
+                    column
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .ok_or_else(|| {
+                            SessionError::parquet_schema(ARTIFACT, "stem_role column is not Utf8")
+                        })
+                })
+                .transpose()?;
+            let geometry_col = batch.column_by_name("geometry").ok_or_else(|| {
+                SessionError::parquet_schema(ARTIFACT, "geometry column is missing")
+            })?;
             for i in 0..batch.num_rows() {
-                if col.is_null(i) {
+                if id_col.is_null(i) {
+                    return Err(SessionError::invalid_row(
+                        ARTIFACT,
+                        absolute_row + i,
+                        "null id",
+                    ));
+                }
+                if unit_id_col.is_null(i) {
                     return Err(SessionError::invalid_row(
                         ARTIFACT,
                         absolute_row + i,
                         "null unit_id",
                     ));
                 }
-                let unit_id = hfx_core::UnitId::new(col.value(i)).map_err(|e| {
+                if geometry_col.is_null(i) {
+                    return Err(SessionError::invalid_row(
+                        ARTIFACT,
+                        absolute_row + i,
+                        "null geometry",
+                    ));
+                }
+                let snap_id = SnapId::new(id_col.value(i)).map_err(|e| {
+                    SessionError::invalid_row(
+                        ARTIFACT,
+                        absolute_row + i,
+                        format!("invalid id: {e}"),
+                    )
+                })?;
+                let unit_id = hfx_core::UnitId::new(unit_id_col.value(i)).map_err(|e| {
                     SessionError::invalid_row(
                         ARTIFACT,
                         absolute_row + i,
                         format!("invalid unit_id: {e}"),
                     )
                 })?;
-                ids.push(unit_id);
+                if let Some(stem_role_col) = stem_role_col
+                    && !stem_role_col.is_null(i)
+                {
+                    let value = stem_role_col.value(i);
+                    value
+                        .parse::<StemRole>()
+                        .map_err(|_| SessionError::InvalidStemRole {
+                            row: absolute_row + i,
+                            value: value.to_string(),
+                        })?;
+                }
+                let geometry = geometry_from_array(geometry_col, i, absolute_row + i)?;
+                validate_snap_geometry(&geometry, absolute_row + i)?;
+                refs.push(SnapUnitRef { snap_id, unit_id });
             }
             offset_in_group += batch.num_rows();
         }
     }
 
-    Ok(ids)
+    Ok(refs)
 }
 
 async fn read_snap_bbox_row_group_async(
@@ -845,30 +925,7 @@ fn extract_snap_targets_from_batch(
             })
         })
         .transpose()?;
-    let bbox_minx_col = batch
-        .column_by_name("bbox_minx")
-        .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
-        .ok_or_else(|| {
-            SessionError::parquet_schema(ARTIFACT, "column 'bbox_minx' missing or wrong type")
-        })?;
-    let bbox_miny_col = batch
-        .column_by_name("bbox_miny")
-        .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
-        .ok_or_else(|| {
-            SessionError::parquet_schema(ARTIFACT, "column 'bbox_miny' missing or wrong type")
-        })?;
-    let bbox_maxx_col = batch
-        .column_by_name("bbox_maxx")
-        .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
-        .ok_or_else(|| {
-            SessionError::parquet_schema(ARTIFACT, "column 'bbox_maxx' missing or wrong type")
-        })?;
-    let bbox_maxy_col = batch
-        .column_by_name("bbox_maxy")
-        .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
-        .ok_or_else(|| {
-            SessionError::parquet_schema(ARTIFACT, "column 'bbox_maxy' missing or wrong type")
-        })?;
+    let bbox_cols = optional_bbox_arrays(batch)?;
     let geometry_col_array = batch
         .column_by_name("geometry")
         .ok_or_else(|| SessionError::parquet_schema(ARTIFACT, "column 'geometry' missing"))?;
@@ -891,19 +948,27 @@ fn extract_snap_targets_from_batch(
         check_null!(id_col, "id");
         check_null!(unit_id_col, "unit_id");
         check_null!(weight_col, "weight");
-        check_null!(bbox_minx_col, "bbox_minx");
-        check_null!(bbox_miny_col, "bbox_miny");
-        check_null!(bbox_maxx_col, "bbox_maxx");
-        check_null!(bbox_maxy_col, "bbox_maxy");
         check_null!(geometry_col_array, "geometry");
 
-        let row_bbox = snap_bbox(
-            bbox_minx_col.value(i),
-            bbox_miny_col.value(i),
-            bbox_maxx_col.value(i),
-            bbox_maxy_col.value(i),
-            absolute_row,
-        )?;
+        let geometry = geometry_from_array(geometry_col_array, i, absolute_row)?;
+        let decoded_geometry = validate_snap_geometry(&geometry, absolute_row)?;
+        let row_bbox = match bbox_cols {
+            Some((bbox_minx_col, bbox_miny_col, bbox_maxx_col, bbox_maxy_col))
+                if !bbox_minx_col.is_null(i)
+                    && !bbox_miny_col.is_null(i)
+                    && !bbox_maxx_col.is_null(i)
+                    && !bbox_maxy_col.is_null(i) =>
+            {
+                snap_bbox(
+                    bbox_minx_col.value(i),
+                    bbox_miny_col.value(i),
+                    bbox_maxx_col.value(i),
+                    bbox_maxy_col.value(i),
+                    absolute_row,
+                )?
+            }
+            _ => bbox_from_snap_geometry(&decoded_geometry, absolute_row)?,
+        };
         if !row_bbox.intersects(query_bbox) {
             continue;
         }
@@ -934,24 +999,6 @@ fn extract_snap_targets_from_batch(
                     })
             })
             .transpose()?;
-        let geom_bytes: Vec<u8> =
-            if let Some(arr) = geometry_col_array.as_any().downcast_ref::<BinaryArray>() {
-                arr.value(i).to_vec()
-            } else if let Some(arr) = geometry_col_array
-                .as_any()
-                .downcast_ref::<LargeBinaryArray>()
-            {
-                arr.value(i).to_vec()
-            } else {
-                return Err(SessionError::parquet_schema(
-                    ARTIFACT,
-                    "column 'geometry' has unsupported type",
-                ));
-            };
-        let geometry = WkbGeometry::new(geom_bytes).map_err(|e| {
-            SessionError::invalid_row(ARTIFACT, absolute_row, format!("geometry error: {e}"))
-        })?;
-
         results.push(SnapTarget::new(
             id,
             unit_id,
@@ -963,6 +1010,171 @@ fn extract_snap_targets_from_batch(
     }
 
     Ok(results)
+}
+
+fn optional_bbox_col_indices(
+    schema: &arrow::datatypes::SchemaRef,
+) -> Result<Option<BboxColIndices>, SessionError> {
+    let names = ["bbox_minx", "bbox_miny", "bbox_maxx", "bbox_maxy"];
+    let indices = names
+        .iter()
+        .map(|name| match schema.field_with_name(name) {
+            Ok(field) if field.data_type() == &DataType::Float32 => {
+                Ok(Some(schema.index_of(name).map_err(|_| {
+                    SessionError::parquet_schema(ARTIFACT, format!("column \"{name}\" missing"))
+                })?))
+            }
+            Ok(_) => Err(SessionError::parquet_schema(
+                ARTIFACT,
+                format!("column \"{name}\" must be Float32 when present"),
+            )),
+            Err(_) => Ok(None),
+        })
+        .collect::<Result<Vec<_>, SessionError>>()?;
+
+    if indices.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    if indices.iter().any(Option::is_none) {
+        return Err(SessionError::parquet_schema(
+            ARTIFACT,
+            "snap bbox columns must either all be present or all be absent",
+        ));
+    }
+
+    let [Some(minx), Some(miny), Some(maxx), Some(maxy)] = indices.as_slice() else {
+        return Err(SessionError::parquet_schema(
+            ARTIFACT,
+            "snap bbox columns must either all be present or all be absent",
+        ));
+    };
+
+    Ok(Some(BboxColIndices {
+        minx: *minx,
+        miny: *miny,
+        maxx: *maxx,
+        maxy: *maxy,
+    }))
+}
+
+type BboxArrays<'a> = (
+    &'a Float32Array,
+    &'a Float32Array,
+    &'a Float32Array,
+    &'a Float32Array,
+);
+
+fn optional_bbox_arrays(
+    batch: &arrow::record_batch::RecordBatch,
+) -> Result<Option<BboxArrays<'_>>, SessionError> {
+    let col = |name: &'static str| {
+        batch
+            .column_by_name(name)
+            .map(|column| {
+                column
+                    .as_any()
+                    .downcast_ref::<Float32Array>()
+                    .ok_or_else(|| {
+                        SessionError::parquet_schema(
+                            ARTIFACT,
+                            format!("column '{name}' has wrong type"),
+                        )
+                    })
+            })
+            .transpose()
+    };
+    let cols = (
+        col("bbox_minx")?,
+        col("bbox_miny")?,
+        col("bbox_maxx")?,
+        col("bbox_maxy")?,
+    );
+    match cols {
+        (None, None, None, None) => Ok(None),
+        (Some(minx), Some(miny), Some(maxx), Some(maxy)) => Ok(Some((minx, miny, maxx, maxy))),
+        _ => Err(SessionError::parquet_schema(
+            ARTIFACT,
+            "snap bbox columns must either all be present or all be absent",
+        )),
+    }
+}
+
+fn geometry_from_array(
+    geometry_col_array: &dyn Array,
+    row: usize,
+    absolute_row: usize,
+) -> Result<WkbGeometry, SessionError> {
+    let geom_bytes: Vec<u8> =
+        if let Some(arr) = geometry_col_array.as_any().downcast_ref::<BinaryArray>() {
+            arr.value(row).to_vec()
+        } else if let Some(arr) = geometry_col_array
+            .as_any()
+            .downcast_ref::<LargeBinaryArray>()
+        {
+            arr.value(row).to_vec()
+        } else {
+            return Err(SessionError::parquet_schema(
+                ARTIFACT,
+                "column 'geometry' has unsupported type",
+            ));
+        };
+    WkbGeometry::new(geom_bytes).map_err(|e| {
+        SessionError::invalid_row(ARTIFACT, absolute_row, format!("geometry error: {e}"))
+    })
+}
+
+fn validate_snap_geometry(
+    geometry: &WkbGeometry,
+    row: usize,
+) -> Result<Geometry<f64>, SessionError> {
+    let decoded = decode_wkb(geometry).map_err(|e| SessionError::SnapGeometryInvalid {
+        row,
+        reason: e.to_string(),
+    })?;
+    match decoded {
+        Geometry::Point(_) | Geometry::LineString(_) => Ok(decoded),
+        other => Err(SessionError::SnapGeometryInvalid {
+            row,
+            reason: format!(
+                "expected Point or LineString, got {}",
+                geometry_type_name(&other)
+            ),
+        }),
+    }
+}
+
+fn bbox_from_snap_geometry(
+    geometry: &Geometry<f64>,
+    row: usize,
+) -> Result<BoundingBox, SessionError> {
+    let rect = geometry
+        .bounding_rect()
+        .ok_or_else(|| SessionError::SnapGeometryInvalid {
+            row,
+            reason: "geometry has no finite bounding rectangle".to_string(),
+        })?;
+    snap_bbox(
+        rect.min().x as f32,
+        rect.min().y as f32,
+        rect.max().x as f32,
+        rect.max().y as f32,
+        row,
+    )
+}
+
+fn geometry_type_name(geometry: &Geometry<f64>) -> &'static str {
+    match geometry {
+        Geometry::Point(_) => "Point",
+        Geometry::Line(_) => "Line",
+        Geometry::LineString(_) => "LineString",
+        Geometry::Polygon(_) => "Polygon",
+        Geometry::MultiPoint(_) => "MultiPoint",
+        Geometry::MultiLineString(_) => "MultiLineString",
+        Geometry::MultiPolygon(_) => "MultiPolygon",
+        Geometry::GeometryCollection(_) => "GeometryCollection",
+        Geometry::Rect(_) => "Rect",
+        Geometry::Triangle(_) => "Triangle",
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1466,11 +1678,13 @@ mod tests {
         let query = BoundingBox::new(0.5, 0.5, 3.0, 3.0).unwrap();
         let trace = NamedTempFile::new().unwrap();
         let (layer, guard) = crate::telemetry::jsonl::JsonlLayer::from_path(trace.path()).unwrap();
-        let subscriber = tracing_subscriber::registry().with(layer);
+        let dispatch = tracing::Dispatch::new(tracing_subscriber::registry().with(layer));
 
-        let results = tracing::subscriber::with_default(subscriber, || {
-            let _stage = StageGuard::enter(Stage::OutletResolve);
-            store.query_by_bbox(&query)
+        let results = tracing::dispatcher::with_default(&dispatch, || {
+            let stage = StageGuard::enter(Stage::OutletResolve);
+            let result = store.query_by_bbox(&query);
+            drop(stage);
+            result
         })
         .unwrap();
         drop(guard);
@@ -1749,9 +1963,7 @@ mod tests {
         writer.write(&batch).unwrap();
         writer.close().unwrap();
 
-        let store = SnapStore::open(tmp.path()).unwrap();
-        let query = BoundingBox::new(0.0, 0.0, 5.0, 5.0).unwrap();
-        let err = store.query_by_bbox(&query).unwrap_err();
+        let err = SnapStore::open(tmp.path()).unwrap_err();
         assert!(
             matches!(err, SessionError::InvalidRow { .. }),
             "expected InvalidRow for null id, got {err:?}"

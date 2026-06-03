@@ -255,18 +255,16 @@ impl DatasetSession {
             .transpose()?;
 
         // If snap is present, verify all snap catchment_id references exist
-        if let (Some(decl), Some(ref snap_store)) = (aux_declarations.snaps.first(), snap.as_ref()) {
+        if let (Some(decl), Some(ref snap_store)) = (aux_declarations.snaps.first(), snap.as_ref())
+        {
             let _guard = StageGuard::enter(Stage::ValidateSnapRefs);
             validate_snap_refs(snap_store, decl, &catchment_levels)?;
         }
 
-        let raster_paths = aux_declarations
-            .d8_rasters
-            .first()
-            .map(|decl| RasterPaths {
-                flow_dir: raster_uri_string(&root.join(&decl.flow_dir)),
-                flow_acc: raster_uri_string(&root.join(&decl.flow_acc)),
-            });
+        let raster_paths = aux_declarations.d8_rasters.first().map(|decl| RasterPaths {
+            flow_dir: raster_uri_string(&root.join(&decl.flow_dir)),
+            flow_acc: raster_uri_string(&root.join(&decl.flow_acc)),
+        });
 
         info!(
             fabric = manifest.fabric_name(),
@@ -334,7 +332,9 @@ impl DatasetSession {
             let raster_cache = Arc::new(RemoteRasterCache::new(cache.root().to_path_buf()));
             (cache, raster_cache)
         };
-        let (manifest, aux_declarations, graph) = if let Some(cached) = cache.read_entry_for_source(url, root)? {
+        let (manifest, aux_declarations, graph) = if let Some(cached) =
+            cache.read_entry_for_source(url, root)?
+        {
             debug!(
                 fabric = cached.manifest.fabric_name(),
                 units = cached.manifest.unit_count().get(),
@@ -399,7 +399,8 @@ impl DatasetSession {
             .first()
             .map(|decl| decl.snap.as_str())
             .unwrap_or("snap.parquet");
-        let snap_id_index_path = cache.id_index_path(&fabric_name, &adapter_version, snap_artifact_key);
+        let snap_id_index_path =
+            cache.id_index_path(&fabric_name, &adapter_version, snap_artifact_key);
 
         let catchments_path = remote_artifact_path(root, "catchments.parquet");
         let catchments = CatchmentStore::open_remote_with_caches(
@@ -495,13 +496,10 @@ impl DatasetSession {
             );
         }
 
-        let raster_paths = aux_declarations
-            .d8_rasters
-            .first()
-            .map(|decl| RasterPaths {
-                flow_dir: remote_artifact_url_string(url, &decl.flow_dir),
-                flow_acc: remote_artifact_url_string(url, &decl.flow_acc),
-            });
+        let raster_paths = aux_declarations.d8_rasters.first().map(|decl| RasterPaths {
+            flow_dir: remote_artifact_url_string(url, &decl.flow_dir),
+            flow_acc: remote_artifact_url_string(url, &decl.flow_acc),
+        });
 
         info!(
             fabric = manifest.fabric_name(),
@@ -768,7 +766,10 @@ fn validate_graph_catchments(
     for row in graph.rows() {
         if !catchment_id_set.contains(&row.id()) {
             return Err(SessionError::GraphReferentialIntegrity {
-                reason: format!("graph unit {} has no corresponding catchment row", row.id().get()),
+                reason: format!(
+                    "graph unit {} has no corresponding catchment row",
+                    row.id().get()
+                ),
             });
         }
         let Some(row_level) = catchment_levels.get(&row.id()).copied() else {
@@ -818,7 +819,10 @@ fn validate_graph_catchments(
     for &catchment_id in &catchment_ids {
         if graph.get(catchment_id).is_none() {
             return Err(SessionError::GraphReferentialIntegrity {
-                reason: format!("catchment unit {} has no corresponding graph row", catchment_id.get()),
+                reason: format!(
+                    "catchment unit {} has no corresponding graph row",
+                    catchment_id.get()
+                ),
             });
         }
     }
@@ -837,18 +841,19 @@ fn validate_snap_refs(
     decl: &SnapDecl,
     catchment_levels: &std::collections::HashMap<UnitId, Level>,
 ) -> Result<(), SessionError> {
-    let snap_unit_ids = snap_store.read_all_unit_ids()?;
-    for &unit_id in &snap_unit_ids {
+    let snap_refs = snap_store.read_all_snap_refs()?;
+    for snap_ref in &snap_refs {
+        let unit_id = snap_ref.unit_id;
         let Some(level) = catchment_levels.get(&unit_id).copied() else {
             return Err(SessionError::SnapReferentialIntegrity {
-                snap_id: -1,
+                snap_id: snap_ref.snap_id.get(),
                 unit_id: unit_id.get(),
                 reason: "snap target references a unit with no catchment row".to_string(),
             });
         };
         if !decl.references_levels.contains(&level.get()) {
             return Err(SessionError::SnapReferentialIntegrity {
-                snap_id: -1,
+                snap_id: snap_ref.snap_id.get(),
                 unit_id: unit_id.get(),
                 reason: format!(
                     "unit level {} is not declared in references_levels {:?}",
@@ -859,7 +864,7 @@ fn validate_snap_refs(
         }
     }
     debug!(
-        snap_refs = snap_unit_ids.len(),
+        snap_refs = snap_refs.len(),
         "snap unit_id integrity verified"
     );
     Ok(())
@@ -1300,23 +1305,29 @@ mod tests {
             "auxiliary": []
         });
         if snap {
-            manifest["auxiliary"].as_array_mut().unwrap().push(serde_json::json!({
-                "schema": "hfx.aux.snap.v1",
-                "artifacts": { "snap": "snap.parquet" },
-                "metadata": {
-                    "name": "test-snap",
-                    "description": "Synthetic snap targets.",
-                    "references_levels": [0],
-                    "weight_semantics": "higher is preferred"
-                }
-            }));
+            manifest["auxiliary"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "schema": "hfx.aux.snap.v1",
+                    "artifacts": { "snap": "snap.parquet" },
+                    "metadata": {
+                        "name": "test-snap",
+                        "description": "Synthetic snap targets.",
+                        "references_levels": [0],
+                        "weight_semantics": "higher is preferred"
+                    }
+                }));
         }
         if rasters {
-            manifest["auxiliary"].as_array_mut().unwrap().push(serde_json::json!({
-                "schema": "hfx.aux.d8_raster.v1",
-                "artifacts": { "flow_dir": "flow_dir.tif", "flow_acc": "flow_acc.tif" },
-                "metadata": { "flow_dir_encoding": "esri" }
-            }));
+            manifest["auxiliary"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "schema": "hfx.aux.d8_raster.v1",
+                    "artifacts": { "flow_dir": "flow_dir.tif", "flow_acc": "flow_acc.tif" },
+                    "metadata": { "flow_dir_encoding": "esri" }
+                }));
         }
         manifest.to_string()
     }
