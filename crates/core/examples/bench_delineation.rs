@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use shed_core::session::DatasetSession;
 use shed_core::testutil::DatasetBuilder;
-use shed_core::{DelineationOptions, Engine};
+use shed_core::{DelineationOptions, Engine, RefinementMode};
 
 const DEFAULT_ATOMS: usize = 2_500;
 const DEFAULT_COORDS_PER_RING: usize = 1_500;
@@ -72,7 +72,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let (_dir, root) = builder.build();
     let session = DatasetSession::open_path(&root)?;
     let engine = Engine::builder(session).build();
-    let options = DelineationOptions::default().with_refine(false);
+    let options = DelineationOptions::default().with_refinement_mode(RefinementMode::Disabled);
 
     let start = Instant::now();
     let result = engine.delineate(outlet, &options)?;

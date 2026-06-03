@@ -17,6 +17,7 @@ pub(crate) mod runtime;
 pub mod session;
 pub mod source;
 pub mod source_telemetry;
+pub mod staged;
 pub mod telemetry;
 
 #[cfg(feature = "test-fixtures")]
@@ -35,3 +36,8 @@ pub use resolver::{
     SearchRadiusMetres, SnapStrategy, resolve_outlet,
 };
 pub use source::DatasetSource;
+pub use staged::{
+    DissolvedWatershed, LevelResolvedOutlet, LevelSelection, PreMergeDrainageUnit,
+    PreMergeDrainageUnits, RefinementMode, SameLevelUpstreamUnits, SelectedLevel,
+    TerminalRefinement,
+};

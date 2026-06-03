@@ -8,19 +8,20 @@ use tracing::instrument;
 
 use crate::algo::coord::GeoCoord;
 use crate::algo::{
-    AreaKm2, CleanEpsilon, DEFAULT_CLEANING_EPSILON, GeometryRepair, HoleFillMode, RasterSource,
-    RefinementError, SnapThreshold, TraversalError, WkbDecodeError, WkbEncodeError,
-    collect_upstream, encode_wkb_multi_polygon, refine_terminal_from_source,
+    collect_upstream, encode_wkb_multi_polygon, refine_terminal_from_source, AreaKm2, CleanEpsilon,
+    GeometryRepair, HoleFillMode, RasterSource, RefinementError, SnapThreshold, TraversalError,
+    WkbDecodeError, WkbEncodeError, DEFAULT_CLEANING_EPSILON,
 };
-use crate::assembly::{AssemblyOptions, assemble_watershed};
+use crate::assembly::{assemble_watershed, AssemblyOptions};
 use crate::error::SessionError;
 use crate::reader::catchment_store::CatchmentGeometryQueryError;
 use crate::resolver::{
-    OutletResolutionError, ResolutionMethod, ResolvedOutlet, ResolverConfig, resolve_outlet,
+    resolve_outlet, OutletResolutionError, ResolutionMethod, ResolvedOutlet, ResolverConfig,
 };
 use crate::session::{DatasetSession, RasterKind};
+use crate::staged::RefinementMode;
 use crate::telemetry::{
-    Stage, StageGuard, record_bytes, record_cache_status, record_path, record_requests,
+    record_bytes, record_cache_status, record_path, record_requests, Stage, StageGuard,
 };
 
 // ── RefinementOutcome ─────────────────────────────────────────────────────────
@@ -37,7 +38,7 @@ pub enum RefinementOutcome {
     NoRastersAvailable,
     /// No [`RasterSource`] implementation was attached to the engine.
     NoRasterSourceProvided,
-    /// Refinement was disabled by the caller via [`DelineationOptions::with_refine`].
+    /// Refinement was disabled by the caller.
     Disabled,
 }
 
@@ -187,7 +188,7 @@ pub struct DelineationOptions {
     snap_threshold: SnapThreshold,
     hole_fill_mode: HoleFillMode,
     clean_epsilon: CleanEpsilon,
-    refine: bool,
+    refinement_mode: RefinementMode,
 }
 
 impl Default for DelineationOptions {
@@ -197,7 +198,7 @@ impl Default for DelineationOptions {
             snap_threshold: SnapThreshold::DEFAULT,
             hole_fill_mode: HoleFillMode::RemoveAll,
             clean_epsilon: DEFAULT_CLEANING_EPSILON,
-            refine: true,
+            refinement_mode: RefinementMode::default(),
         }
     }
 }
@@ -227,9 +228,24 @@ impl DelineationOptions {
         self
     }
 
+    /// Override the terminal-refinement mode.
+    pub fn with_refinement_mode(mut self, mode: RefinementMode) -> Self {
+        self.refinement_mode = mode;
+        self
+    }
+
+    /// Return the configured terminal-refinement mode.
+    pub fn refinement_mode(&self) -> RefinementMode {
+        self.refinement_mode
+    }
+
     /// Enable or disable the terminal-refinement step.
+    #[deprecated(
+        since = "0.1.123",
+        note = "use with_refinement_mode(RefinementMode::BestEffort) or RefinementMode::Disabled"
+    )]
     pub fn with_refine(mut self, refine: bool) -> Self {
-        self.refine = refine;
+        self.refinement_mode = RefinementMode::from(refine);
         self
     }
 }
@@ -509,7 +525,7 @@ impl Engine {
         resolved: &ResolvedOutlet,
         options: &DelineationOptions,
     ) -> Result<(RefinementOutcome, Option<MultiPolygon<f64>>), EngineError> {
-        if !options.refine {
+        if options.refinement_mode == RefinementMode::Disabled {
             return Ok((RefinementOutcome::Disabled, None));
         }
         if self.session.raster_paths().is_none() {
@@ -840,7 +856,7 @@ mod tests {
         let (_dir, session) = three_unit_session();
         let engine = Engine::builder(session).build();
 
-        let opts = DelineationOptions::default().with_refine(false);
+        let opts = DelineationOptions::default().with_refinement_mode(RefinementMode::Disabled);
         let result = engine
             .delineate(coord_in_unit3(), &opts)
             .expect("delineation should succeed");

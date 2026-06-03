@@ -6,6 +6,66 @@ Pure-Rust core library for the shed watershed extraction engine. It handles two 
 
 `ResolverConfig::new()` defaults to `SnapStrategy::WeightFirst` to align with the HFX v0.2 weight contract, which requires that the `weight` column be monotonically increasing in drainage dominance (higher weight = more hydrologically significant reach). Under this default, when an outlet is coincident with a tiny tributary stub, the hydrologically dominant mainstem candidate wins over the geometrically closest one. `SnapStrategy::DistanceFirst` remains available for datasets whose `weight` column is not rank-meaningful: configure it via `ResolverConfig::new().with_snap_strategy(SnapStrategy::DistanceFirst)`.
 
+## Staged Delineation Contract
+
+M3 fixes the delineation skeleton around typed intermediate outputs. Step 1 documents the method signatures as a contract; later M3 steps add the method bodies without changing the existing `Engine::delineate` result surface.
+
+```mermaid
+flowchart LR
+    select[select level]
+    resolve[resolve outlet within level]
+    traverse[traverse upstream same-level graph]
+    records[produce pre-merge drainage-unit records]
+    refine[refine terminal placeholder]
+    dissolve[dissolve/assemble]
+    compose[compose result]
+
+    select --> resolve --> traverse --> records --> refine --> dissolve --> compose
+```
+
+```rust
+pub fn select_level(&self, choice: LevelSelection) -> Result<SelectedLevel, EngineError>;
+
+pub fn resolve_outlet_at_level(
+    &self,
+    outlet: GeoCoord,
+    level: SelectedLevel,
+    config: &ResolverConfig,
+) -> Result<LevelResolvedOutlet, EngineError>;
+
+pub fn traverse_upstream_at_level(
+    &self,
+    outlet: &LevelResolvedOutlet,
+) -> Result<SameLevelUpstreamUnits, EngineError>;
+
+pub fn produce_pre_merge_units(
+    &self,
+    upstream: &SameLevelUpstreamUnits,
+) -> Result<PreMergeDrainageUnits, EngineError>;
+
+pub fn refine_terminal_placeholder(
+    &self,
+    resolved: &LevelResolvedOutlet,
+    units: &PreMergeDrainageUnits,
+    options: &DelineationOptions,
+) -> Result<TerminalRefinement, EngineError>;
+
+pub fn dissolve_watershed(
+    &self,
+    units: &PreMergeDrainageUnits,
+    refinement: &TerminalRefinement,
+    options: &DelineationOptions,
+) -> Result<DissolvedWatershed, EngineError>;
+
+pub fn compose_result(
+    &self,
+    resolved: LevelResolvedOutlet,
+    upstream: SameLevelUpstreamUnits,
+    refinement: TerminalRefinement,
+    dissolved: DissolvedWatershed,
+) -> DelineationResult;
+```
+
 ## Architecture
 
 ```mermaid

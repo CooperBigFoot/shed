@@ -11,7 +11,8 @@ use shed_core::algo::{CleanEpsilon, GeoCoord, SnapThreshold};
 use shed_core::resolver::{ResolverConfig, SearchRadiusMetres, SnapStrategy};
 use shed_core::session::DatasetSession;
 use shed_core::{
-    DelineationOptions, DelineationResult, Engine, EngineError, RefinementOutcome, ResolutionMethod,
+    DelineationOptions, DelineationResult, Engine, EngineError, RefinementMode, RefinementOutcome,
+    ResolutionMethod,
 };
 use shed_gdal::{GdalGeometryRepair, GdalRasterSource};
 
@@ -227,7 +228,7 @@ fn build_options(args: &DelineateArgs) -> Result<DelineationOptions> {
     }
 
     if args.no_refine {
-        options = options.with_refine(false);
+        options = options.with_refinement_mode(RefinementMode::Disabled);
     }
 
     Ok(options)

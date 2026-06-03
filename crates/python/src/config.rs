@@ -1,9 +1,9 @@
 //! Engine configuration bridged from Python keyword arguments.
 
 use pyo3::types::PyAnyMethods;
-use shed_core::DelineationOptions;
-use shed_core::algo::{CleanEpsilon, DEFAULT_CLEANING_EPSILON, SnapThreshold};
+use shed_core::algo::{CleanEpsilon, SnapThreshold, DEFAULT_CLEANING_EPSILON};
 use shed_core::resolver::{ResolverConfig, SearchRadiusMetres, SnapStrategy};
+use shed_core::{DelineationOptions, RefinementMode};
 
 /// Selects the optional external geometry repair backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,7 +105,8 @@ impl EngineConfig {
 
     /// Build a [`DelineationOptions`] from the stored configuration.
     pub fn to_delineation_options(&self) -> pyo3::PyResult<DelineationOptions> {
-        let mut opts = DelineationOptions::default().with_refine(self.refine);
+        let mut opts =
+            DelineationOptions::default().with_refinement_mode(RefinementMode::from(self.refine));
         let mut resolver_config = ResolverConfig::new();
 
         if let Some(r) = self.snap_radius {

@@ -1,0 +1,269 @@
+//! Typed contract for the M3 finest-level staged delineation skeleton.
+//!
+//! This module names the intermediate values that the staged engine path will
+//! pass between phases. Step 1 intentionally defines the vocabulary and the
+//! independently callable method contract only; later M3 steps add the
+//! `Engine` method bodies.
+//!
+//! ```rust,ignore
+//! pub fn select_level(&self, choice: LevelSelection) -> Result<SelectedLevel, EngineError>;
+//!
+//! pub fn resolve_outlet_at_level(
+//!     &self,
+//!     outlet: GeoCoord,
+//!     level: SelectedLevel,
+//!     config: &ResolverConfig,
+//! ) -> Result<LevelResolvedOutlet, EngineError>;
+//!
+//! pub fn traverse_upstream_at_level(
+//!     &self,
+//!     outlet: &LevelResolvedOutlet,
+//! ) -> Result<SameLevelUpstreamUnits, EngineError>;
+//!
+//! pub fn produce_pre_merge_units(
+//!     &self,
+//!     upstream: &SameLevelUpstreamUnits,
+//! ) -> Result<PreMergeDrainageUnits, EngineError>;
+//!
+//! pub fn refine_terminal_placeholder(
+//!     &self,
+//!     resolved: &LevelResolvedOutlet,
+//!     units: &PreMergeDrainageUnits,
+//!     options: &DelineationOptions,
+//! ) -> Result<TerminalRefinement, EngineError>;
+//!
+//! pub fn dissolve_watershed(
+//!     &self,
+//!     units: &PreMergeDrainageUnits,
+//!     refinement: &TerminalRefinement,
+//!     options: &DelineationOptions,
+//! ) -> Result<DissolvedWatershed, EngineError>;
+//!
+//! pub fn compose_result(
+//!     &self,
+//!     resolved: LevelResolvedOutlet,
+//!     upstream: SameLevelUpstreamUnits,
+//!     refinement: TerminalRefinement,
+//!     dissolved: DissolvedWatershed,
+//! ) -> DelineationResult;
+//! ```
+//!
+//! Stage order:
+//!
+//! ```mermaid
+//! flowchart LR
+//!     select[select level]
+//!     resolve[resolve outlet within level]
+//!     traverse[traverse upstream same-level graph]
+//!     records[produce pre-merge drainage-unit records]
+//!     refine[refine terminal placeholder]
+//!     dissolve[dissolve/assemble]
+//!     compose[compose result]
+//!
+//!     select --> resolve --> traverse --> records --> refine --> dissolve --> compose
+//! ```
+
+use geo::MultiPolygon;
+use hfx_core::{Level, OutletCoord, UnitId};
+
+use crate::algo::coord::GeoCoord;
+use crate::algo::{AreaKm2, UpstreamUnits};
+use crate::resolver::ResolvedOutlet;
+
+/// Selects the HFX drainage-unit level used for the staged delineation run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LevelSelection {
+    /// Use the finest level present in the loaded dataset.
+    Finest,
+}
+
+/// Dataset-proven selected drainage-unit level.
+///
+/// The wrapped [`Level`] is private so downstream stages cannot be called with
+/// an arbitrary raw level. Step 2 adds construction through
+/// `Engine::select_level` after consulting `DatasetSession`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectedLevel {
+    level: Level,
+}
+
+impl SelectedLevel {
+    /// Return the selected HFX level.
+    pub fn level(self) -> Level {
+        self.level
+    }
+}
+
+/// Controls whether terminal refinement is attempted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefinementMode {
+    /// Try raster refinement when the dataset and engine provide raster inputs.
+    BestEffort,
+    /// Skip terminal refinement and dissolve whole drainage-unit polygons.
+    Disabled,
+}
+
+impl Default for RefinementMode {
+    fn default() -> Self {
+        Self::BestEffort
+    }
+}
+
+impl From<bool> for RefinementMode {
+    fn from(refine: bool) -> Self {
+        if refine {
+            Self::BestEffort
+        } else {
+            Self::Disabled
+        }
+    }
+}
+
+/// Outlet resolution result constrained to the selected level.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LevelResolvedOutlet {
+    selected_level: SelectedLevel,
+    resolved: ResolvedOutlet,
+}
+
+impl LevelResolvedOutlet {
+    /// Return the selected level used during outlet resolution.
+    pub fn selected_level(&self) -> SelectedLevel {
+        self.selected_level
+    }
+
+    /// Return the resolved outlet payload.
+    pub fn resolved(&self) -> &ResolvedOutlet {
+        &self.resolved
+    }
+}
+
+/// Same-level upstream traversal result for a level-resolved outlet.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SameLevelUpstreamUnits {
+    terminal: UnitId,
+    selected_level: SelectedLevel,
+    upstream: UpstreamUnits,
+}
+
+impl SameLevelUpstreamUnits {
+    /// Return the terminal unit at the selected level.
+    pub fn terminal(&self) -> UnitId {
+        self.terminal
+    }
+
+    /// Return the selected level shared by every upstream unit.
+    pub fn selected_level(&self) -> SelectedLevel {
+        self.selected_level
+    }
+
+    /// Return the inclusive upstream unit set, terminal first.
+    pub fn upstream(&self) -> &UpstreamUnits {
+        &self.upstream
+    }
+}
+
+/// Pristine drainage-unit record before terminal carving or dissolve.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreMergeDrainageUnit {
+    id: UnitId,
+    level: Level,
+    area: hfx_core::AreaKm2,
+    up_area: Option<hfx_core::AreaKm2>,
+    outlet: OutletCoord,
+    geometry: MultiPolygon<f64>,
+}
+
+impl PreMergeDrainageUnit {
+    /// Return the drainage unit ID.
+    pub fn id(&self) -> UnitId {
+        self.id
+    }
+
+    /// Return the HFX level of this drainage unit.
+    pub fn level(&self) -> Level {
+        self.level
+    }
+
+    /// Return the local drainage area from `catchments.parquet`.
+    pub fn area(&self) -> hfx_core::AreaKm2 {
+        self.area
+    }
+
+    /// Return the total upstream drainage area from `catchments.parquet`, if present.
+    pub fn up_area(&self) -> Option<hfx_core::AreaKm2> {
+        self.up_area
+    }
+
+    /// Return the declared outlet coordinate for this drainage unit.
+    pub fn outlet(&self) -> OutletCoord {
+        self.outlet
+    }
+
+    /// Return the whole drainage-unit geometry before terminal refinement.
+    pub fn geometry(&self) -> &MultiPolygon<f64> {
+        &self.geometry
+    }
+}
+
+/// Terminal-first collection of pre-merge drainage-unit records.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreMergeDrainageUnits {
+    terminal: UnitId,
+    selected_level: SelectedLevel,
+    units: Vec<PreMergeDrainageUnit>,
+}
+
+impl PreMergeDrainageUnits {
+    /// Return the terminal unit ID represented by the first record.
+    pub fn terminal(&self) -> UnitId {
+        self.terminal
+    }
+
+    /// Return the selected level shared by every record.
+    pub fn selected_level(&self) -> SelectedLevel {
+        self.selected_level
+    }
+
+    /// Return the terminal-first drainage-unit records.
+    pub fn units(&self) -> &[PreMergeDrainageUnit] {
+        &self.units
+    }
+}
+
+/// Placeholder terminal-refinement result for the staged contract.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TerminalRefinement {
+    /// Refinement was disabled by the caller.
+    Disabled,
+    /// The loaded dataset declares no raster artifacts.
+    NoRastersAvailable,
+    /// The engine has no raster source attached for the declared raster artifacts.
+    NoRasterSourceProvided,
+    /// Refinement produced a terminal geometry override.
+    Applied {
+        /// Refined outlet coordinate returned by raster snapping.
+        refined_outlet: GeoCoord,
+        /// Refined terminal geometry used instead of the whole terminal polygon.
+        geometry: MultiPolygon<f64>,
+    },
+}
+
+/// Final dissolved watershed geometry and computed geodesic area.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DissolvedWatershed {
+    geometry: MultiPolygon<f64>,
+    area_km2: AreaKm2,
+}
+
+impl DissolvedWatershed {
+    /// Return the dissolved watershed geometry.
+    pub fn geometry(&self) -> &MultiPolygon<f64> {
+        &self.geometry
+    }
+
+    /// Return the geodesic watershed area in km².
+    pub fn area_km2(&self) -> AreaKm2 {
+        self.area_km2
+    }
+}
