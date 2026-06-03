@@ -160,6 +160,19 @@ pub struct SameLevelUpstreamUnits {
 }
 
 impl SameLevelUpstreamUnits {
+    /// Construct same-level upstream units after traversal validates the level invariant.
+    pub(crate) fn new(
+        terminal: UnitId,
+        selected_level: SelectedLevel,
+        upstream: UpstreamUnits,
+    ) -> Self {
+        Self {
+            terminal,
+            selected_level,
+            upstream,
+        }
+    }
+
     /// Return the terminal unit at the selected level.
     pub fn terminal(&self) -> UnitId {
         self.terminal
@@ -177,6 +190,12 @@ impl SameLevelUpstreamUnits {
 }
 
 /// Pristine drainage-unit record before terminal carving or dissolve.
+///
+/// This record intentionally exposes source drainage-unit data, not final
+/// watershed output. Summing [`area`](Self::area) across pre-merge records does
+/// not define final `area_km2`, and unioning these geometries does not define
+/// final refined geometry. The final geometry and area are produced only by the
+/// downstream dissolve stage.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreMergeDrainageUnit {
     id: UnitId,
@@ -188,6 +207,25 @@ pub struct PreMergeDrainageUnit {
 }
 
 impl PreMergeDrainageUnit {
+    /// Construct a pristine pre-merge drainage-unit record from source fields.
+    pub(crate) fn new(
+        id: UnitId,
+        level: Level,
+        area: hfx_core::AreaKm2,
+        up_area: Option<hfx_core::AreaKm2>,
+        outlet: OutletCoord,
+        geometry: MultiPolygon<f64>,
+    ) -> Self {
+        Self {
+            id,
+            level,
+            area,
+            up_area,
+            outlet,
+            geometry,
+        }
+    }
+
     /// Return the drainage unit ID.
     pub fn id(&self) -> UnitId {
         self.id
@@ -220,6 +258,11 @@ impl PreMergeDrainageUnit {
 }
 
 /// Terminal-first collection of pre-merge drainage-unit records.
+///
+/// Includes the whole terminal polygon and never a carved terminal. The
+/// terminal-first ordering exists for typed inspection; it cannot affect final
+/// geometry because the downstream dissolve path re-sorts polygons by spatial
+/// key before reducing them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreMergeDrainageUnits {
     terminal: UnitId,
@@ -228,9 +271,27 @@ pub struct PreMergeDrainageUnits {
 }
 
 impl PreMergeDrainageUnits {
+    /// Construct a terminal-first collection after records are materialized.
+    pub(crate) fn new(
+        terminal: UnitId,
+        selected_level: SelectedLevel,
+        units: Vec<PreMergeDrainageUnit>,
+    ) -> Self {
+        Self {
+            terminal,
+            selected_level,
+            units,
+        }
+    }
+
     /// Return the terminal unit ID represented by the first record.
     pub fn terminal(&self) -> UnitId {
         self.terminal
+    }
+
+    /// Return the whole terminal drainage-unit record.
+    pub fn terminal_unit(&self) -> Option<&PreMergeDrainageUnit> {
+        self.units.first()
     }
 
     /// Return the selected level shared by every record.

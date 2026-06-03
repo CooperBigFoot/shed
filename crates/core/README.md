@@ -66,6 +66,13 @@ pub fn compose_result(
 ) -> DelineationResult;
 ```
 
+`PreMergeDrainageUnit` is an inspection record for pristine upstream drainage
+units. The collection includes the whole terminal polygon before any terminal
+refinement. This intentionally diverges from the final watershed result:
+summing pre-merge `area` values does not define final `area_km2`, and unioning
+pre-merge geometries does not define final refined geometry. Final geometry and
+area are produced only by the downstream dissolve/assemble stage.
+
 ## Architecture
 
 ```mermaid

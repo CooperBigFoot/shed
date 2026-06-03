@@ -31,5 +31,8 @@ pub fn engine_err_to_py(e: shed_core::EngineError) -> PyErr {
         EngineError::Refinement { .. } => ShedError::new_err(e.to_string()),
         EngineError::Assembly { .. } => PyAssemblyError::new_err(e.to_string()),
         EngineError::SessionLevelIndexEmpty { .. } => DatasetError::new_err(e.to_string()),
+        EngineError::SameLevelInvariant { .. } => DatasetError::new_err(e.to_string()),
+        EngineError::PreMergeCatchmentFetch { .. } => DatasetError::new_err(e.to_string()),
+        EngineError::PreMergeCatchmentDecode { .. } => DatasetError::new_err(e.to_string()),
     }
 }

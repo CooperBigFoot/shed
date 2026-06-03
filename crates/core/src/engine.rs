@@ -1,6 +1,8 @@
 //! Engine composition layer — wires outlet resolution, upstream traversal,
 //! terminal refinement, and watershed assembly into a single `delineate()` call.
 
+use std::collections::HashMap;
+
 use geo::{BoundingRect, MultiPolygon};
 use hfx_core::UnitId;
 use rayon::prelude::*;
@@ -20,7 +22,10 @@ use crate::resolver::{
     resolve_outlet_at_level as resolve_outlet_in_resolver_at_level,
 };
 use crate::session::{DatasetSession, RasterKind};
-use crate::staged::{LevelResolvedOutlet, LevelSelection, RefinementMode, SelectedLevel};
+use crate::staged::{
+    LevelResolvedOutlet, LevelSelection, PreMergeDrainageUnit, PreMergeDrainageUnits,
+    RefinementMode, SameLevelUpstreamUnits, SelectedLevel,
+};
 use crate::telemetry::{
     Stage, StageGuard, record_bytes, record_cache_status, record_path, record_requests,
 };
@@ -335,6 +340,39 @@ pub enum EngineError {
         /// Manifest unit count for the loaded dataset.
         unit_count: u64,
     },
+
+    /// Fired when same-level traversal returns an unit outside the selected level.
+    ///
+    /// M2 graph/catchment validation requires graph edges to stay within one
+    /// level, so this indicates an invalid loaded session or a stale level
+    /// index.
+    #[error("unit {unit_id} is not at selected level {selected_level:?}; found {actual_level:?}")]
+    SameLevelInvariant {
+        /// The raw unit ID whose stored level does not match the selected level.
+        unit_id: i64,
+        /// The selected level required by this staged run.
+        selected_level: hfx_core::Level,
+        /// The stored level for the unit, if the level index contains it.
+        actual_level: Option<hfx_core::Level>,
+    },
+
+    /// Fired when pre-merge catchment metadata or geometry cannot be fetched.
+    #[error("failed to fetch pre-merge catchment records for {unit_count} units: {source}")]
+    PreMergeCatchmentFetch {
+        /// Number of unit IDs requested for pre-merge materialization.
+        unit_count: usize,
+        /// Underlying session error.
+        source: SessionError,
+    },
+
+    /// Fired when a pre-merge catchment geometry fails WKB decode.
+    #[error("failed to decode pre-merge catchment geometry (unit {unit_id}): {source}")]
+    PreMergeCatchmentDecode {
+        /// The raw unit ID whose geometry could not be decoded.
+        unit_id: i64,
+        /// Underlying WKB decode error.
+        source: WkbDecodeError,
+    },
 }
 
 // ── EngineBuilder ─────────────────────────────────────────────────────────────
@@ -435,6 +473,149 @@ impl Engine {
         resolve_outlet_in_resolver_at_level(&self.session, outlet, selected_level, config)
             .map(|resolved| LevelResolvedOutlet::new(selected_level, resolved))
             .map_err(|source| EngineError::Resolution { outlet, source })
+    }
+
+    /// Traverse the same-level upstream graph for a level-resolved outlet.
+    ///
+    /// This stage is a thin topology wrapper around [`collect_upstream`]. It
+    /// adds the terminal and selected-level tags, and validates that every
+    /// traversed unit belongs to the selected level already proven by the
+    /// session level index.
+    ///
+    /// # Errors
+    ///
+    /// | Variant | When |
+    /// |---|---|
+    /// | [`EngineError::Traversal`] | Upstream graph traversal fails |
+    /// | [`EngineError::SameLevelInvariant`] | A traversed unit is absent from or outside the selected level |
+    pub fn traverse_upstream_at_level(
+        &self,
+        outlet: &LevelResolvedOutlet,
+    ) -> Result<SameLevelUpstreamUnits, EngineError> {
+        let terminal = outlet.resolved().unit_id;
+        let selected_level = outlet.selected_level();
+        let upstream = collect_upstream(terminal, self.session.graph()).map_err(|source| {
+            EngineError::Traversal {
+                unit_id: terminal.get(),
+                source,
+            }
+        })?;
+
+        for unit_id in upstream.iter().copied() {
+            let actual_level = self.session.level_of(unit_id);
+            if actual_level != Some(selected_level.level()) {
+                return Err(EngineError::SameLevelInvariant {
+                    unit_id: unit_id.get(),
+                    selected_level: selected_level.level(),
+                    actual_level,
+                });
+            }
+        }
+
+        Ok(SameLevelUpstreamUnits::new(
+            terminal,
+            selected_level,
+            upstream,
+        ))
+    }
+
+    /// Materialize pristine pre-merge drainage-unit records.
+    ///
+    /// Metadata is fetched via `query_by_ids`; decoded geometries are fetched
+    /// separately via `query_geometries_by_ids`, preserving the instrumented
+    /// geometry-decode path used by assembly and refinement.
+    ///
+    /// # Errors
+    ///
+    /// | Variant | When |
+    /// |---|---|
+    /// | [`EngineError::PreMergeCatchmentFetch`] | Metadata or geometry rows cannot be read, or a requested row is missing |
+    /// | [`EngineError::PreMergeCatchmentDecode`] | A requested geometry fails WKB decode |
+    /// | [`EngineError::SameLevelInvariant`] | A materialized record is outside the selected level |
+    pub fn produce_pre_merge_units(
+        &self,
+        upstream: &SameLevelUpstreamUnits,
+    ) -> Result<PreMergeDrainageUnits, EngineError> {
+        let ids = upstream.upstream().unit_ids();
+        let metadata_by_id = self
+            .session
+            .catchments()
+            .query_by_ids(ids)
+            .map_err(|source| EngineError::PreMergeCatchmentFetch {
+                unit_count: ids.len(),
+                source,
+            })?
+            .into_iter()
+            .map(|unit| (unit.id(), unit))
+            .collect::<HashMap<_, _>>();
+
+        let mut geometry_by_id = self
+            .session
+            .catchments()
+            .query_geometries_by_ids(ids)
+            .map_err(|source| match source {
+                CatchmentGeometryQueryError::Read { source } => {
+                    EngineError::PreMergeCatchmentFetch {
+                        unit_count: ids.len(),
+                        source,
+                    }
+                }
+                CatchmentGeometryQueryError::Decode { unit_id, source } => {
+                    EngineError::PreMergeCatchmentDecode {
+                        unit_id: unit_id.get(),
+                        source,
+                    }
+                }
+            })?
+            .into_iter()
+            .map(|row| row.into_parts())
+            .collect::<HashMap<_, _>>();
+
+        let mut units = Vec::with_capacity(ids.len());
+        for &id in ids {
+            let metadata =
+                metadata_by_id
+                    .get(&id)
+                    .ok_or_else(|| EngineError::PreMergeCatchmentFetch {
+                        unit_count: ids.len(),
+                        source: SessionError::integrity(format!(
+                            "pre-merge unit {} not in catchment store metadata",
+                            id.get()
+                        )),
+                    })?;
+            if metadata.level() != upstream.selected_level().level() {
+                return Err(EngineError::SameLevelInvariant {
+                    unit_id: id.get(),
+                    selected_level: upstream.selected_level().level(),
+                    actual_level: Some(metadata.level()),
+                });
+            }
+            let geometry =
+                geometry_by_id
+                    .remove(&id)
+                    .ok_or_else(|| EngineError::PreMergeCatchmentFetch {
+                        unit_count: ids.len(),
+                        source: SessionError::integrity(format!(
+                            "pre-merge unit {} not in catchment store geometry rows",
+                            id.get()
+                        )),
+                    })?;
+
+            units.push(PreMergeDrainageUnit::new(
+                id,
+                metadata.level(),
+                metadata.area(),
+                metadata.upstream_area(),
+                metadata.outlet(),
+                geometry,
+            ));
+        }
+
+        Ok(PreMergeDrainageUnits::new(
+            upstream.terminal(),
+            upstream.selected_level(),
+            units,
+        ))
     }
 
     /// Delineate the watershed upstream of `outlet`.
