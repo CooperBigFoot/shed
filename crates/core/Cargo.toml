@@ -46,3 +46,9 @@ required-features = ["test-fixtures"]
 [[bench]]
 name = "dissolve_strategy"
 harness = false
+
+[lints.clippy]
+# Pre-existing thiserror enums exceed clippy's 128-byte result_large_err
+# threshold (clippy 1.93). Boxing the large Err variants is deferred tech debt;
+# allow package-wide (covers lib + bins, e.g. bench_delineate).
+result_large_err = "allow"

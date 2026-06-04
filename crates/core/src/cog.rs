@@ -961,12 +961,12 @@ fn crop_window<T: Copy>(values: &[T], metadata: &CogMetadata, window: RasterPixe
 
 #[cfg(feature = "test-fixtures")]
 fn replace_nodata_with_nan(mut data: Vec<f32>, nodata: Option<f32>) -> Vec<f32> {
-    if let Some(nodata) = nodata {
-        if !nodata.is_nan() {
-            for value in &mut data {
-                if *value == nodata {
-                    *value = f32::NAN;
-                }
+    if let Some(nodata) = nodata
+        && !nodata.is_nan()
+    {
+        for value in &mut data {
+            if *value == nodata {
+                *value = f32::NAN;
             }
         }
     }
