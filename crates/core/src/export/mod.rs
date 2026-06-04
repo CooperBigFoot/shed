@@ -1,8 +1,13 @@
 //! Basin GeoParquet export helpers.
 
 pub mod identity;
+pub mod spatial;
 
 pub use identity::{BasinId, DelineationLabel, ExportMethod, ExportOrigin, FabricIdentity};
+pub use spatial::{
+    BasinBbox, BasinCentroid, BasinSpatialSortKey, HilbertIndex, basin_bbox, basin_centroid,
+    outward_f32_bbox,
+};
 
 /// Errors raised while preparing basin GeoParquet exports.
 #[derive(Debug, thiserror::Error)]
