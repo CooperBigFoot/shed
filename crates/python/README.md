@@ -1,8 +1,9 @@
 # pyshed
 
 Python bindings for the `shed` watershed delineation engine. `pyshed` loads
-[HFX-format](https://github.com/CooperBigFoot/hfx) datasets and returns
-watershed polygons from a `(lat, lon)` outlet. The full native stack (GDAL,
+[HFX-format](https://github.com/CooperBigFoot/hfx) v0.2.1 datasets and returns
+watershed polygons from a `(lat, lon)` outlet. HFX v0.1 datasets no longer
+load. The full native stack (GDAL,
 PROJ, GEOS, libtiff, SQLite, and more) is bundled inside the wheel — no system
 install required.
 
@@ -12,7 +13,7 @@ install required.
 pip install pyshed
 ```
 
-**Platform support (v0.1):** Apple Silicon macOS only (`macosx_11_0_arm64`).
+**Platform support (v0.2.0):** Apple Silicon macOS only (`macosx_11_0_arm64`).
 Linux, Intel macOS, and Windows wheels are not yet built — community
 contributions are welcome. See
 [CONTRIBUTING.md](https://github.com/CooperBigFoot/shed/blob/main/CONTRIBUTING.md)
@@ -131,6 +132,55 @@ The `progress` callback receives a dict with keys `index`, `total`, `lat`,
 success and `error` on failure. Exceptions raised inside the callback are
 swallowed and logged; they do not interrupt the batch.
 
+### Staged delineation
+
+`delineate()` is the convenience composition of the staged API:
+
+```python
+level = engine.select_level()
+outlet = engine.resolve_outlet(level, lat=47.3769, lon=8.5417)
+upstream = engine.traverse(outlet)
+units = engine.pre_merge_units(upstream)
+refinement = engine.refine(outlet, units)
+dissolved = engine.dissolve(units, refinement)
+result = engine.compose_result(outlet, upstream, units, refinement, dissolved)
+```
+
+`result` matches `engine.delineate(lat=47.3769, lon=8.5417)`. The merged result
+exposes final `geometry_wkb`, final `area_km2`, and light per-unit metadata
+(`id`, `level`, `area_km2`, `up_area_km2`, `outlet`). Whole per-unit geometry is
+available only on `PreMergeDrainageUnits.unit_geometry_wkb`.
+
+R3 note: pre-merge units are whole source drainage units, including the whole
+terminal unit. If terminal refinement is applied, summing or unioning those
+whole units is not the same as the merged `area_km2` or `geometry_wkb`.
+
+### GeoParquet export
+
+Exports are explicit writer-object calls and write complete batches:
+
+```python
+basin_writer = pyshed.BasinGeoParquetWriter()
+basin_writer.write(engine, "basins.parquet", [result], basin_ids=["rhine-basel"])
+
+bundle_writer = pyshed.UnitBundleGeoParquetWriter()
+bundle_writer.write(engine, "units.parquet", [units], [refinement])
+```
+
+`BasinGeoParquetWriter` writes one merged basin row per result. `basin_ids` are
+caller-owned, filesystem-safe identifiers. Omitting `basin_ids` is allowed only
+with `allow_default_basin_id=True` and exactly one result, where the terminal
+unit ID becomes the basin ID.
+
+`UnitBundleGeoParquetWriter` writes one row per pre-merge drainage unit. Unit
+rows use dataset-local `unit_id`, include `terminal_unit_id` and `delineation`
+grouping columns, and store whole-unit geometry.
+
+Default `delineation` labels are `{fabric_name}/{fabric_version}/{method}`.
+The default method is `d8-best-effort` when refinement is enabled and
+`no-refine` when `refine=False`. The actual outcome is stored separately in
+`refinement_status`.
+
 ## API Reference
 
 For the full developer-oriented API surface, including argument types, return
@@ -140,7 +190,7 @@ types, and the exception hierarchy, see [API.md](https://github.com/CooperBigFoo
 
 - Resolves the outlet coordinate to a terminal HFX unit (via `snap.parquet`
   or point-in-polygon on `catchments.parquet`).
-- Walks the upstream graph in `graph.arrow` collecting all contributing units.
+- Walks the upstream graph in `graph.parquet` collecting all contributing units.
 - Optionally refines the terminal unit geometry using `flow_dir.tif` /
   `flow_acc.tif` rasters when present.
 - Returns a dissolved `MultiPolygon` + geodesic area in km².

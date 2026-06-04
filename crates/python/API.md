@@ -11,7 +11,17 @@ The `pyshed` package exports these names:
 
 - `Engine`
 - `DelineationResult`
+- `DelineationUnitMetadata`
 - `AreaOnlyResult`
+- `SelectedLevel`
+- `ResolvedOutlet`
+- `UpstreamUnits`
+- `PreMergeDrainageUnit`
+- `PreMergeDrainageUnits`
+- `TerminalRefinement`
+- `DissolvedWatershed`
+- `BasinGeoParquetWriter`
+- `UnitBundleGeoParquetWriter`
 - `ShedError`
 - `DatasetError`
 - `ResolutionError`
@@ -62,6 +72,9 @@ Engine(
 ```
 
 Opens an HFX dataset and constructs a delineation engine.
+
+`dataset_path` must point to an HFX v0.2.1 dataset. HFX v0.1 datasets are not
+accepted by this release.
 
 | Parameter | Type | Default | Meaning |
 |---|---|---|---|
@@ -162,6 +175,44 @@ Without `progress`, the batch runs in parallel via Rayon.
 - `ValueError` when any outlet contains invalid coordinates.
 - The same typed `pyshed` exceptions as `delineate()` for engine failures.
 
+### Staged Methods
+
+`Engine.delineate()` is equivalent to this staged composition:
+
+```python
+level = engine.select_level()
+outlet = engine.resolve_outlet(level, lat=47.3769, lon=8.5417)
+upstream = engine.traverse(outlet)
+units = engine.pre_merge_units(upstream)
+refinement = engine.refine(outlet, units)
+dissolved = engine.dissolve(units, refinement)
+result = engine.compose_result(outlet, upstream, units, refinement, dissolved)
+```
+
+The supported order is:
+
+```text
+select_level -> resolve_outlet -> traverse -> pre_merge_units -> refine -> dissolve -> compose_result
+```
+
+Each method accepts the typed intermediate from the prior stage. Passing the
+wrong object type raises `TypeError`.
+
+| Method | Returns | Meaning |
+|---|---|---|
+| `select_level()` | `SelectedLevel` | Selects the finest loaded HFX level |
+| `resolve_outlet(level, *, lat, lon)` | `ResolvedOutlet` | Resolves an outlet at that level |
+| `traverse(outlet)` | `UpstreamUnits` | Traverses same-level upstream unit IDs |
+| `pre_merge_units(upstream)` | `PreMergeDrainageUnits` | Materializes whole source drainage units and whole-unit WKB |
+| `refine(outlet, units)` | `TerminalRefinement` | Runs or skips terminal refinement based on engine config and dataset auxiliaries |
+| `dissolve(units, refinement)` | `DissolvedWatershed` | Produces the final merged geometry and area |
+| `compose_result(...)` | `DelineationResult` | Packages the same merged result shape returned by `delineate()` |
+
+R3 note: `PreMergeDrainageUnits` contains whole source drainage units, including
+the whole terminal unit. When terminal refinement is applied, summing or
+unioning pre-merge units is not the same as the final merged `area_km2` or
+`geometry_wkb`.
+
 ## DelineationResult
 
 Returned by `Engine.delineate()` and `Engine.delineate_batch()`.
@@ -176,6 +227,7 @@ Returned by `Engine.delineate()` and `Engine.delineate_batch()`.
 | `refined_outlet` | `tuple[float, float] \| None` | Raster-refined outlet as `(lon, lat)`, or `None` if refinement was not applied |
 | `resolution_method` | `str` | Debug/provenance string describing how outlet resolution happened |
 | `upstream_unit_ids` | `list[int]` | Upstream unit IDs including the terminal unit |
+| `upstream_units` | `list[DelineationUnitMetadata]` | Light per-unit metadata without per-unit geometry |
 | `area_km2` | `float` | Geodesic watershed area in square kilometres |
 | `geometry_bbox` | `tuple[float, float, float, float] \| None` | Geometry bounds as `(minx, miny, maxx, maxy)`, or `None` for empty geometry |
 | `geometry_wkb` | `bytes` | Watershed geometry encoded as OGC WKB bytes |
@@ -194,6 +246,100 @@ __repr__() -> str
 
 Returns a concise debug representation including the terminal unit ID, area,
 and upstream unit count.
+
+`DelineationResult` intentionally does not expose per-unit WKB. Use the
+`pre_merge_units()` staged output when whole-unit geometries are required.
+
+## DelineationUnitMetadata
+
+Light per-unit metadata retained on a merged result.
+
+| Property | Type | Meaning |
+|---|---|---|
+| `id` | `int` | Drainage unit ID |
+| `level` | `int` | HFX drainage-unit level |
+| `area_km2` | `float` | Source unit area |
+| `up_area_km2` | `float \| None` | Source upstream area when present |
+| `outlet` | `tuple[float, float]` | Declared outlet as `(lon, lat)` |
+
+## Staged Intermediate Classes
+
+### PreMergeDrainageUnits
+
+| Property | Type | Meaning |
+|---|---|---|
+| `terminal_unit_id` | `int` | Terminal unit ID |
+| `level` | `int` | Selected HFX level |
+| `units` | `list[PreMergeDrainageUnit]` | Whole source drainage-unit metadata |
+| `unit_geometry_wkb` | `list[bytes]` | Whole source drainage-unit WKB geometries |
+| `R3_NOTE` | `str` | Visible note about whole-unit versus refined merged geometry divergence |
+
+`PreMergeDrainageUnit` exposes `id`, `level`, `area_km2`, `up_area_km2`, and
+`outlet`. `TerminalRefinement.status` is one of `applied`,
+`best_effort_skipped`, or `disabled`. `DissolvedWatershed` exposes
+`area_km2` and `geometry_wkb`.
+
+## GeoParquet Writers
+
+Exports are explicit writer-object calls and write complete batches.
+
+```python
+BasinGeoParquetWriter().write(
+    engine,
+    "basins.parquet",
+    [result],
+    basin_ids=["basin-3"],
+)
+
+UnitBundleGeoParquetWriter().write(
+    engine,
+    "unit-bundle.parquet",
+    [units],
+    [refinement],
+)
+```
+
+### BasinGeoParquetWriter
+
+```python
+write(
+    engine: Engine,
+    path: str,
+    results: list[DelineationResult],
+    *,
+    basin_ids: list[str] | None = None,
+    method: str | None = None,
+    allow_default_basin_id: bool = False,
+) -> None
+```
+
+Writes one merged-basin row per `DelineationResult`. `basin_ids` are
+caller-supplied filesystem-safe identifiers. The terminal-unit-ID default is
+allowed only when `allow_default_basin_id=True` and exactly one result is
+provided.
+
+### UnitBundleGeoParquetWriter
+
+```python
+write(
+    engine: Engine,
+    path: str,
+    bundles: list[PreMergeDrainageUnits],
+    refinements: list[TerminalRefinement],
+    *,
+    method: str | None = None,
+) -> None
+```
+
+Writes one row per pre-merge drainage unit. Row identity is dataset-local
+`unit_id`; grouping columns are `terminal_unit_id` and `delineation`; geometry
+is the whole source unit.
+
+For both writers, default `delineation` is
+`{fabric_name}/{fabric_version}/{method}`. `method` defaults to
+`d8-best-effort` when engine refinement is enabled and `no-refine` when
+`refine=False`. The per-row actual outcome is stored separately in
+`refinement_status`.
 
 ## AreaOnlyResult
 

@@ -7,6 +7,9 @@ per-commit Rust crate versioning).
 
 ## [Unreleased]
 
+- requires HFX v0.2.1; v0.1 no longer loads
+- new: staged sub-function API + unit-bundle GeoParquet export.
+
 ## [0.1.11] - 2026-05-06
 
 ### Changed
