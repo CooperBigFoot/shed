@@ -8,8 +8,9 @@ use shed_core::algo::coord::GeoCoord;
 use shed_core::session::DatasetSession;
 use shed_core::test_raster_source::LocalTiffRasterSource;
 use shed_core::{
-    AppliedRefinementReason, DelineationOptions, Engine, RefinementOutcome, RefinementProvenance,
-    RefinementStrategyName,
+    AppliedRefinementReason, DelineationOptions, Engine, LevelSelection, PreMergeDrainageUnit,
+    PreMergeDrainageUnits, RefinementOutcome, RefinementProvenance, RefinementStrategyName,
+    TerminalRefinement,
 };
 
 const PARITY_FIXTURE_DIR: &str = "tests/fixtures/parity";
@@ -26,7 +27,7 @@ fn v021_synthetic_d8_refinement_matches_m1_b_golden() {
         .with_raster_source(LocalTiffRasterSource)
         .build();
     let outlet = GeoCoord::new(golden.input_outlet.lon, golden.input_outlet.lat);
-    let options = DelineationOptions::default().with_snap_threshold(SnapThreshold::new(500));
+    let options = b_oracle_options();
 
     let result = engine
         .delineate(outlet, &options)
@@ -59,6 +60,75 @@ fn v021_synthetic_d8_refinement_matches_m1_b_golden() {
     );
 }
 
+#[test]
+fn applied_d8_carve_replaces_whole_terminal_in_final_dissolve() {
+    let golden = read_golden(M1_SYNTHETIC_REFINED_GOLDEN);
+    let session = DatasetSession::open_path(&parity_fixture_path(V021_SYNTHETIC_REFINED_DIR))
+        .expect("v0.2.1 converted parity fixture should open");
+    let engine = Engine::builder(session)
+        .with_raster_source(LocalTiffRasterSource)
+        .build();
+    let outlet = GeoCoord::new(golden.input_outlet.lon, golden.input_outlet.lat);
+    let options = b_oracle_options();
+
+    let selected = engine
+        .select_level(LevelSelection::Finest)
+        .expect("finest level should resolve");
+    let resolved = engine
+        .resolve_outlet_at_level(outlet, selected, options.resolver_config())
+        .expect("fixture outlet should resolve");
+    let upstream = engine
+        .traverse_upstream_at_level(&resolved)
+        .expect("same-level traversal should succeed");
+    let pre_merge = engine
+        .produce_pre_merge_units(&upstream)
+        .expect("pre-merge records should materialize");
+    let whole_terminal = pre_merge
+        .terminal_unit()
+        .expect("terminal record should exist")
+        .geometry();
+
+    let refinement = engine
+        .refine_terminal_placeholder(&resolved, &pre_merge, &options)
+        .expect("D8 refinement should apply");
+    let TerminalRefinement::Applied { geometry, .. } = &refinement else {
+        panic!("expected applied D8 refinement, got {refinement:?}");
+    };
+    let dissolved = engine
+        .dissolve_watershed(&pre_merge, &refinement, &options)
+        .expect("applied D8 dissolve should succeed");
+    let whole_terminal_dissolved = engine
+        .dissolve_watershed(&pre_merge, &TerminalRefinement::Disabled, &options)
+        .expect("whole-terminal dissolve should succeed");
+    let replacement_pre_merge =
+        pre_merge_with_terminal_geometry(&pre_merge, geometry.polygon().clone());
+    let replacement_dissolved = engine
+        .dissolve_watershed(
+            &replacement_pre_merge,
+            &TerminalRefinement::Disabled,
+            &options,
+        )
+        .expect("carved-terminal replacement dissolve should succeed");
+
+    let final_canonical = canonical_wkb_multi_polygon(dissolved.geometry())
+        .expect("final geometry should canonicalize");
+    let replacement_canonical = canonical_wkb_multi_polygon(replacement_dissolved.geometry())
+        .expect("replacement geometry should canonicalize");
+    let whole_terminal_dissolved_canonical =
+        canonical_wkb_multi_polygon(whole_terminal_dissolved.geometry())
+            .expect("whole-terminal dissolved geometry should canonicalize");
+    let whole_terminal_canonical = canonical_wkb_multi_polygon(whole_terminal)
+        .expect("whole terminal geometry should canonicalize");
+
+    // R3: pre-merge unit records stay pristine. Their area/geometry may
+    // intentionally disagree with final refined output; final geometry is
+    // assembled only after excluding the whole terminal and inserting the carve.
+    assert_ne!(final_canonical, whole_terminal_canonical);
+    assert_ne!(final_canonical, whole_terminal_dissolved_canonical);
+    assert_eq!(final_canonical, replacement_canonical);
+    assert_eq!(final_canonical, decode_hex(&golden.canonical_wkb_hex));
+}
+
 fn parity_fixture_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join(PARITY_FIXTURE_DIR)
@@ -69,6 +139,36 @@ fn read_golden(name: &str) -> GoldenRecord {
     let path = parity_fixture_path(name);
     serde_json::from_str(&fs::read_to_string(path).expect("golden should be readable"))
         .expect("golden should match test schema")
+}
+
+fn b_oracle_options() -> DelineationOptions {
+    DelineationOptions::default().with_snap_threshold(SnapThreshold::new(500))
+}
+
+fn pre_merge_with_terminal_geometry(
+    pre_merge: &PreMergeDrainageUnits,
+    terminal_geometry: geo::MultiPolygon<f64>,
+) -> PreMergeDrainageUnits {
+    let units = pre_merge
+        .units()
+        .iter()
+        .map(|unit| {
+            let geometry = if unit.id() == pre_merge.terminal() {
+                terminal_geometry.clone()
+            } else {
+                unit.geometry().clone()
+            };
+            PreMergeDrainageUnit::new_for_test(
+                unit.id(),
+                unit.level(),
+                unit.area(),
+                unit.up_area(),
+                unit.outlet(),
+                geometry,
+            )
+        })
+        .collect();
+    PreMergeDrainageUnits::new_for_test(pre_merge.terminal(), pre_merge.selected_level(), units)
 }
 
 fn assert_area_within_golden_policy(actual: f64, expected: f64, golden: &GoldenRecord) {

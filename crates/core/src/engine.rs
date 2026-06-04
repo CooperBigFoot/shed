@@ -1020,9 +1020,7 @@ mod tests {
         RasterTile, Raw,
     };
     use crate::reader::catchment_store::reset_geometry_decode_counts_for_test;
-    use crate::refinement::{
-        AppliedRefinementReason, ContainedTerminalPolygon, RefinementStrategyName,
-    };
+    use crate::refinement::RefinementStrategyName;
     use crate::session::DatasetSession;
     use crate::testutil::{DatasetBuilder, TestCatchment};
 
@@ -1242,6 +1240,7 @@ mod tests {
                 },
             ])
             .build();
+        copy_valid_d8_fixture_tiffs(&root);
         let session = DatasetSession::open_path(&root).expect("session should open");
         let engine = Engine::builder(session)
             .with_raster_source(AppliedRefinementRasterSource)
@@ -1267,6 +1266,15 @@ mod tests {
             1,
             "terminal geometry should be decoded for refinement only"
         );
+    }
+
+    fn copy_valid_d8_fixture_tiffs(root: &std::path::Path) {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/parity/v021_synthetic_refined");
+        std::fs::copy(fixture.join("flow_dir.tif"), root.join("flow_dir.tif"))
+            .expect("fixture flow_dir.tif should copy over placeholder");
+        std::fs::copy(fixture.join("flow_acc.tif"), root.join("flow_acc.tif"))
+            .expect("fixture flow_acc.tif should copy over placeholder");
     }
 
     // ── engine_geometry_wkb_accessor ─────────────────────────────────────────
