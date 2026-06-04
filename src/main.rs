@@ -358,7 +358,7 @@ fn write_output(
                         "lat": outlet.coord.lat,
                         "lon": outlet.coord.lon,
                         "area_km2": dr.area_km2().as_f64(),
-                        "terminal_atom_id": dr.terminal_unit_id().get(),
+                        "terminal_unit_id": dr.terminal_unit_id().get(),
                     }));
                 }
                 Err(e) => {
@@ -461,7 +461,7 @@ fn result_to_geojson_feature(result: &DelineationResult, outlet: &Outlet) -> ser
     }
     properties.insert("area_km2".into(), json!(result.area_km2().as_f64()));
     properties.insert(
-        "terminal_atom_id".into(),
+        "terminal_unit_id".into(),
         json!(result.terminal_unit_id().get()),
     );
     properties.insert("input_lat".into(), json!(result.input_outlet().lat));
@@ -469,7 +469,7 @@ fn result_to_geojson_feature(result: &DelineationResult, outlet: &Outlet) -> ser
     properties.insert("resolved_lat".into(), json!(result.resolved_outlet().lat));
     properties.insert("resolved_lon".into(), json!(result.resolved_outlet().lon));
     properties.insert(
-        "upstream_atom_count".into(),
+        "upstream_unit_count".into(),
         json!(result.upstream_unit_ids().len()),
     );
     properties.insert(
