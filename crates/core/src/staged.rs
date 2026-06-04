@@ -56,7 +56,7 @@
 //!     resolve[resolve outlet within level]
 //!     traverse[traverse upstream same-level graph]
 //!     records[produce pre-merge drainage-unit records]
-//!     refine[refine terminal placeholder]
+//!     refine[terminal refinement strategy seam]
 //!     dissolve[dissolve/assemble]
 //!     compose[compose result]
 //!
@@ -68,6 +68,9 @@ use hfx_core::{Level, OutletCoord, UnitId};
 
 use crate::algo::coord::GeoCoord;
 use crate::algo::{AreaKm2, UpstreamUnits};
+use crate::refinement::{
+    BestEffortSkipReason, ContainedTerminalPolygon, RefinementProvenance, RefinementStrategyName,
+};
 use crate::resolver::ResolvedOutlet;
 
 /// Selects the HFX drainage-unit level used for the staged delineation run.
@@ -334,22 +337,47 @@ impl PreMergeDrainageUnits {
     }
 }
 
-/// Placeholder terminal-refinement result for the staged contract.
+/// Terminal-refinement result for the staged contract.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TerminalRefinement {
     /// Refinement was disabled by the caller.
     Disabled,
-    /// The loaded dataset declares no raster artifacts.
-    NoRastersAvailable,
-    /// The engine has no raster source attached for the declared raster artifacts.
-    NoRasterSourceProvided,
+    /// Best-effort refinement was visibly skipped.
+    BestEffortSkipped {
+        /// Provenance explaining why refinement was skipped.
+        provenance: RefinementProvenance,
+    },
     /// Refinement produced a terminal geometry override.
     Applied {
         /// Refined outlet coordinate returned by raster snapping.
         refined_outlet: GeoCoord,
         /// Refined terminal geometry used instead of the whole terminal polygon.
-        geometry: MultiPolygon<f64>,
+        geometry: ContainedTerminalPolygon,
+        /// Provenance explaining why refinement ran.
+        provenance: RefinementProvenance,
     },
+}
+
+impl TerminalRefinement {
+    /// Construct a visible best-effort skip for missing D8 declarations.
+    pub fn best_effort_no_d8_aux_declared() -> Self {
+        Self::BestEffortSkipped {
+            provenance: RefinementProvenance::BestEffortSkipped {
+                strategy: RefinementStrategyName::BestEffortD8IfPresent,
+                why: BestEffortSkipReason::NoD8AuxDeclared,
+            },
+        }
+    }
+
+    /// Construct a visible best-effort skip for a missing raster source.
+    pub fn best_effort_no_raster_source_provided() -> Self {
+        Self::BestEffortSkipped {
+            provenance: RefinementProvenance::BestEffortSkipped {
+                strategy: RefinementStrategyName::BestEffortD8IfPresent,
+                why: BestEffortSkipReason::NoRasterSourceProvided,
+            },
+        }
+    }
 }
 
 /// Final dissolved watershed geometry and computed geodesic area.

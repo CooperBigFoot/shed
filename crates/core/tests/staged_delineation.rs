@@ -11,8 +11,10 @@ use shed_core::algo::coord::GeoCoord;
 use shed_core::session::DatasetSession;
 use shed_core::testutil::DatasetBuilder;
 use shed_core::{
-    DelineationOptions, Engine, EngineError, LevelSelection, PreMergeDrainageUnit,
-    PreMergeDrainageUnits, RefinementMode, SelectedLevel, TerminalRefinement,
+    AppliedRefinementReason, BestEffortSkipReason, ContainedTerminalPolygon, DelineationOptions,
+    Engine, EngineError, LevelSelection, PreMergeDrainageUnit, PreMergeDrainageUnits,
+    RefinementMode, RefinementOutcome, RefinementProvenance, RefinementStrategyName, SelectedLevel,
+    TerminalRefinement,
 };
 
 const PARITY_FIXTURE_DIR: &str = "tests/fixtures/parity";
@@ -125,10 +127,7 @@ fn delineate_equals_explicit_staged_composition_best_effort_no_rasters() {
     let staged = explicit_staged_composition(&engine, outlet, &options)
         .expect("explicit staged composition should succeed");
 
-    assert_eq!(
-        direct.refinement(),
-        &shed_core::RefinementOutcome::NoRastersAvailable
-    );
+    assert_visible_no_d8_aux_skip(direct.refinement());
     assert_delineation_results_equal(&direct, &staged);
 }
 
@@ -198,7 +197,10 @@ fn staged_refine_terminal_placeholder_best_effort_no_rasters() {
         .dissolve_watershed(&pre_merge, &refinement, &options)
         .expect("no-raster dissolve should use whole units");
 
-    assert_eq!(refinement, TerminalRefinement::NoRastersAvailable);
+    assert_eq!(
+        refinement,
+        TerminalRefinement::best_effort_no_d8_aux_declared()
+    );
     assert!(!dissolved.geometry().0.is_empty());
 }
 
@@ -265,7 +267,8 @@ fn staged_dissolve_replaces_terminal_with_applied_refinement() {
     );
     let refinement = TerminalRefinement::Applied {
         refined_outlet: GeoCoord::new(1.5, 0.5),
-        geometry: MultiPolygon::new(vec![rect(1.0, 0.0, 2.0, 1.0)]),
+        geometry: contained(MultiPolygon::new(vec![rect(1.0, 0.0, 2.0, 1.0)])),
+        provenance: applied_provenance(),
     };
 
     let dissolved = engine
@@ -283,27 +286,11 @@ fn staged_dissolve_replaces_terminal_with_applied_refinement() {
 }
 
 #[test]
-fn staged_dissolve_rejects_empty_refined_terminal_override() {
-    let (_dir, root) = DatasetBuilder::new(1).build();
-    let session = DatasetSession::open_path(&root).expect("fixture should open");
-    let engine = Engine::builder(session).build();
-    let options = DelineationOptions::default();
-    let units = manual_pre_merge_units(
-        MultiPolygon::new(vec![rect(1.0, 0.0, 2.0, 1.0)]),
-        MultiPolygon::new(vec![rect(0.0, 0.0, 1.0, 1.0)]),
-    );
-    let refinement = TerminalRefinement::Applied {
-        refined_outlet: GeoCoord::new(1.5, 0.5),
-        geometry: MultiPolygon::new(vec![]),
-    };
+fn contained_terminal_polygon_rejects_empty_carve_output() {
+    let err = ContainedTerminalPolygon::new_unchecked_from_d8_carve(MultiPolygon::new(vec![]))
+        .expect_err("empty D8 carve output should fail at the type boundary");
 
-    let err = engine
-        .dissolve_watershed(&units, &refinement, &options)
-        .expect_err("empty refined terminal override should fail");
-
-    assert!(
-        matches!(err, EngineError::Assembly { message, .. } if message.contains("refined terminal geometry"))
-    );
+    assert!(err.to_string().contains("empty terminal geometry"));
 }
 
 #[test]
@@ -318,7 +305,8 @@ fn staged_dissolve_bypasses_bad_whole_terminal_when_refined_override_exists() {
     );
     let refinement = TerminalRefinement::Applied {
         refined_outlet: GeoCoord::new(1.5, 0.5),
-        geometry: MultiPolygon::new(vec![rect(1.0, 0.0, 2.0, 1.0)]),
+        geometry: contained(MultiPolygon::new(vec![rect(1.0, 0.0, 2.0, 1.0)])),
+        provenance: applied_provenance(),
     };
 
     let dissolved = engine
@@ -391,6 +379,32 @@ fn assert_delineation_results_equal(
             .expect("staged geometry should canonicalize")
     );
     assert_close(direct.area_km2().as_f64(), staged.area_km2().as_f64());
+}
+
+fn assert_visible_no_d8_aux_skip(refinement: &RefinementOutcome) {
+    assert_eq!(
+        refinement,
+        &RefinementOutcome::BestEffortSkipped {
+            provenance: RefinementProvenance::BestEffortSkipped {
+                strategy: RefinementStrategyName::BestEffortD8IfPresent,
+                why: BestEffortSkipReason::NoD8AuxDeclared,
+            },
+        }
+    );
+}
+
+fn contained(geometry: MultiPolygon<f64>) -> ContainedTerminalPolygon {
+    ContainedTerminalPolygon::new_unchecked_from_d8_carve(geometry)
+        .expect("test refined terminal geometry should be non-empty")
+}
+
+fn applied_provenance() -> RefinementProvenance {
+    RefinementProvenance::Applied {
+        strategy: RefinementStrategyName::BestEffortD8IfPresent,
+        why: AppliedRefinementReason::D8AuxMatchedTerminalBbox {
+            declaration_index: 0,
+        },
+    }
 }
 
 fn parity_fixture_path(name: &str) -> PathBuf {

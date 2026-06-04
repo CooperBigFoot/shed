@@ -17,6 +17,9 @@ use crate::algo::{
 use crate::assembly::{AssemblyOptions, assemble_from_geometries};
 use crate::error::SessionError;
 use crate::reader::catchment_store::CatchmentGeometryQueryError;
+use crate::refinement::{
+    AppliedRefinementReason, ContainedTerminalPolygon, RefinementProvenance, RefinementStrategyName,
+};
 use crate::resolver::{
     OutletResolutionError, ResolutionMethod, ResolverConfig,
     resolve_outlet_at_level as resolve_outlet_in_resolver_at_level,
@@ -40,11 +43,14 @@ pub enum RefinementOutcome {
     Applied {
         /// The refined outlet coordinate returned by the raster snap.
         refined_outlet: GeoCoord,
+        /// Provenance explaining why refinement ran.
+        provenance: RefinementProvenance,
     },
-    /// No raster files are registered with the session.
-    NoRastersAvailable,
-    /// No [`RasterSource`] implementation was attached to the engine.
-    NoRasterSourceProvided,
+    /// Best-effort refinement was visibly skipped.
+    BestEffortSkipped {
+        /// Provenance explaining why refinement was skipped.
+        provenance: RefinementProvenance,
+    },
     /// Refinement was disabled by the caller.
     Disabled,
 }
@@ -648,11 +654,11 @@ impl Engine {
             return Ok(TerminalRefinement::Disabled);
         }
         if self.session.raster_paths().is_none() {
-            return Ok(TerminalRefinement::NoRastersAvailable);
+            return Ok(TerminalRefinement::best_effort_no_d8_aux_declared());
         }
         let raster_source = match self.raster_source.as_deref() {
             Some(s) => s,
-            None => return Ok(TerminalRefinement::NoRasterSourceProvided),
+            None => return Ok(TerminalRefinement::best_effort_no_raster_source_provided()),
         };
 
         let terminal_polygon = units
@@ -736,9 +742,23 @@ impl Engine {
             })?
         };
 
+        let refined_outlet = refinement_result.snapped_coord();
+        let geometry =
+            ContainedTerminalPolygon::new_unchecked_from_d8_carve(refinement_result.into_polygon())
+                .map_err(|_source| EngineError::Refinement {
+                    unit_id: terminal.get(),
+                    source: RefinementError::EmptyPolygonization,
+                })?;
+
         Ok(TerminalRefinement::Applied {
-            refined_outlet: refinement_result.snapped_coord(),
-            geometry: refinement_result.into_polygon(),
+            refined_outlet,
+            geometry,
+            provenance: RefinementProvenance::Applied {
+                strategy: RefinementStrategyName::BestEffortD8IfPresent,
+                why: AppliedRefinementReason::D8AuxMatchedTerminalBbox {
+                    declaration_index: 0,
+                },
+            },
         })
     }
 
@@ -761,10 +781,8 @@ impl Engine {
     ) -> Result<DissolvedWatershed, EngineError> {
         let terminal = units.terminal();
         let refined_terminal_geometry = match refinement {
-            TerminalRefinement::Applied { geometry, .. } => Some(geometry),
-            TerminalRefinement::Disabled
-            | TerminalRefinement::NoRastersAvailable
-            | TerminalRefinement::NoRasterSourceProvided => None,
+            TerminalRefinement::Applied { geometry, .. } => Some(geometry.polygon()),
+            TerminalRefinement::Disabled | TerminalRefinement::BestEffortSkipped { .. } => None,
         };
 
         let mut geometries_by_id = std::collections::BTreeMap::new();
@@ -960,11 +978,19 @@ impl Engine {
 
 fn refinement_outcome_from_terminal(refinement: &TerminalRefinement) -> RefinementOutcome {
     match refinement {
-        TerminalRefinement::Applied { refined_outlet, .. } => RefinementOutcome::Applied {
+        TerminalRefinement::Applied {
+            refined_outlet,
+            provenance,
+            ..
+        } => RefinementOutcome::Applied {
             refined_outlet: *refined_outlet,
+            provenance: provenance.clone(),
         },
-        TerminalRefinement::NoRastersAvailable => RefinementOutcome::NoRastersAvailable,
-        TerminalRefinement::NoRasterSourceProvided => RefinementOutcome::NoRasterSourceProvided,
+        TerminalRefinement::BestEffortSkipped { provenance } => {
+            RefinementOutcome::BestEffortSkipped {
+                provenance: provenance.clone(),
+            }
+        }
         TerminalRefinement::Disabled => RefinementOutcome::Disabled,
     }
 }
@@ -1081,8 +1107,13 @@ mod tests {
         );
         assert_eq!(
             result.refinement(),
-            &RefinementOutcome::NoRastersAvailable,
-            "no rasters registered → NoRastersAvailable"
+            &RefinementOutcome::BestEffortSkipped {
+                provenance: RefinementProvenance::BestEffortSkipped {
+                    strategy: RefinementStrategyName::BestEffortD8IfPresent,
+                    why: crate::refinement::BestEffortSkipReason::NoD8AuxDeclared,
+                },
+            },
+            "no D8 aux registered -> visible best-effort skip"
         );
         assert!(
             !result.upstream_unit_ids().is_empty(),

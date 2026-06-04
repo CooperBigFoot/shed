@@ -19,6 +19,7 @@ use shed_core::Engine;
 use shed_core::algo::GeoCoord;
 use shed_core::engine::{DelineationOptions, RefinementOutcome};
 use shed_core::session::DatasetSession;
+use shed_core::{BestEffortSkipReason, RefinementProvenance, RefinementStrategyName};
 use tempfile::TempDir;
 use url::Url;
 
@@ -135,8 +136,13 @@ fn assert_remote_delineation_succeeds(session: DatasetSession) {
     );
     assert_eq!(
         result.refinement(),
-        &RefinementOutcome::NoRastersAvailable,
-        "synthetic remote fixture intentionally has no rasters"
+        &RefinementOutcome::BestEffortSkipped {
+            provenance: RefinementProvenance::BestEffortSkipped {
+                strategy: RefinementStrategyName::BestEffortD8IfPresent,
+                why: BestEffortSkipReason::NoD8AuxDeclared,
+            },
+        },
+        "synthetic remote fixture intentionally has no D8 aux"
     );
 }
 

@@ -11,6 +11,7 @@ pub mod parquet_cache;
 #[allow(dead_code)]
 pub(crate) mod raster_cache;
 pub mod reader;
+pub mod refinement;
 pub mod resolver;
 #[allow(dead_code)]
 pub(crate) mod runtime;
@@ -31,6 +32,11 @@ pub use engine::{
     DelineationOptions, DelineationResult, Engine, EngineBuilder, EngineError, RefinementOutcome,
 };
 pub use error::SessionError;
+pub use refinement::{
+    AppliedRefinementReason, BestEffortSkipReason, ContainedTerminalPolygon, D8RefinementPantry,
+    RefinementProvenance, RefinementStrategyName, TerminalRefinementDecision,
+    TerminalRefinementError, TerminalRefinementInput, TerminalRefinementStrategy,
+};
 pub use resolver::{
     OutletResolutionError, PipTieBreak, ResolutionMethod, ResolvedOutlet, ResolverConfig,
     SearchRadiusMetres, SnapStrategy, resolve_outlet, resolve_outlet_at_level,

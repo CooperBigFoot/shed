@@ -16,7 +16,7 @@ flowchart LR
     resolve[resolve outlet within level]
     traverse[traverse upstream same-level graph]
     records[produce pre-merge drainage-unit records]
-    refine[refine terminal placeholder]
+    refine[terminal refinement strategy seam]
     dissolve[dissolve/assemble]
     compose[compose result]
 
@@ -73,6 +73,11 @@ summing pre-merge `area` values does not define final `area_km2`, and unioning
 pre-merge geometries does not define final refined geometry. Final geometry and
 area are produced only by the downstream dissolve/assemble stage.
 
+M4 exposes the Rust terminal-refinement strategy seam with a deliberately
+D8-specific pantry: the strategy receives the `DatasetSession` plus the
+engine-attached `RasterSource` needed by the built-in D8 path. Full custom
+auxiliary binding and general aux-to-strategy dispatch remain deferred.
+
 ## Architecture
 
 ```mermaid
@@ -102,6 +107,8 @@ sequenceDiagram
     participant A as algo/
 
     S->>S: open() — validate layout, load graph, prepare Parquet readers
+    S->>A: terminal refinement strategy seam
+    A->>S: localize declared D8 raster windows
     S->>T: load_flow_direction(bbox)
     S->>T: load_accumulation(bbox)
     T-->>A: FlowDirectionTile<Raw>
@@ -143,6 +150,7 @@ sequenceDiagram
 |---|---|---|
 | `DatasetSession` | `session.rs` | Entry point — open an HFX dataset, validate layout, expose readers |
 | `RasterPaths` | `session.rs` | Validated paths to `flow_dir.tif` + `flow_acc.tif` (no GDAL handles) |
+| `TerminalRefinementStrategy` | `refinement.rs` | Object-safe terminal-refinement seam; M4's pantry is D8-only |
 | `CatchmentStore` | `reader/catchment_store.rs` | Lazy Parquet reader for `catchments.parquet` with bbox pruning |
 | `SnapStore` | `reader/snap_store.rs` | Lazy Parquet reader for `snap.parquet` with bbox pruning |
 | `SessionError` | `error.rs` | All dataset-open and read errors |

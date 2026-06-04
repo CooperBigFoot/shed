@@ -100,14 +100,15 @@ fn format_resolution_method(method: &ResolutionMethod) -> String {
 
 fn format_refinement(r: &RefinementOutcome) -> String {
     match r {
-        RefinementOutcome::Applied { refined_outlet } => {
+        RefinementOutcome::Applied { refined_outlet, .. } => {
             format!(
                 "applied(lon={:.6}, lat={:.6})",
                 refined_outlet.lon, refined_outlet.lat
             )
         }
-        RefinementOutcome::NoRastersAvailable => "no_rasters_available".into(),
-        RefinementOutcome::NoRasterSourceProvided => "no_raster_source_provided".into(),
+        RefinementOutcome::BestEffortSkipped { provenance } => {
+            format!("best_effort_skipped({provenance:?})")
+        }
         RefinementOutcome::Disabled => "disabled".into(),
     }
 }

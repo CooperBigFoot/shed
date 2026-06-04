@@ -204,7 +204,7 @@ impl PyAreaOnlyResult {
 
 fn refined_outlet_tuple(refinement: &RefinementOutcome) -> Option<(f64, f64)> {
     match refinement {
-        RefinementOutcome::Applied { refined_outlet } => {
+        RefinementOutcome::Applied { refined_outlet, .. } => {
             Some((refined_outlet.lon, refined_outlet.lat))
         }
         _ => None,
