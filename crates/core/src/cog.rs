@@ -327,7 +327,7 @@ pub(crate) async fn read_remote_extent(
             source,
         })?;
     let reader = RangeBackedTiffReader::new(object_size, vec![(0..header_end, header)]);
-    match read_extent(reader, &remote_path.as_ref().to_string()) {
+    match read_extent(reader, remote_path.as_ref()) {
         Ok(extent) => Ok(extent),
         Err(CacheError::Tiff { .. }) if object_size > header_end => {
             Err(CacheError::UnsupportedCog {

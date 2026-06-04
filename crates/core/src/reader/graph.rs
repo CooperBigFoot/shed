@@ -48,7 +48,7 @@ pub fn load_graph_from_bytes(bytes: bytes::Bytes) -> Result<DrainageGraph, Sessi
     let builder = ParquetRecordBatchReaderBuilder::try_new(bytes).map_err(|source| {
         SessionError::ParquetParse {
             artifact: ARTIFACT,
-            source: source.into(),
+            source,
         }
     })?;
     read_graph_from_builder(builder)

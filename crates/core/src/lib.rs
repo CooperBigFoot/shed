@@ -1,5 +1,10 @@
 //! Core library for the shed watershed extraction engine.
 
+// Pre-existing thiserror enums exceed clippy's 128-byte result_large_err
+// threshold (surfaced under clippy 1.93.0 once CI could resolve hfx-core).
+// Boxing the large Err variants is deferred tech debt; suppress crate-wide.
+#![allow(clippy::result_large_err)]
+
 pub mod algo;
 #[allow(dead_code)]
 pub(crate) mod assembly;

@@ -233,20 +233,19 @@ impl BasinGeoParquetWriter {
 
         for input in inputs {
             let resolved = self.resolve_input_identity(input)?;
-            if resolved.is_defaulted {
-                if let Some(first_origin) = default_origins_by_id
+            if resolved.is_defaulted
+                && let Some(first_origin) = default_origins_by_id
                     .insert(
                         resolved.basin_id.as_str().to_owned(),
                         resolved.origin.to_string(),
                     )
                     .filter(|first| first != &resolved.origin.to_string())
-                {
-                    return Err(ExportError::DefaultBasinIdCollision {
-                        basin_id: resolved.basin_id.to_string(),
-                        first_origin,
-                        second_origin: resolved.origin.to_string(),
-                    });
-                }
+            {
+                return Err(ExportError::DefaultBasinIdCollision {
+                    basin_id: resolved.basin_id.to_string(),
+                    first_origin,
+                    second_origin: resolved.origin.to_string(),
+                });
             }
 
             let row_key = (

@@ -478,7 +478,7 @@ impl EngineBuilder {
     /// Attach a terminal-refinement strategy.
     pub fn with_refinement_strategy(
         mut self,
-        strategy: impl TerminalRefinementStrategy + Send + Sync + 'static,
+        strategy: impl TerminalRefinementStrategy + 'static,
     ) -> Self {
         self.refinement_strategy = Some(Box::new(strategy));
         self

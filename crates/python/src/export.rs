@@ -32,6 +32,7 @@ impl PyBasinGeoParquetWriter {
 
     /// Write merged delineation results to one GeoParquet file.
     #[pyo3(signature = (engine, path, results, *, basin_ids=None, method=None, allow_default_basin_id=false))]
+    #[allow(clippy::too_many_arguments)]
     fn write(
         &self,
         py: Python<'_>,

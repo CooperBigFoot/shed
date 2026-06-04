@@ -110,20 +110,15 @@ impl SelectedLevel {
 }
 
 /// Controls whether terminal refinement is attempted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum RefinementMode {
     /// Try raster refinement when the dataset and engine provide raster inputs.
+    #[default]
     BestEffort,
     /// Require declared D8 raster refinement and fail if it cannot be applied.
     RequireD8,
     /// Skip terminal refinement and dissolve whole drainage-unit polygons.
     Disabled,
-}
-
-impl Default for RefinementMode {
-    fn default() -> Self {
-        Self::BestEffort
-    }
 }
 
 impl From<bool> for RefinementMode {
