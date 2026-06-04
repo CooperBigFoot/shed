@@ -157,12 +157,12 @@ class TestKwargValidation:
 @network_skip
 @pytest.mark.network
 def test_delineate_happy_path_unchanged():
-    """geometry=False returns an AreaOnlyResult with area and terminal_atom_id."""
+    """geometry=False returns an AreaOnlyResult with area and terminal_unit_id."""
     engine = pyshed.Engine(_REMOTE_URL)
     result = engine.delineate(lat=47.3769, lon=8.5417, geometry=False)
     assert isinstance(result, pyshed.AreaOnlyResult)
     assert result.area_km2 > 0
-    assert result.terminal_atom_id > 0
+    assert result.terminal_unit_id > 0
 
 
 # ---------------------------------------------------------------------------
@@ -232,9 +232,9 @@ def test_delineate_batch_parallel_sequential_equivalence():
     assert len(sequential_results) == len(_REMOTE_OUTLETS)
 
     for parallel, sequential in zip(parallel_results, sequential_results):
-        assert parallel.terminal_atom_id == sequential.terminal_atom_id
+        assert parallel.terminal_unit_id == sequential.terminal_unit_id
         assert parallel.area_km2 == pytest.approx(sequential.area_km2, rel=1e-9)
-        assert sorted(parallel.upstream_atom_ids) == sorted(sequential.upstream_atom_ids)
+        assert sorted(parallel.upstream_unit_ids) == sorted(sequential.upstream_unit_ids)
         assert parallel.geometry_wkb == sequential.geometry_wkb
 
 
@@ -268,7 +268,7 @@ def test_parquet_cache_off_default(caplog):
 @network_skip
 @pytest.mark.network
 def test_parquet_cache_on_off_results_identical():
-    """Same outlet produces identical area_km2 and terminal_atom_id with and without cache."""
+    """Same outlet produces identical area_km2 and terminal_unit_id with and without cache."""
     outlet = {"lat": 47.3769, "lon": 8.5417}
 
     engine_off = pyshed.Engine(_REMOTE_URL, parquet_cache=False)
@@ -278,7 +278,7 @@ def test_parquet_cache_on_off_results_identical():
     result_on = engine_on.delineate(**outlet, geometry=False)
 
     assert result_off.area_km2 == pytest.approx(result_on.area_km2, rel=1e-6)
-    assert result_off.terminal_atom_id == result_on.terminal_atom_id
+    assert result_off.terminal_unit_id == result_on.terminal_unit_id
 
 
 # ---------------------------------------------------------------------------

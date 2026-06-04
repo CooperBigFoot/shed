@@ -39,8 +39,8 @@ class TestSingleDelineation:
         assert result.area_km2 > 0
         assert isinstance(result.geometry_wkb, bytes)
         assert len(result.geometry_wkb) > 0
-        assert len(result.upstream_atom_ids) >= 1
-        assert result.terminal_atom_id > 0
+        assert len(result.upstream_unit_ids) >= 1
+        assert result.terminal_unit_id > 0
 
     def test_delineate_input_outlet(self, hfx_dataset):
         engine = pyshed.Engine(hfx_dataset)
@@ -135,10 +135,10 @@ class TestGeoJSON:
         data = json.loads(result.to_geojson())
         props = data["properties"]
         assert "area_km2" in props
-        assert "terminal_atom_id" in props
+        assert "terminal_unit_id" in props
         assert "resolution_method" in props
         assert "refinement" in props
-        assert "upstream_atom_count" in props
+        assert "upstream_unit_count" in props
         assert props["area_km2"] > 0
 
 

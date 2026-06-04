@@ -45,7 +45,7 @@ impl PyAreaOnlyResult {
 impl PyDelineationResult {
     /// Terminal unit ID that the outlet resolved to.
     #[getter]
-    fn terminal_atom_id(&self) -> i64 {
+    fn terminal_unit_id(&self) -> i64 {
         self.inner.terminal_unit_id().get()
     }
 
@@ -78,7 +78,7 @@ impl PyDelineationResult {
 
     /// All upstream unit IDs (including the terminal unit).
     #[getter]
-    fn upstream_atom_ids(&self) -> Vec<i64> {
+    fn upstream_unit_ids(&self) -> Vec<i64> {
         self.inner
             .upstream_unit_ids()
             .iter()
@@ -133,7 +133,7 @@ impl PyDelineationResult {
 
     fn __repr__(&self) -> String {
         format!(
-            "DelineationResult(terminal_atom_id={}, area_km2={:.2}, upstream_count={})",
+            "DelineationResult(terminal_unit_id={}, area_km2={:.2}, upstream_count={})",
             self.inner.terminal_unit_id().get(),
             self.inner.area_km2().as_f64(),
             self.inner.upstream_unit_ids().len(),
@@ -145,7 +145,7 @@ impl PyDelineationResult {
 impl PyAreaOnlyResult {
     /// Terminal unit ID that the outlet resolved to.
     #[getter]
-    fn terminal_atom_id(&self) -> i64 {
+    fn terminal_unit_id(&self) -> i64 {
         self.inner.terminal_unit_id().get()
     }
 
@@ -178,7 +178,7 @@ impl PyAreaOnlyResult {
 
     /// All upstream unit IDs (including the terminal unit).
     #[getter]
-    fn upstream_atom_ids(&self) -> Vec<i64> {
+    fn upstream_unit_ids(&self) -> Vec<i64> {
         self.inner
             .upstream_unit_ids()
             .iter()
@@ -194,7 +194,7 @@ impl PyAreaOnlyResult {
 
     fn __repr__(&self) -> String {
         format!(
-            "AreaOnlyResult(terminal_atom_id={}, area_km2={:.2}, upstream_count={})",
+            "AreaOnlyResult(terminal_unit_id={}, area_km2={:.2}, upstream_count={})",
             self.inner.terminal_unit_id().get(),
             self.inner.area_km2().as_f64(),
             self.inner.upstream_unit_ids().len(),

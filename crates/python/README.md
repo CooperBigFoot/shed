@@ -138,10 +138,10 @@ types, and the exception hierarchy, see [API.md](https://github.com/CooperBigFoo
 
 ## What it does
 
-- Resolves the outlet coordinate to a terminal HFX atom (via `snap.parquet`
+- Resolves the outlet coordinate to a terminal HFX unit (via `snap.parquet`
   or point-in-polygon on `catchments.parquet`).
-- Walks the upstream graph in `graph.arrow` collecting all contributing atoms.
-- Optionally refines the terminal atom geometry using `flow_dir.tif` /
+- Walks the upstream graph in `graph.arrow` collecting all contributing units.
+- Optionally refines the terminal unit geometry using `flow_dir.tif` /
   `flow_acc.tif` rasters when present.
 - Returns a dissolved `MultiPolygon` + geodesic area in km².
 - Bundles GDAL / PROJ / GEOS / libtiff / SQLite — no system GDAL install

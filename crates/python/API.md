@@ -170,12 +170,12 @@ Returned by `Engine.delineate()` and `Engine.delineate_batch()`.
 
 | Property | Type | Meaning |
 |---|---|---|
-| `terminal_atom_id` | `int` | Terminal HFX atom ID that the outlet resolved to |
+| `terminal_unit_id` | `int` | Terminal HFX unit ID that the outlet resolved to |
 | `input_outlet` | `tuple[float, float]` | Original outlet as `(lon, lat)` |
 | `resolved_outlet` | `tuple[float, float]` | Outlet used for resolution as `(lon, lat)` |
 | `refined_outlet` | `tuple[float, float] \| None` | Raster-refined outlet as `(lon, lat)`, or `None` if refinement was not applied |
 | `resolution_method` | `str` | Debug/provenance string describing how outlet resolution happened |
-| `upstream_atom_ids` | `list[int]` | Upstream atom IDs including the terminal atom |
+| `upstream_unit_ids` | `list[int]` | Upstream unit IDs including the terminal unit |
 | `area_km2` | `float` | Geodesic watershed area in square kilometres |
 | `geometry_bbox` | `tuple[float, float, float, float] \| None` | Geometry bounds as `(minx, miny, maxx, maxy)`, or `None` for empty geometry |
 | `geometry_wkb` | `bytes` | Watershed geometry encoded as OGC WKB bytes |
@@ -192,8 +192,8 @@ Serializes the result as a GeoJSON `Feature` string.
 __repr__() -> str
 ```
 
-Returns a concise debug representation including the terminal atom ID, area,
-and upstream atom count.
+Returns a concise debug representation including the terminal unit ID, area,
+and upstream unit count.
 
 ## AreaOnlyResult
 
@@ -206,12 +206,12 @@ provide `geometry_wkb`, `geometry_bbox`, or `to_geojson()`.
 
 | Property | Type | Meaning |
 |---|---|---|
-| `terminal_atom_id` | `int` | Terminal HFX atom ID that the outlet resolved to |
+| `terminal_unit_id` | `int` | Terminal HFX unit ID that the outlet resolved to |
 | `input_outlet` | `tuple[float, float]` | Original outlet as `(lon, lat)` |
 | `resolved_outlet` | `tuple[float, float]` | Outlet used for resolution as `(lon, lat)` |
 | `refined_outlet` | `tuple[float, float] \| None` | Raster-refined outlet as `(lon, lat)`, or `None` if refinement was not applied |
 | `resolution_method` | `str` | Debug/provenance string describing how outlet resolution happened |
-| `upstream_atom_ids` | `list[int]` | Upstream atom IDs including the terminal atom |
+| `upstream_unit_ids` | `list[int]` | Upstream unit IDs including the terminal unit |
 | `area_km2` | `float` | Geodesic watershed area in square kilometres |
 
 ## Exceptions

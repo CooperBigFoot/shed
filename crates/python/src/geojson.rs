@@ -14,7 +14,7 @@ pub fn result_to_geojson_feature(result: &DelineationResult) -> Result<String, s
         serde_json::json!(result.area_km2().as_f64()),
     );
     properties.insert(
-        "terminal_atom_id".into(),
+        "terminal_unit_id".into(),
         serde_json::json!(result.terminal_unit_id().get()),
     );
     properties.insert(
@@ -34,7 +34,7 @@ pub fn result_to_geojson_feature(result: &DelineationResult) -> Result<String, s
         serde_json::json!(result.resolved_outlet().lat),
     );
     properties.insert(
-        "upstream_atom_count".into(),
+        "upstream_unit_count".into(),
         serde_json::json!(result.upstream_unit_ids().len()),
     );
     properties.insert(
