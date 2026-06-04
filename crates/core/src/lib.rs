@@ -38,7 +38,8 @@ pub use error::SessionError;
 pub use export::{
     BasinBbox, BasinCentroid, BasinExportSchemaProfile, BasinId, BasinSpatialSortKey,
     DelineationLabel, ExportError, ExportMethod, ExportOrigin, FabricIdentity, HilbertIndex,
-    RowGroupPlan,
+    RowGroupPlan, UnitBundleExportInput, UnitBundleExportOptions, UnitBundleGeoParquetWriter,
+    UnitBundleSpatialSortKey,
 };
 pub use refinement::{
     AppliedRefinementReason, BestEffortSkipReason, ContainedTerminalPolygon, D8RasterHandle,

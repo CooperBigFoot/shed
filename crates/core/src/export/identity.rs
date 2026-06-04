@@ -110,7 +110,7 @@ impl DelineationLabel {
     /// | fabric identity has no fabric version | [`ExportError::MissingFabricVersion`] |
     pub fn from_fabric_identity(
         identity: &FabricIdentity,
-        method: ExportMethod,
+        method: &ExportMethod,
     ) -> Result<Self, ExportError> {
         let version =
             identity
@@ -189,24 +189,46 @@ impl FabricIdentity {
 }
 
 /// Export method label component for default delineation values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum ExportMethod {
-    /// D8 delineation with best-effort terminal refinement.
-    D8BestEffort,
-    /// D8 delineation with carved terminal refinement.
-    D8Carved,
-    /// D8 delineation with terminal refinement disabled.
-    D8Unrefined,
-}
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ExportMethod(String);
 
 impl ExportMethod {
-    /// Return the stable label used in `delineation`.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::D8BestEffort => "d8-best-effort",
-            Self::D8Carved => "d8-carved",
-            Self::D8Unrefined => "d8-unrefined",
+    /// Parse a caller-supplied export method label.
+    ///
+    /// # Errors
+    ///
+    /// | Condition | Error variant |
+    /// |---|---|
+    /// | value is empty | [`ExportError::InvalidBasinId`] |
+    pub fn parse(value: impl Into<String>) -> Result<Self, ExportError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(ExportError::InvalidBasinId {
+                value,
+                reason: "export method must not be empty",
+            });
         }
+        Ok(Self(value))
+    }
+
+    /// Return the default best-effort D8 method label.
+    pub fn d8_best_effort() -> Self {
+        Self("d8-best-effort".to_owned())
+    }
+
+    /// Return the default required/applied D8 method label.
+    pub fn d8_required() -> Self {
+        Self("d8-required".to_owned())
+    }
+
+    /// Return the default no-refinement method label.
+    pub fn no_refine() -> Self {
+        Self("no-refine".to_owned())
+    }
+
+    /// Return the stable label used in `delineation`.
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -345,8 +367,9 @@ mod export_identity_tests {
     #[test]
     fn export_identity_missing_fabric_version_default_label_error() {
         let identity = FabricIdentity::new("grit", None, "adapter-v1");
-        let err = DelineationLabel::from_fabric_identity(&identity, ExportMethod::D8BestEffort)
-            .unwrap_err();
+        let err =
+            DelineationLabel::from_fabric_identity(&identity, &ExportMethod::d8_best_effort())
+                .unwrap_err();
         assert!(matches!(
             err,
             ExportError::MissingFabricVersion { fabric_name } if fabric_name == "grit"
@@ -358,9 +381,11 @@ mod export_identity_tests {
         let first = FabricIdentity::new("grit", Some("2024.1".to_owned()), "adapter-a");
         let second = FabricIdentity::new("grit", Some("2024.1".to_owned()), "adapter-b");
         let first_label =
-            DelineationLabel::from_fabric_identity(&first, ExportMethod::D8BestEffort).unwrap();
+            DelineationLabel::from_fabric_identity(&first, &ExportMethod::d8_best_effort())
+                .unwrap();
         let second_label =
-            DelineationLabel::from_fabric_identity(&second, ExportMethod::D8BestEffort).unwrap();
+            DelineationLabel::from_fabric_identity(&second, &ExportMethod::d8_best_effort())
+                .unwrap();
 
         assert_eq!(first_label, second_label);
         assert_eq!(first.adapter_version(), "adapter-a");

@@ -69,7 +69,7 @@ enum ProvenanceColumns {
 }
 
 /// One input row for the basin GeoParquet batch writer.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum BasinExportInput<'a> {
     /// Caller supplied an explicit basin identifier.
     Explicit {
@@ -312,7 +312,7 @@ impl BasinGeoParquetWriter {
                 origin,
             } => Ok(ResolvedInput {
                 basin_id: (*basin_id).clone(),
-                delineation: self.delineation_label(identity, *method)?,
+                delineation: self.delineation_label(identity, method)?,
                 result,
                 identity,
                 origin,
@@ -325,7 +325,7 @@ impl BasinGeoParquetWriter {
                 origin,
             } => Ok(ResolvedInput {
                 basin_id: BasinId::from_terminal_unit_id(result.terminal_unit_id())?,
-                delineation: self.delineation_label(identity, *method)?,
+                delineation: self.delineation_label(identity, method)?,
                 result,
                 identity,
                 origin,
@@ -337,7 +337,7 @@ impl BasinGeoParquetWriter {
     fn delineation_label(
         &self,
         identity: &FabricIdentity,
-        method: ExportMethod,
+        method: &ExportMethod,
     ) -> Result<DelineationLabel, ExportError> {
         self.options
             .delineation_label_override
@@ -508,7 +508,7 @@ mod export_writer_tests {
             "basin-a",
             &test_result.result,
             &identity("1.0.0"),
-            ExportMethod::D8Unrefined,
+            ExportMethod::no_refine(),
             &origin("outlet-a"),
         )]);
 
@@ -529,7 +529,7 @@ mod export_writer_tests {
         let areas = f64_column(batch, 5);
 
         assert_eq!(basin_ids.value(0), "basin-a");
-        assert_eq!(delineations.value(0), "testfabric/1.0.0/d8-unrefined");
+        assert_eq!(delineations.value(0), "testfabric/1.0.0/no-refine");
         assert!(!geometries.value(0).is_empty());
         assert_eq!(outlet_lons.value(0), -0.5);
         assert_eq!(outlet_lats.value(0), -0.5);
@@ -543,7 +543,7 @@ mod export_writer_tests {
             "basin-a",
             &test_result.result,
             &identity("2.0.0"),
-            ExportMethod::D8BestEffort,
+            ExportMethod::d8_best_effort(),
             &origin("zurich"),
         )]);
 
@@ -566,7 +566,7 @@ mod export_writer_tests {
             "basin-a",
             &test_result.result,
             &identity("1.0.0"),
-            ExportMethod::D8Unrefined,
+            ExportMethod::no_refine(),
             &origin("outlet-a"),
         )]);
         let metadata = parquet_metadata(path.path());
@@ -593,7 +593,7 @@ mod export_writer_tests {
                     basin_id,
                     &test_result.result,
                     &identity,
-                    ExportMethod::D8Unrefined,
+                    ExportMethod::no_refine(),
                     &origin,
                 )
             })
@@ -620,14 +620,14 @@ mod export_writer_tests {
                 &east_id,
                 &east.result,
                 &identity,
-                ExportMethod::D8Unrefined,
+                ExportMethod::no_refine(),
                 &east_origin,
             ),
             BasinExportInput::explicit(
                 &west_id,
                 &west.result,
                 &identity,
-                ExportMethod::D8Unrefined,
+                ExportMethod::no_refine(),
                 &west_origin,
             ),
         ]);
@@ -636,7 +636,7 @@ mod export_writer_tests {
             (
                 BasinSpatialSortKey::from_geometry(
                     west_id.clone(),
-                    DelineationLabel::from_fabric_identity(&identity, ExportMethod::D8Unrefined)
+                    DelineationLabel::from_fabric_identity(&identity, &ExportMethod::no_refine())
                         .expect("label"),
                     west.result.geometry(),
                 )
@@ -646,7 +646,7 @@ mod export_writer_tests {
             (
                 BasinSpatialSortKey::from_geometry(
                     east_id.clone(),
-                    DelineationLabel::from_fabric_identity(&identity, ExportMethod::D8Unrefined)
+                    DelineationLabel::from_fabric_identity(&identity, &ExportMethod::no_refine())
                         .expect("label"),
                     east.result.geometry(),
                 )
@@ -688,14 +688,14 @@ mod export_writer_tests {
                 &basin_id,
                 &test_result.result,
                 &identity,
-                ExportMethod::D8Unrefined,
+                ExportMethod::no_refine(),
                 &origin_a,
             ),
             BasinExportInput::explicit(
                 &basin_id,
                 &test_result.result,
                 &identity,
-                ExportMethod::D8Unrefined,
+                ExportMethod::no_refine(),
                 &origin_b,
             ),
         ];
@@ -709,7 +709,7 @@ mod export_writer_tests {
             ExportError::DuplicateRow {
                 basin_id,
                 delineation
-            } if basin_id == "basin-a" && delineation == "testfabric/1.0.0/d8-unrefined"
+            } if basin_id == "basin-a" && delineation == "testfabric/1.0.0/no-refine"
         ));
     }
 
@@ -726,14 +726,14 @@ mod export_writer_tests {
                 &basin_id,
                 &test_result.result,
                 &identity_a,
-                ExportMethod::D8Unrefined,
+                ExportMethod::no_refine(),
                 &origin_a,
             ),
             BasinExportInput::explicit(
                 &basin_id,
                 &test_result.result,
                 &identity_b,
-                ExportMethod::D8Unrefined,
+                ExportMethod::no_refine(),
                 &origin_b,
             ),
         ]);
@@ -753,13 +753,13 @@ mod export_writer_tests {
             BasinExportInput::default_basin_id(
                 &test_result.result,
                 &identity,
-                ExportMethod::D8Unrefined,
+                ExportMethod::no_refine(),
                 &origin_a,
             ),
             BasinExportInput::default_basin_id(
                 &test_result.result,
                 &identity,
-                ExportMethod::D8Unrefined,
+                ExportMethod::no_refine(),
                 &origin_b,
             ),
         ];

@@ -1,6 +1,7 @@
 //! Spatial helpers for basin GeoParquet export rows.
 
 use geo::{Area, BoundingRect, Centroid, MultiPolygon};
+use hfx_core::UnitId;
 
 use crate::export::{BasinId, DelineationLabel, ExportError};
 
@@ -69,6 +70,39 @@ pub struct BasinSpatialSortKey {
     pub basin_id: BasinId,
     /// Tertiary delineation label tie-break.
     pub delineation: DelineationLabel,
+}
+
+/// Full deterministic spatial sort key for one unit-bundle export row.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct UnitBundleSpatialSortKey {
+    /// Primary Hilbert curve position.
+    pub hilbert_index: HilbertIndex,
+    /// Secondary drainage-unit identity tie-break.
+    pub unit_id: UnitId,
+    /// Tertiary delineation label tie-break.
+    pub delineation: DelineationLabel,
+}
+
+impl UnitBundleSpatialSortKey {
+    /// Build a deterministic sort key from unit identity and geometry.
+    ///
+    /// # Errors
+    ///
+    /// | Condition | Error variant |
+    /// |---|---|
+    /// | geometry has no finite centroid | [`ExportError::CentroidFailure`] |
+    pub fn from_geometry(
+        unit_id: UnitId,
+        delineation: DelineationLabel,
+        geometry: &MultiPolygon<f64>,
+    ) -> Result<Self, ExportError> {
+        let centroid = basin_centroid(geometry)?;
+        Ok(Self {
+            hilbert_index: HilbertIndex::from_centroid(centroid),
+            unit_id,
+            delineation,
+        })
+    }
 }
 
 impl BasinSpatialSortKey {
@@ -401,6 +435,29 @@ mod export_spatial_tests {
                 ("b", "fabric/v1/b")
             ]
         );
+    }
+
+    #[test]
+    fn export_spatial_unit_bundle_tie_break_uses_unit_id() {
+        let geometry = tiny_rect_around(lon_for_quantized_x(0), lat_for_quantized_y(0));
+        let mut keys = vec![
+            UnitBundleSpatialSortKey::from_geometry(
+                UnitId::new(9).unwrap(),
+                DelineationLabel::parse("fabric/v1/a").unwrap(),
+                &geometry,
+            )
+            .unwrap(),
+            UnitBundleSpatialSortKey::from_geometry(
+                UnitId::new(3).unwrap(),
+                DelineationLabel::parse("fabric/v1/z").unwrap(),
+                &geometry,
+            )
+            .unwrap(),
+        ];
+
+        keys.sort();
+        let ids = keys.iter().map(|key| key.unit_id.get()).collect::<Vec<_>>();
+        assert_eq!(ids, vec![3, 9]);
     }
 
     #[test]

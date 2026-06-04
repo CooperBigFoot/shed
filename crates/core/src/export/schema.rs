@@ -47,6 +47,26 @@ pub fn basin_export_schema(profile: BasinExportSchemaProfile) -> Arc<Schema> {
     Arc::new(Schema::new(fields))
 }
 
+/// Build the Arrow schema for pre-merge unit-bundle GeoParquet export rows.
+pub fn unit_bundle_export_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("unit_id", DataType::Int64, false),
+        Field::new("level", DataType::Int16, false),
+        Field::new("area_km2", DataType::Float64, false),
+        Field::new("up_area_km2", DataType::Float64, true),
+        Field::new("outlet_lon", DataType::Float64, false),
+        Field::new("outlet_lat", DataType::Float64, false),
+        Field::new("geometry", DataType::Binary, false),
+        Field::new("bbox_minx", DataType::Float32, false),
+        Field::new("bbox_miny", DataType::Float32, false),
+        Field::new("bbox_maxx", DataType::Float32, false),
+        Field::new("bbox_maxy", DataType::Float32, false),
+        Field::new("terminal_unit_id", DataType::Int64, false),
+        Field::new("delineation", DataType::Utf8, false),
+        Field::new("refinement_status", DataType::Utf8, true),
+    ]))
+}
+
 /// Serialize the GeoParquet `geo` footer JSON.
 pub fn geo_footer_json(dataset_bbox: BasinBbox) -> String {
     let metadata = json!({
@@ -231,6 +251,42 @@ mod export_schema_tests {
                 "bbox_miny",
                 "bbox_maxx",
                 "bbox_maxy",
+            ]
+        );
+    }
+
+    #[test]
+    fn unit_bundle_export_schema_exact_fields() {
+        let schema = unit_bundle_export_schema();
+        let actual = schema
+            .fields()
+            .iter()
+            .map(|field| {
+                (
+                    field.name().as_str(),
+                    field.data_type().clone(),
+                    field.is_nullable(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            actual,
+            vec![
+                ("unit_id", DataType::Int64, false),
+                ("level", DataType::Int16, false),
+                ("area_km2", DataType::Float64, false),
+                ("up_area_km2", DataType::Float64, true),
+                ("outlet_lon", DataType::Float64, false),
+                ("outlet_lat", DataType::Float64, false),
+                ("geometry", DataType::Binary, false),
+                ("bbox_minx", DataType::Float32, false),
+                ("bbox_miny", DataType::Float32, false),
+                ("bbox_maxx", DataType::Float32, false),
+                ("bbox_maxy", DataType::Float32, false),
+                ("terminal_unit_id", DataType::Int64, false),
+                ("delineation", DataType::Utf8, false),
+                ("refinement_status", DataType::Utf8, true),
             ]
         );
     }

@@ -4,15 +4,19 @@ pub mod identity;
 pub mod row_groups;
 pub mod schema;
 pub mod spatial;
+pub mod unit_writer;
 pub mod writer;
 
 pub use identity::{BasinId, DelineationLabel, ExportMethod, ExportOrigin, FabricIdentity};
 pub use row_groups::{RowGroupPlan, plan_row_groups};
-pub use schema::{BasinExportSchemaProfile, basin_export_schema, geo_footer_json};
-pub use spatial::{
-    BasinBbox, BasinCentroid, BasinSpatialSortKey, HilbertIndex, basin_bbox, basin_centroid,
-    outward_f32_bbox,
+pub use schema::{
+    BasinExportSchemaProfile, basin_export_schema, geo_footer_json, unit_bundle_export_schema,
 };
+pub use spatial::{
+    BasinBbox, BasinCentroid, BasinSpatialSortKey, HilbertIndex, UnitBundleSpatialSortKey,
+    basin_bbox, basin_centroid, outward_f32_bbox,
+};
+pub use unit_writer::{UnitBundleExportInput, UnitBundleExportOptions, UnitBundleGeoParquetWriter};
 pub use writer::{BasinExportInput, BasinGeoParquetWriter, ExportOptions};
 
 /// Errors raised while preparing basin GeoParquet exports.
@@ -83,6 +87,10 @@ pub enum ExportError {
     #[error("basin GeoParquet export requires at least one row")]
     EmptyInput,
 
+    /// Fires when a unit-bundle export contains no drainage-unit rows.
+    #[error("unit-bundle GeoParquet export requires at least one row")]
+    EmptyUnitBundle,
+
     /// Fires when two rows use the same `(basin_id, delineation)` identity.
     #[error("duplicate export row for basin_id {basin_id} and delineation {delineation}")]
     DuplicateRow {
@@ -92,11 +100,29 @@ pub enum ExportError {
         delineation: String,
     },
 
+    /// Fires when two unit-bundle rows use the same `(unit_id, delineation)` identity.
+    #[error("duplicate unit-bundle export row for unit_id {unit_id} and delineation {delineation}")]
+    DuplicateUnitBundleRow {
+        /// Duplicate drainage-unit identifier.
+        unit_id: i64,
+        /// Duplicate delineation label.
+        delineation: String,
+    },
+
     /// Fires when a delineation geometry cannot be encoded as WKB.
     #[error("cannot encode geometry for basin_id {basin_id}: {source}")]
     GeometryEncodingFailure {
         /// Basin identifier being materialized.
         basin_id: String,
+        /// Lower-level WKB encoding failure.
+        source: crate::algo::WkbEncodeError,
+    },
+
+    /// Fires when a pre-merge drainage-unit geometry cannot be encoded as WKB.
+    #[error("cannot encode geometry for unit_id {unit_id}: {source}")]
+    UnitGeometryEncodingFailure {
+        /// Drainage-unit identifier being materialized.
+        unit_id: i64,
         /// Lower-level WKB encoding failure.
         source: crate::algo::WkbEncodeError,
     },
