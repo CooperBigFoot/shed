@@ -84,7 +84,7 @@ enum PyDelineateOutput {
 #[pyclass(name = "Engine")]
 pub struct PyEngine {
     engine: Arc<Engine>,
-    config: EngineConfig,
+    pub(crate) config: EngineConfig,
     pub(crate) fabric_identity: FabricIdentity,
 }
 

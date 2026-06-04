@@ -215,6 +215,39 @@ class DissolvedWatershed:
     def __repr__(self) -> str: ...
 
 
+class BasinGeoParquetWriter:
+    def __init__(self) -> None: ...
+
+    def write(
+        self,
+        engine: Engine,
+        path: str,
+        results: list[DelineationResult],
+        *,
+        basin_ids: list[str] | None = None,
+        method: str | None = None,
+        allow_default_basin_id: bool = False,
+    ) -> None: ...
+
+    def __repr__(self) -> str: ...
+
+
+class UnitBundleGeoParquetWriter:
+    def __init__(self) -> None: ...
+
+    def write(
+        self,
+        engine: Engine,
+        path: str,
+        bundles: list[PreMergeDrainageUnits],
+        refinements: list[TerminalRefinement],
+        *,
+        method: str | None = None,
+    ) -> None: ...
+
+    def __repr__(self) -> str: ...
+
+
 class Engine:
     def __init__(
         self,

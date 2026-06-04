@@ -11,6 +11,7 @@ mod config;
 mod data_paths;
 mod engine;
 mod error;
+mod export;
 mod geojson;
 pub(crate) mod kwargs;
 mod result;
@@ -126,6 +127,8 @@ fn _pyshed(m: &Bound<'_, PyModule>) -> PyResult<()> {
     log::set_max_level(log::LevelFilter::Warn);
 
     m.add_class::<engine::PyEngine>()?;
+    m.add_class::<export::PyBasinGeoParquetWriter>()?;
+    m.add_class::<export::PyUnitBundleGeoParquetWriter>()?;
     m.add_class::<result::PyDelineationResult>()?;
     m.add_class::<result::PyAreaOnlyResult>()?;
     m.add_class::<result::PyDelineationUnitMetadata>()?;

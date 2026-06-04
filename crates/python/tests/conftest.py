@@ -78,6 +78,7 @@ def _write_manifest(root):
     manifest = {
         "format_version": "0.2.1",
         "fabric_name": "testfabric",
+        "fabric_version": "0.0.0",
         "crs": "EPSG:4326",
         "topology": "tree",
         "bbox": [-180.0, -90.0, 180.0, 90.0],

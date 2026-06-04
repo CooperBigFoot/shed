@@ -15,9 +15,20 @@ Test coordinate inside unit 1: lon=0.70, lat=0.20
 
 import json
 
+import pyarrow.parquet as pq
 import pytest
 
 import pyshed
+
+
+def read_parquet_metadata(path):
+    with open(path, "rb") as fh:
+        return pq.read_metadata(fh)
+
+
+def read_parquet_table(path):
+    with open(path, "rb") as fh:
+        return pq.read_table(fh)
 
 
 class TestSingleDelineation:
@@ -142,6 +153,79 @@ class TestStagedDelineation:
         assert "r3_note" in repr(units)
         source_unit_area_sum = sum(unit.area_km2 for unit in units.units)
         assert source_unit_area_sum != pytest.approx(direct.area_km2, rel=1e-9)
+
+
+class TestGeoParquetExports:
+    """Tests for merged-basin and unit-bundle writer objects."""
+
+    def test_basin_and_unit_bundle_exports_have_geo_footer(self, hfx_dataset, tmp_path):
+        engine = pyshed.Engine(hfx_dataset)
+        result = engine.delineate(lat=0.20, lon=1.70)
+        level = engine.select_level()
+        outlet = engine.resolve_outlet(level, lat=0.20, lon=1.70)
+        upstream = engine.traverse(outlet)
+        units = engine.pre_merge_units(upstream)
+        refinement = engine.refine(outlet, units)
+
+        basin_path = tmp_path / "basin.parquet"
+        bundle_path = tmp_path / "bundle.parquet"
+        pyshed.BasinGeoParquetWriter().write(
+            engine, str(basin_path), [result], basin_ids=["basin-3"]
+        )
+        pyshed.UnitBundleGeoParquetWriter().write(
+            engine, str(bundle_path), [units], [refinement]
+        )
+
+        assert b"geo" in read_parquet_metadata(basin_path).metadata
+        assert b"geo" in read_parquet_metadata(bundle_path).metadata
+
+        basin = read_parquet_table(basin_path)
+        bundle = read_parquet_table(bundle_path)
+        assert basin.column("delineation").to_pylist() == [
+            "testfabric/0.0.0/d8-best-effort"
+        ]
+        assert basin.column("refinement_status").to_pylist() == [
+            "best_effort_skipped"
+        ]
+        assert set(bundle.column("unit_id").to_pylist()) == set(upstream.unit_ids)
+        assert bundle.column("terminal_unit_id").to_pylist() == [3, 3, 3]
+
+    def test_default_basin_id_allowed_only_for_single_explicit_default(self, hfx_dataset, tmp_path):
+        engine = pyshed.Engine(hfx_dataset)
+        result = engine.delineate(lat=0.20, lon=1.70)
+        writer = pyshed.BasinGeoParquetWriter()
+
+        default_path = tmp_path / "default-basin.parquet"
+        writer.write(
+            engine,
+            str(default_path),
+            [result],
+            allow_default_basin_id=True,
+        )
+        table = read_parquet_table(default_path)
+        assert table.column("basin_id").to_pylist() == ["3"]
+        assert b"geo" in read_parquet_metadata(default_path).metadata
+
+        with pytest.raises(ValueError, match="basin_ids are required"):
+            writer.write(engine, str(tmp_path / "missing-id.parquet"), [result])
+        with pytest.raises(ValueError, match="basin_ids are required"):
+            writer.write(
+                engine,
+                str(tmp_path / "ambiguous-default.parquet"),
+                [result, result],
+                allow_default_basin_id=True,
+            )
+
+    def test_export_method_default_tracks_refine_config(self, hfx_dataset, tmp_path):
+        engine = pyshed.Engine(hfx_dataset, refine=False)
+        result = engine.delineate(lat=0.20, lon=1.70)
+        path = tmp_path / "no-refine.parquet"
+        pyshed.BasinGeoParquetWriter().write(
+            engine, str(path), [result], basin_ids=["basin-3"]
+        )
+        table = read_parquet_table(path)
+        assert table.column("delineation").to_pylist() == ["testfabric/0.0.0/no-refine"]
+        assert table.column("refinement_status").to_pylist() == ["disabled"]
 
 
 class TestCoordinateValidation:

@@ -38,3 +38,28 @@ pub fn engine_err_to_py(e: shed_core::EngineError) -> PyErr {
         EngineError::PreMergeCatchmentDecode { .. } => DatasetError::new_err(e.to_string()),
     }
 }
+
+/// Map a core export error to a Python exception.
+pub fn export_err_to_py(e: shed_core::export::ExportError) -> PyErr {
+    use shed_core::export::ExportError;
+    match e {
+        ExportError::InvalidBasinId { .. }
+        | ExportError::MissingFabricVersion { .. }
+        | ExportError::NegativeDefaultBasinId { .. }
+        | ExportError::DefaultBasinIdCollision { .. }
+        | ExportError::EmptyInput
+        | ExportError::EmptyUnitBundle
+        | ExportError::DuplicateRow { .. }
+        | ExportError::DuplicateUnitBundleRow { .. } => {
+            pyo3::exceptions::PyValueError::new_err(e.to_string())
+        }
+        ExportError::BboxFailure { .. }
+        | ExportError::CentroidFailure { .. }
+        | ExportError::RowGroupPlanningFailure { .. }
+        | ExportError::GeometryEncodingFailure { .. }
+        | ExportError::UnitGeometryEncodingFailure { .. }
+        | ExportError::ArrowWriteFailure { .. }
+        | ExportError::ParquetWriteFailure { .. }
+        | ExportError::FooterMetadataFailure { .. } => ShedError::new_err(e.to_string()),
+    }
+}

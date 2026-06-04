@@ -42,6 +42,7 @@ from pyshed import _pyshed
 from pyshed._pyshed import (
     AreaOnlyResult,
     AssemblyError,
+    BasinGeoParquetWriter,
     DatasetError,
     DelineationResult,
     DelineationUnitMetadata,
@@ -54,6 +55,7 @@ from pyshed._pyshed import (
     SelectedLevel,
     ShedError,
     TerminalRefinement,
+    UnitBundleGeoParquetWriter,
     UpstreamUnits,
     _install_bench_trace,
     _set_log_level,
@@ -128,6 +130,7 @@ def bench_trace(path: os.PathLike[str] | str) -> Iterator[None]:
 __all__ = [
     "AreaOnlyResult",
     "AssemblyError",
+    "BasinGeoParquetWriter",
     "DatasetError",
     "DelineationResult",
     "DelineationUnitMetadata",
@@ -140,6 +143,7 @@ __all__ = [
     "SelectedLevel",
     "ShedError",
     "TerminalRefinement",
+    "UnitBundleGeoParquetWriter",
     "UpstreamUnits",
     "bench_trace",
     "set_log_level",
