@@ -1,13 +1,17 @@
 //! Terminal refinement strategy contract and provenance types.
 
-use geo::MultiPolygon;
+use geo::{BoundingRect, MultiPolygon};
 use hfx_core::FlowDirEncoding;
 use hfx_core::UnitId;
 use object_store::path::Path as ObjectPath;
 
 use crate::algo::coord::GeoCoord;
-use crate::algo::{RasterSource, RefinementError, SnapThreshold};
-use crate::session::DatasetSession;
+use crate::algo::{RasterSource, RefinementError, SnapThreshold, refine_terminal_from_source};
+use crate::error::SessionError;
+use crate::session::{DatasetSession, RasterKind};
+use crate::telemetry::{
+    Stage, StageGuard, record_bytes, record_cache_status, record_path, record_requests,
+};
 
 /// Runs terminal-only geometry refinement using typed engine context.
 pub trait TerminalRefinementStrategy: Send + Sync {
@@ -51,6 +55,127 @@ pub struct D8RefinementPantry<'a> {
     pub session: &'a DatasetSession,
     /// Engine-attached raster source, if available.
     pub raster_source: Option<&'a (dyn RasterSource + Send + Sync)>,
+}
+
+/// Built-in terminal refinement strategy for declared HFX blessed-D8 rasters.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct D8RasterRefinementStrategy;
+
+impl TerminalRefinementStrategy for D8RasterRefinementStrategy {
+    fn refine_terminal(
+        &self,
+        input: TerminalRefinementInput<'_>,
+        pantry: &D8RefinementPantry<'_>,
+    ) -> Result<TerminalRefinementDecision, TerminalRefinementError> {
+        let terminal_bbox =
+            input
+                .terminal_geometry
+                .bounding_rect()
+                .ok_or(TerminalRefinementError::Algorithm {
+                    unit_id: input.terminal_unit.get(),
+                    source: RefinementError::DegenerateTerminalPolygon,
+                })?;
+        let handle = pantry
+            .session
+            .select_d8_raster_for_bbox(terminal_bbox)
+            .map_err(|source| TerminalRefinementError::D8Selection {
+                unit_id: input.terminal_unit.get(),
+                source,
+            })?;
+
+        let Some(raster_source) = pantry.raster_source else {
+            return Ok(TerminalRefinementDecision::BestEffortSkipped {
+                provenance: RefinementProvenance::BestEffortSkipped {
+                    strategy: RefinementStrategyName::BestEffortD8IfPresent,
+                    why: BestEffortSkipReason::NoRasterSourceProvided,
+                },
+            });
+        };
+
+        let flow_dir = {
+            let _guard = StageGuard::enter(Stage::RasterLocalizeFlowDir);
+            let flow_dir = pantry
+                .session
+                .localize_d8_raster_window(&handle, RasterKind::FlowDir, terminal_bbox)
+                .map_err(|source| TerminalRefinementError::RasterLocalize {
+                    unit_id: input.terminal_unit.get(),
+                    kind: RasterKind::FlowDir,
+                    source,
+                })?;
+            let bytes = flow_dir.header_bytes() + flow_dir.tile_bytes();
+            record_bytes(bytes);
+            record_requests(flow_dir.tile_count() as u64);
+            record_cache_status(if bytes == 0 { "no_fetch" } else { "fetched" });
+            record_path(flow_dir.path());
+            flow_dir
+        };
+        let flow_acc = {
+            let _guard = StageGuard::enter(Stage::RasterLocalizeFlowAcc);
+            let flow_acc = pantry
+                .session
+                .localize_d8_raster_window(&handle, RasterKind::FlowAcc, terminal_bbox)
+                .map_err(|source| TerminalRefinementError::RasterLocalize {
+                    unit_id: input.terminal_unit.get(),
+                    kind: RasterKind::FlowAcc,
+                    source,
+                })?;
+            let bytes = flow_acc.header_bytes() + flow_acc.tile_bytes();
+            record_bytes(bytes);
+            record_requests(flow_acc.tile_count() as u64);
+            record_cache_status(if bytes == 0 { "no_fetch" } else { "fetched" });
+            record_path(flow_acc.path());
+            flow_acc
+        };
+        tracing::debug!(
+            flow_dir_cog_header_bytes = flow_dir.header_bytes(),
+            flow_dir_cog_tile_bytes = flow_dir.tile_bytes(),
+            flow_dir_cog_tile_count = flow_dir.tile_count(),
+            flow_dir_window_pixels = flow_dir.window_pixels(),
+            flow_acc_cog_header_bytes = flow_acc.header_bytes(),
+            flow_acc_cog_tile_bytes = flow_acc.tile_bytes(),
+            flow_acc_cog_tile_count = flow_acc.tile_count(),
+            flow_acc_window_pixels = flow_acc.window_pixels(),
+            declaration_index = handle.declaration_index(),
+            "localized selected D8 raster windows for refinement"
+        );
+        let flow_dir_uri = flow_dir.path().to_string_lossy();
+        let flow_acc_uri = flow_acc.path().to_string_lossy();
+
+        let refinement_result = {
+            let _refine_guard = StageGuard::enter(Stage::TerminalRefine);
+            refine_terminal_from_source(
+                raster_source,
+                flow_dir_uri.as_ref(),
+                flow_acc_uri.as_ref(),
+                input.terminal_geometry,
+                input.resolved_outlet,
+                input.snap_threshold,
+            )
+            .map_err(|source| TerminalRefinementError::Algorithm {
+                unit_id: input.terminal_unit.get(),
+                source,
+            })?
+        };
+
+        let refined_outlet = refinement_result.snapped_coord();
+        let geometry =
+            ContainedTerminalPolygon::new_unchecked_from_d8_carve(refinement_result.into_polygon())
+                .map_err(|_source| TerminalRefinementError::Algorithm {
+                    unit_id: input.terminal_unit.get(),
+                    source: RefinementError::EmptyPolygonization,
+                })?;
+
+        Ok(TerminalRefinementDecision::Applied {
+            refined_outlet,
+            geometry,
+            provenance: RefinementProvenance::Applied {
+                strategy: RefinementStrategyName::BuiltInD8,
+                why: AppliedRefinementReason::D8AuxMatchedTerminalBbox {
+                    declaration_index: handle.declaration_index(),
+                },
+            },
+        })
+    }
 }
 
 /// Typed handle for one selected blessed-D8 raster declaration.
@@ -233,6 +358,28 @@ pub enum TerminalRefinementError {
     RasterSource {
         /// Strategy that required raster access.
         strategy: RefinementStrategyName,
+    },
+
+    /// Fired when selecting the covering D8 declaration fails.
+    #[error("failed to select D8 raster for terminal refinement (unit {unit_id}): {source}")]
+    D8Selection {
+        /// Terminal drainage-unit ID.
+        unit_id: i64,
+        /// Underlying session error.
+        source: SessionError,
+    },
+
+    /// Fired when a selected D8 raster window cannot be localized.
+    #[error(
+        "failed to localize selected D8 {kind:?} raster for terminal refinement (unit {unit_id}): {source}"
+    )]
+    RasterLocalize {
+        /// Terminal drainage-unit ID.
+        unit_id: i64,
+        /// Raster kind being localized.
+        kind: RasterKind,
+        /// Underlying session error.
+        source: SessionError,
     },
 
     /// Fired when the underlying D8 refinement algorithm fails.

@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use geo::{BoundingRect, MultiPolygon};
+use geo::MultiPolygon;
 use hfx_core::UnitId;
 use rayon::prelude::*;
 use tracing::instrument;
@@ -12,27 +12,27 @@ use crate::algo::coord::GeoCoord;
 use crate::algo::{
     AreaKm2, CleanEpsilon, DEFAULT_CLEANING_EPSILON, GeometryRepair, HoleFillMode, RasterSource,
     RefinementError, SnapThreshold, TraversalError, WkbDecodeError, WkbEncodeError,
-    collect_upstream, encode_wkb_multi_polygon, refine_terminal_from_source,
+    collect_upstream, encode_wkb_multi_polygon,
 };
 use crate::assembly::{AssemblyOptions, assemble_from_geometries};
 use crate::error::SessionError;
 use crate::reader::catchment_store::CatchmentGeometryQueryError;
 use crate::refinement::{
-    AppliedRefinementReason, ContainedTerminalPolygon, RefinementProvenance, RefinementStrategyName,
+    D8RasterRefinementStrategy, D8RefinementPantry, RefinementProvenance,
+    TerminalRefinementDecision, TerminalRefinementError, TerminalRefinementInput,
+    TerminalRefinementStrategy,
 };
 use crate::resolver::{
     OutletResolutionError, ResolutionMethod, ResolverConfig,
     resolve_outlet_at_level as resolve_outlet_in_resolver_at_level,
 };
-use crate::session::{DatasetSession, RasterKind};
+use crate::session::DatasetSession;
 use crate::staged::{
     DissolvedWatershed, LevelResolvedOutlet, LevelSelection, PreMergeDrainageUnit,
     PreMergeDrainageUnits, RefinementMode, SameLevelUpstreamUnits, SelectedLevel,
     TerminalRefinement,
 };
-use crate::telemetry::{
-    Stage, StageGuard, record_bytes, record_cache_status, record_path, record_requests,
-};
+use crate::telemetry::{Stage, StageGuard};
 
 // ── RefinementOutcome ─────────────────────────────────────────────────────────
 
@@ -318,6 +318,15 @@ pub enum EngineError {
         source: SessionError,
     },
 
+    /// Fired when no unique covering D8 declaration can be selected.
+    #[error("failed to select D8 raster for refinement (unit {unit_id}): {source}")]
+    D8Selection {
+        /// The raw unit ID for which D8 declaration selection was attempted.
+        unit_id: i64,
+        /// Underlying session error.
+        source: SessionError,
+    },
+
     /// Fired when the raster-based terminal refinement step fails.
     #[error("terminal refinement failed for unit {unit_id}: {source}")]
     Refinement {
@@ -393,6 +402,7 @@ pub enum EngineError {
 pub struct EngineBuilder {
     session: DatasetSession,
     raster_source: Option<Box<dyn RasterSource + Send + Sync>>,
+    refinement_strategy: Option<Box<dyn TerminalRefinementStrategy + Send + Sync>>,
     geometry_repair: Option<Box<dyn GeometryRepair + Send + Sync>>,
 }
 
@@ -400,6 +410,15 @@ impl EngineBuilder {
     /// Attach a [`RasterSource`] backend for terminal refinement.
     pub fn with_raster_source(mut self, source: impl RasterSource + Send + Sync + 'static) -> Self {
         self.raster_source = Some(Box::new(source));
+        self
+    }
+
+    /// Attach a terminal-refinement strategy.
+    pub fn with_refinement_strategy(
+        mut self,
+        strategy: impl TerminalRefinementStrategy + Send + Sync + 'static,
+    ) -> Self {
+        self.refinement_strategy = Some(Box::new(strategy));
         self
     }
 
@@ -417,6 +436,9 @@ impl EngineBuilder {
         Engine {
             session: self.session,
             raster_source: self.raster_source,
+            refinement_strategy: self
+                .refinement_strategy
+                .unwrap_or_else(|| Box::new(D8RasterRefinementStrategy)),
             geometry_repair: self.geometry_repair,
         }
     }
@@ -431,6 +453,7 @@ impl EngineBuilder {
 pub struct Engine {
     session: DatasetSession,
     raster_source: Option<Box<dyn RasterSource + Send + Sync>>,
+    refinement_strategy: Box<dyn TerminalRefinementStrategy + Send + Sync>,
     geometry_repair: Option<Box<dyn GeometryRepair + Send + Sync>>,
 }
 
@@ -440,6 +463,7 @@ impl Engine {
         EngineBuilder {
             session,
             raster_source: None,
+            refinement_strategy: None,
             geometry_repair: None,
         }
     }
@@ -653,13 +677,9 @@ impl Engine {
         if options.refinement_mode == RefinementMode::Disabled {
             return Ok(TerminalRefinement::Disabled);
         }
-        if self.session.raster_paths().is_none() {
+        if !self.session.has_d8_aux() {
             return Ok(TerminalRefinement::best_effort_no_d8_aux_declared());
         }
-        let raster_source = match self.raster_source.as_deref() {
-            Some(s) => s,
-            None => return Ok(TerminalRefinement::best_effort_no_raster_source_provided()),
-        };
 
         let terminal_polygon = units
             .terminal_unit()
@@ -672,94 +692,21 @@ impl Engine {
                 )),
             })?
             .geometry();
-        let terminal_bbox =
-            terminal_polygon
-                .bounding_rect()
-                .ok_or_else(|| EngineError::Refinement {
-                    unit_id: terminal.get(),
-                    source: RefinementError::DegenerateTerminalPolygon,
-                })?;
-
-        let flow_dir = {
-            let _guard = StageGuard::enter(Stage::RasterLocalizeFlowDir);
-            let flow_dir = self
-                .session
-                .localize_raster_window(RasterKind::FlowDir, terminal_bbox)
-                .map_err(|source| EngineError::RasterLocalize {
-                    unit_id: terminal.get(),
-                    source,
-                })?;
-            let bytes = flow_dir.header_bytes() + flow_dir.tile_bytes();
-            record_bytes(bytes);
-            record_requests(flow_dir.tile_count() as u64);
-            record_cache_status(if bytes == 0 { "no_fetch" } else { "fetched" });
-            record_path(flow_dir.path());
-            flow_dir
+        let input = TerminalRefinementInput {
+            terminal_unit: terminal,
+            terminal_geometry: terminal_polygon,
+            resolved_outlet: resolved.resolved().resolved_coord,
+            snap_threshold: options.snap_threshold,
         };
-        let flow_acc = {
-            let _guard = StageGuard::enter(Stage::RasterLocalizeFlowAcc);
-            let flow_acc = self
-                .session
-                .localize_raster_window(RasterKind::FlowAcc, terminal_bbox)
-                .map_err(|source| EngineError::RasterLocalize {
-                    unit_id: terminal.get(),
-                    source,
-                })?;
-            let bytes = flow_acc.header_bytes() + flow_acc.tile_bytes();
-            record_bytes(bytes);
-            record_requests(flow_acc.tile_count() as u64);
-            record_cache_status(if bytes == 0 { "no_fetch" } else { "fetched" });
-            record_path(flow_acc.path());
-            flow_acc
-        };
-        tracing::debug!(
-            flow_dir_cog_header_bytes = flow_dir.header_bytes(),
-            flow_dir_cog_tile_bytes = flow_dir.tile_bytes(),
-            flow_dir_cog_tile_count = flow_dir.tile_count(),
-            flow_dir_window_pixels = flow_dir.window_pixels(),
-            flow_acc_cog_header_bytes = flow_acc.header_bytes(),
-            flow_acc_cog_tile_bytes = flow_acc.tile_bytes(),
-            flow_acc_cog_tile_count = flow_acc.tile_count(),
-            flow_acc_window_pixels = flow_acc.window_pixels(),
-            "localized raster windows for refinement"
-        );
-        let flow_dir_uri = flow_dir.path().to_string_lossy();
-        let flow_acc_uri = flow_acc.path().to_string_lossy();
-
-        let refinement_result = {
-            let _refine_guard = StageGuard::enter(Stage::TerminalRefine);
-            refine_terminal_from_source(
-                raster_source,
-                flow_dir_uri.as_ref(),
-                flow_acc_uri.as_ref(),
-                terminal_polygon,
-                resolved.resolved().resolved_coord,
-                options.snap_threshold,
-            )
-            .map_err(|source| EngineError::Refinement {
-                unit_id: terminal.get(),
-                source,
-            })?
+        let pantry = D8RefinementPantry {
+            session: &self.session,
+            raster_source: self.raster_source.as_deref(),
         };
 
-        let refined_outlet = refinement_result.snapped_coord();
-        let geometry =
-            ContainedTerminalPolygon::new_unchecked_from_d8_carve(refinement_result.into_polygon())
-                .map_err(|_source| EngineError::Refinement {
-                    unit_id: terminal.get(),
-                    source: RefinementError::EmptyPolygonization,
-                })?;
-
-        Ok(TerminalRefinement::Applied {
-            refined_outlet,
-            geometry,
-            provenance: RefinementProvenance::Applied {
-                strategy: RefinementStrategyName::BestEffortD8IfPresent,
-                why: AppliedRefinementReason::D8AuxMatchedTerminalBbox {
-                    declaration_index: 0,
-                },
-            },
-        })
+        self.refinement_strategy
+            .refine_terminal(input, &pantry)
+            .map(terminal_refinement_from_decision)
+            .map_err(EngineError::from)
     }
 
     /// Dissolve pre-merge drainage-unit geometries into the final watershed.
@@ -995,6 +942,52 @@ fn refinement_outcome_from_terminal(refinement: &TerminalRefinement) -> Refineme
     }
 }
 
+fn terminal_refinement_from_decision(decision: TerminalRefinementDecision) -> TerminalRefinement {
+    match decision {
+        TerminalRefinementDecision::Applied {
+            refined_outlet,
+            geometry,
+            provenance,
+        } => TerminalRefinement::Applied {
+            refined_outlet,
+            geometry,
+            provenance,
+        },
+        TerminalRefinementDecision::BestEffortSkipped { provenance } => {
+            TerminalRefinement::BestEffortSkipped { provenance }
+        }
+    }
+}
+
+impl From<TerminalRefinementError> for EngineError {
+    fn from(source: TerminalRefinementError) -> Self {
+        match source {
+            TerminalRefinementError::EmptyContainedTerminalGeometry => EngineError::Refinement {
+                unit_id: 0,
+                source: RefinementError::EmptyPolygonization,
+            },
+            TerminalRefinementError::RasterSource { strategy } => EngineError::Refinement {
+                unit_id: 0,
+                source: RefinementError::RasterLoad {
+                    source: crate::algo::RasterSourceError::ReadFailed {
+                        path: format!("{strategy:?}"),
+                        reason: "missing raster source".to_string(),
+                    },
+                },
+            },
+            TerminalRefinementError::D8Selection { unit_id, source } => {
+                EngineError::D8Selection { unit_id, source }
+            }
+            TerminalRefinementError::RasterLocalize {
+                unit_id, source, ..
+            } => EngineError::RasterLocalize { unit_id, source },
+            TerminalRefinementError::Algorithm { unit_id, source } => {
+                EngineError::Refinement { unit_id, source }
+            }
+        }
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1008,6 +1001,9 @@ mod tests {
         RasterTile, Raw,
     };
     use crate::reader::catchment_store::reset_geometry_decode_counts_for_test;
+    use crate::refinement::{
+        AppliedRefinementReason, ContainedTerminalPolygon, RefinementStrategyName,
+    };
     use crate::session::DatasetSession;
     use crate::testutil::{DatasetBuilder, TestCatchment};
 

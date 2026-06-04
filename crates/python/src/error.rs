@@ -28,6 +28,7 @@ pub fn engine_err_to_py(e: shed_core::EngineError) -> PyErr {
         EngineError::TerminalCatchmentFetch { .. } => DatasetError::new_err(e.to_string()),
         EngineError::TerminalCatchmentDecode { .. } => DatasetError::new_err(e.to_string()),
         EngineError::RasterLocalize { .. } => DatasetError::new_err(e.to_string()),
+        EngineError::D8Selection { .. } => DatasetError::new_err(e.to_string()),
         EngineError::Refinement { .. } => ShedError::new_err(e.to_string()),
         EngineError::Assembly { .. } => PyAssemblyError::new_err(e.to_string()),
         EngineError::SessionLevelIndexEmpty { .. } => DatasetError::new_err(e.to_string()),

@@ -35,8 +35,9 @@ pub use engine::{
 pub use error::SessionError;
 pub use refinement::{
     AppliedRefinementReason, BestEffortSkipReason, ContainedTerminalPolygon, D8RasterHandle,
-    D8RefinementPantry, RefinementProvenance, RefinementStrategyName, TerminalRefinementDecision,
-    TerminalRefinementError, TerminalRefinementInput, TerminalRefinementStrategy,
+    D8RasterRefinementStrategy, D8RefinementPantry, RefinementProvenance, RefinementStrategyName,
+    TerminalRefinementDecision, TerminalRefinementError, TerminalRefinementInput,
+    TerminalRefinementStrategy,
 };
 pub use resolver::{
     OutletResolutionError, PipTieBreak, ResolutionMethod, ResolvedOutlet, ResolverConfig,
