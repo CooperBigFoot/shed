@@ -141,6 +141,10 @@ assert frame["basin_id"].tolist() == ["basin-center", "basin-west", "basin-east"
 PY
 ```
 
+## CLI Emission
+
+M5 does not add a `shed` CLI GeoParquet emit command. The current CLI has a `delineate` command with single-outlet flags and an `--outlets` CSV for GeoJSON output, but it does not define a basin export catalog shape. A CLI wrapper should be added only after that catalog contract is settled, so it can parse all `BasinId` values before delineation and call the core writer without inventing another input format.
+
 ## Elevation Path
 
 If another producer or external conformer needs to target this format, elevate this document into a versioned open spec with compatibility rules, fixtures, and a conformance test suite.
