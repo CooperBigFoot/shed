@@ -47,6 +47,9 @@ const GEOMETRY_QUERY_ROW_GROUP_CONCURRENCY: usize = 16;
 static GEOMETRY_DECODE_COUNTS_FOR_TEST: LazyLock<Mutex<HashMap<(String, UnitId), usize>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+#[cfg(test)]
+pub(crate) static GEOMETRY_DECODE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 /// Decoded geometry-only catchment row used on the assembly/refinement hot path.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct DecodedCatchmentGeometryRow {

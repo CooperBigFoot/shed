@@ -1079,7 +1079,9 @@ mod tests {
         AccumulationTile, FlowDirectionTile, GeoTransform, GridCoord, GridDims, RasterSourceError,
         RasterTile, Raw,
     };
-    use crate::reader::catchment_store::reset_geometry_decode_counts_for_test;
+    use crate::reader::catchment_store::{
+        GEOMETRY_DECODE_TEST_LOCK, reset_geometry_decode_counts_for_test,
+    };
     use crate::refinement::RefinementStrategyName;
     use crate::session::DatasetSession;
     use crate::testutil::{DatasetBuilder, TestCatchment};
@@ -1348,6 +1350,9 @@ mod tests {
 
     #[test]
     fn applied_refinement_materializes_terminal_geometry() {
+        let _decode_guard = GEOMETRY_DECODE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         reset_geometry_decode_counts_for_test();
         let (_dir, root) = DatasetBuilder::new(2)
             .with_rasters()

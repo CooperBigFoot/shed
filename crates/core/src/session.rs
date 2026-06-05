@@ -1211,7 +1211,9 @@ mod tests {
     };
     use crate::error::SessionError;
     use crate::parquet_cache::{ParquetFooterCache, ParquetRowGroupCache};
-    use crate::reader::catchment_store::reset_geometry_decode_counts_for_test;
+    use crate::reader::catchment_store::{
+        GEOMETRY_DECODE_TEST_LOCK, reset_geometry_decode_counts_for_test,
+    };
     use crate::runtime::RT;
     use crate::testutil::DatasetBuilder;
     use hfx_core::{BoundingBox, SnapId, UnitId};
@@ -1930,6 +1932,9 @@ mod tests {
 
     #[test]
     fn open_decodes_catchment_geometry_during_validation_pre_fix() {
+        let _decode_guard = GEOMETRY_DECODE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         reset_geometry_decode_counts_for_test();
         let (_dir, root) = DatasetBuilder::new(2).build();
 
