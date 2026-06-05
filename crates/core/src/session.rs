@@ -1211,9 +1211,10 @@ mod tests {
     };
     use crate::error::SessionError;
     use crate::parquet_cache::{ParquetFooterCache, ParquetRowGroupCache};
+    use crate::reader::catchment_store::reset_geometry_decode_counts_for_test;
     use crate::runtime::RT;
     use crate::testutil::DatasetBuilder;
-    use hfx_core::{BoundingBox, SnapId};
+    use hfx_core::{BoundingBox, SnapId, UnitId};
 
     static CACHE_ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1925,6 +1926,28 @@ mod tests {
 
         assert!(session.parquet_cache.is_none());
         assert!(session.footer_cache.is_none());
+    }
+
+    #[test]
+    fn open_decodes_catchment_geometry_during_validation_pre_fix() {
+        reset_geometry_decode_counts_for_test();
+        let (_dir, root) = DatasetBuilder::new(2).build();
+
+        let session = DatasetSession::open_path(&root).unwrap();
+
+        let counts = [1_i64, 2]
+            .into_iter()
+            .map(|id| {
+                session
+                    .catchments()
+                    .geometry_decode_count_for_test(UnitId::new(id).unwrap())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            counts,
+            vec![1, 1],
+            "current open validation should decode catchment geometry before the routing fix"
+        );
     }
 
     #[test]

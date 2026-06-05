@@ -515,7 +515,8 @@ impl CatchmentStore {
                 })?;
 
                 let absolute_row = rg_absolute_starts[sel_idx] + offset_in_group;
-                let rows = extract_units_from_batch(&batch, absolute_row, ARTIFACT)?;
+                let rows =
+                    extract_units_from_batch(&batch, absolute_row, ARTIFACT, &self.path_display)?;
 
                 for unit in rows {
                     if unit.bbox().intersects(query_bbox) {
@@ -607,7 +608,12 @@ impl CatchmentStore {
                     })?;
 
                     let absolute_row = rg_absolute_starts[sel_idx] + offset_in_group;
-                    let rows = extract_units_from_batch(&batch, absolute_row, ARTIFACT)?;
+                    let rows = extract_units_from_batch(
+                        &batch,
+                        absolute_row,
+                        ARTIFACT,
+                        &self.path_display,
+                    )?;
 
                     for unit in rows {
                         if id_set.contains(&unit.id()) {
@@ -852,10 +858,12 @@ impl CatchmentStore {
 ///
 /// `row_offset` is the global row index of the first row in this batch,
 /// used in error messages.
+#[cfg_attr(not(test), allow(unused_variables))]
 fn extract_units_from_batch(
     batch: &arrow::record_batch::RecordBatch,
     row_offset: usize,
     artifact: &'static str,
+    path_display: &str,
 ) -> Result<Vec<CatchmentUnit>, SessionError> {
     let schema = batch.schema();
 
@@ -1035,6 +1043,8 @@ fn extract_units_from_batch(
 
         let geometry = WkbGeometry::new(geom_bytes)
             .map_err(|e| SessionError::invalid_row(artifact, global_i, format!("geometry: {e}")))?;
+        #[cfg(test)]
+        record_geometry_decode_for_test(path_display, unit_id);
 
         let source_id = optional_string_value(batch, &schema, "source_id", i)?;
         let level_label = optional_string_value(batch, &schema, "level_label", i)?;
