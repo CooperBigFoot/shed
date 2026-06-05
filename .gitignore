@@ -14,3 +14,6 @@ crates/python/dist/
 
 # Local benchmark output (written by scripts/bench-delineate.sh)
 scratchpad/
+
+# Local PCE planning scaffolding (decisions/plans/critiques/prompts; kept out of history)
+docs/plans/pyshed-0.2.0-*.md
