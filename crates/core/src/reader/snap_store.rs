@@ -83,7 +83,7 @@ fn snap_bbox(
 }
 
 const ARTIFACT: &str = "snap.parquet";
-const ID_INDEX_ROW_GROUP_CONCURRENCY: usize = 16;
+const LEAN_VALIDATION_ROW_GROUP_CONCURRENCY: usize = 64;
 const SNAP_BBOX_ROW_GROUP_CONCURRENCY: usize = 8;
 
 #[cfg(test)]
@@ -91,6 +91,15 @@ static SNAP_GEOMETRY_DECODE_ROWS_FOR_TEST: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(test)]
 static SNAP_MEMBERSHIP_ROWS_FOR_TEST: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+static SNAP_MEMBERSHIP_IN_FLIGHT_FOR_TEST: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+static SNAP_MEMBERSHIP_MAX_IN_FLIGHT_FOR_TEST: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+static SNAP_MEMBERSHIP_ROW_GROUP_DELAY_MS_FOR_TEST: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(test)]
 pub(crate) fn snap_geometry_decode_rows_for_test() -> usize {
@@ -110,6 +119,22 @@ pub(crate) fn snap_membership_rows_for_test() -> usize {
 #[cfg(test)]
 pub(crate) fn reset_snap_membership_rows_for_test() {
     SNAP_MEMBERSHIP_ROWS_FOR_TEST.store(0, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+pub(crate) fn snap_membership_max_in_flight_for_test() -> usize {
+    SNAP_MEMBERSHIP_MAX_IN_FLIGHT_FOR_TEST.load(Ordering::SeqCst)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_snap_membership_max_in_flight_for_test() {
+    SNAP_MEMBERSHIP_IN_FLIGHT_FOR_TEST.store(0, Ordering::SeqCst);
+    SNAP_MEMBERSHIP_MAX_IN_FLIGHT_FOR_TEST.store(0, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+fn set_snap_membership_row_group_delay_for_test(delay_ms: usize) {
+    SNAP_MEMBERSHIP_ROW_GROUP_DELAY_MS_FOR_TEST.store(delay_ms, Ordering::SeqCst);
 }
 
 /// Row-group bounding box with metadata for pruning.
@@ -698,7 +723,9 @@ async fn read_all_snap_membership_refs_from_store_async(
     };
     debug!(
         row_groups = num_row_groups,
-        concurrency = ID_INDEX_ROW_GROUP_CONCURRENCY,
+        concurrency = LEAN_VALIDATION_ROW_GROUP_CONCURRENCY,
+        concurrency_bound =
+            "shed scheduler row-group bound; object_store transport may cap requests",
         projected_columns = "id,unit_id",
         "reading snap membership refs for cold validation"
     );
@@ -710,7 +737,7 @@ async fn read_all_snap_membership_refs_from_store_async(
                     .await
             }
         })
-        .buffered(ID_INDEX_ROW_GROUP_CONCURRENCY)
+        .buffered(LEAN_VALIDATION_ROW_GROUP_CONCURRENCY)
         .collect::<Vec<_>>()
         .await;
 
@@ -723,7 +750,9 @@ async fn read_all_snap_membership_refs_from_store_async(
         row_groups = num_row_groups,
         batches = stats.batches_read,
         membership_rows = stats.membership_rows,
-        concurrency = ID_INDEX_ROW_GROUP_CONCURRENCY,
+        concurrency = LEAN_VALIDATION_ROW_GROUP_CONCURRENCY,
+        concurrency_bound =
+            "shed scheduler row-group bound; object_store transport may cap requests",
         elapsed_ms = started.elapsed().as_millis(),
         projected_columns = "id,unit_id",
         "cold snap membership read complete"
@@ -736,6 +765,11 @@ async fn read_snap_membership_refs_row_group_async(
     row_group: usize,
     absolute_start: usize,
 ) -> Result<SnapMembershipReadStats, SessionError> {
+    #[cfg(test)]
+    let _in_flight = SnapMembershipInFlightForTest::enter();
+    #[cfg(test)]
+    delay_snap_membership_row_group_for_test().await;
+
     let builder = ParquetRecordBatchStreamBuilder::new_with_metadata(
         object_reader_with_cache(
             &context.store,
@@ -826,6 +860,51 @@ async fn read_snap_membership_refs_row_group_async(
     }
 
     Ok(stats)
+}
+
+#[cfg(test)]
+struct SnapMembershipInFlightForTest;
+
+#[cfg(test)]
+impl SnapMembershipInFlightForTest {
+    fn enter() -> Self {
+        let current = SNAP_MEMBERSHIP_IN_FLIGHT_FOR_TEST.fetch_add(1, Ordering::SeqCst) + 1;
+        record_snap_membership_max_in_flight_for_test(current);
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for SnapMembershipInFlightForTest {
+    fn drop(&mut self) {
+        SNAP_MEMBERSHIP_IN_FLIGHT_FOR_TEST.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+fn record_snap_membership_max_in_flight_for_test(current: usize) {
+    let mut observed = SNAP_MEMBERSHIP_MAX_IN_FLIGHT_FOR_TEST.load(Ordering::SeqCst);
+    while current > observed {
+        match SNAP_MEMBERSHIP_MAX_IN_FLIGHT_FOR_TEST.compare_exchange(
+            observed,
+            current,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => break,
+            Err(actual) => observed = actual,
+        }
+    }
+}
+
+#[cfg(test)]
+async fn delay_snap_membership_row_group_for_test() {
+    let delay_ms = SNAP_MEMBERSHIP_ROW_GROUP_DELAY_MS_FOR_TEST.load(Ordering::SeqCst);
+    if delay_ms == 0 {
+        tokio::task::yield_now().await;
+    } else {
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms as u64)).await;
+    }
 }
 
 async fn read_snap_bbox_row_group_async(
@@ -1312,6 +1391,21 @@ mod tests {
         wkb
     }
 
+    struct SnapMembershipDelayGuard;
+
+    impl SnapMembershipDelayGuard {
+        fn set(delay_ms: usize) -> Self {
+            set_snap_membership_row_group_delay_for_test(delay_ms);
+            Self
+        }
+    }
+
+    impl Drop for SnapMembershipDelayGuard {
+        fn drop(&mut self) {
+            set_snap_membership_row_group_delay_for_test(0);
+        }
+    }
+
     fn snap_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
             Field::new("id", DataType::Int64, false),
@@ -1714,6 +1808,58 @@ mod tests {
         assert_eq!(store.read_all_snap_refs().unwrap().len(), 2);
         assert!(snap_membership_rows_for_test() > 0);
         assert_eq!(snap_geometry_decode_rows_for_test(), 0);
+    }
+
+    #[test]
+    fn test_cold_membership_open_overlaps_row_group_reads() {
+        let _decode_guard = GEOMETRY_DECODE_TEST_LOCK
+            .lock()
+            .expect("geometry decode test lock should not be poisoned");
+        reset_snap_membership_max_in_flight_for_test();
+        reset_snap_membership_rows_for_test();
+        let _delay_guard = SnapMembershipDelayGuard::set(25);
+
+        let geom = minimal_wkb_linestring(1.0, 1.0, 2.0, 2.0);
+        let rows: Vec<_> = (1..=40)
+            .map(|id| {
+                let x = id as f32;
+                SnapRow {
+                    id,
+                    unit_id: id + 100,
+                    weight: 0.5,
+                    is_mainstem: id % 2 == 0,
+                    minx: x,
+                    miny: 0.0,
+                    maxx: x + 0.5,
+                    maxy: 0.5,
+                    geom: geom.clone(),
+                }
+            })
+            .collect();
+
+        let tmp = write_snap_parquet_with_row_group_size(&rows, 1);
+        let store = open_local_with_mode(tmp.path(), SnapOpenMode::ColdMembershipValidation)
+            .expect("cold membership snap store should open");
+        let refs = store.read_all_snap_refs().unwrap();
+
+        let actual_refs: Vec<_> = refs
+            .iter()
+            .map(|snap_ref| (snap_ref.snap_id.get(), snap_ref.unit_id.get()))
+            .collect();
+        let expected_refs: Vec<_> = rows.iter().map(|row| (row.id, row.unit_id)).collect();
+        assert_eq!(actual_refs, expected_refs);
+        assert_eq!(snap_membership_rows_for_test(), rows.len());
+        assert!(
+            snap_membership_max_in_flight_for_test() > 16,
+            "snap membership reader should exceed the old 16-way bound; max in-flight was {}",
+            snap_membership_max_in_flight_for_test()
+        );
+        assert!(
+            snap_membership_max_in_flight_for_test() <= LEAN_VALIDATION_ROW_GROUP_CONCURRENCY,
+            "snap membership reader should stay within the lean validation bound {}; max in-flight was {}",
+            LEAN_VALIDATION_ROW_GROUP_CONCURRENCY,
+            snap_membership_max_in_flight_for_test()
+        );
     }
 
     #[test]

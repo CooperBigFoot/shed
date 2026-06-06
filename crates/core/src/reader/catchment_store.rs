@@ -42,7 +42,8 @@ use crate::runtime::RT;
 use crate::telemetry::{Stage, StageGuard, record_path, record_row_groups, record_rows};
 
 const ARTIFACT: &str = "catchments.parquet";
-const ID_INDEX_ROW_GROUP_CONCURRENCY: usize = 16;
+const LEAN_VALIDATION_ROW_GROUP_CONCURRENCY: usize = 64;
+const CATCHMENT_ID_ONLY_ROW_GROUP_CONCURRENCY: usize = 16;
 const GEOMETRY_QUERY_ROW_GROUP_CONCURRENCY: usize = 16;
 
 #[cfg(test)]
@@ -60,6 +61,9 @@ static READ_ID_LEVEL_IN_FLIGHT_FOR_TEST: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(test)]
 static READ_ID_LEVEL_MAX_IN_FLIGHT_FOR_TEST: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+static READ_ID_LEVEL_ROW_GROUP_DELAY_MS_FOR_TEST: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(test)]
 pub(crate) static GEOMETRY_DECODE_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -766,7 +770,9 @@ impl CatchmentStore {
         let num_row_groups = metadata.num_row_groups();
         debug!(
             num_row_groups,
-            concurrency = ID_INDEX_ROW_GROUP_CONCURRENCY,
+            concurrency = LEAN_VALIDATION_ROW_GROUP_CONCURRENCY,
+            concurrency_bound =
+                "shed scheduler row-group bound; object_store transport may cap requests",
             "reading catchment id levels"
         );
         if num_row_groups == 0 {
@@ -801,7 +807,7 @@ impl CatchmentStore {
                         .await
                     }
                 })
-                .buffered(ID_INDEX_ROW_GROUP_CONCURRENCY)
+                .buffered(LEAN_VALIDATION_ROW_GROUP_CONCURRENCY)
                 .collect::<Vec<_>>()
                 .await;
 
@@ -813,7 +819,9 @@ impl CatchmentStore {
         info!(
             num_rows = rows.len(),
             num_row_groups,
-            concurrency = ID_INDEX_ROW_GROUP_CONCURRENCY,
+            concurrency = LEAN_VALIDATION_ROW_GROUP_CONCURRENCY,
+            concurrency_bound =
+                "shed scheduler row-group bound; object_store transport may cap requests",
             elapsed_ms = started.elapsed().as_millis(),
             "catchment id levels read"
         );
@@ -1316,7 +1324,7 @@ async fn read_id_level_row_group_async(
     #[cfg(test)]
     let _in_flight = ReadIdLevelInFlightForTest::enter();
     #[cfg(test)]
-    tokio::task::yield_now().await;
+    delay_read_id_level_row_group_for_test().await;
 
     let builder =
         ParquetRecordBatchStreamBuilder::new_with_metadata(object_reader, reader_metadata);
@@ -1445,6 +1453,21 @@ pub(crate) fn reset_read_id_level_max_in_flight_for_test() {
     READ_ID_LEVEL_MAX_IN_FLIGHT_FOR_TEST.store(0, Ordering::SeqCst);
 }
 
+#[cfg(test)]
+fn set_read_id_level_row_group_delay_for_test(delay_ms: usize) {
+    READ_ID_LEVEL_ROW_GROUP_DELAY_MS_FOR_TEST.store(delay_ms, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+async fn delay_read_id_level_row_group_for_test() {
+    let delay_ms = READ_ID_LEVEL_ROW_GROUP_DELAY_MS_FOR_TEST.load(Ordering::SeqCst);
+    if delay_ms == 0 {
+        tokio::task::yield_now().await;
+    } else {
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms as u64)).await;
+    }
+}
+
 fn geometry_type_name(geom: &Geometry<f64>) -> &'static str {
     match geom {
         Geometry::Point(_) => "Point",
@@ -1523,7 +1546,7 @@ async fn read_all_ids_with_row_groups_async(
                 .await
             }
         })
-        .buffered(ID_INDEX_ROW_GROUP_CONCURRENCY)
+        .buffered(CATCHMENT_ID_ONLY_ROW_GROUP_CONCURRENCY)
         .collect::<Vec<_>>()
         .await;
 
@@ -1594,7 +1617,9 @@ async fn read_ids_levels_with_row_groups_async(
     debug!(
         num_row_groups,
         projected_columns = "id,level",
-        concurrency = ID_INDEX_ROW_GROUP_CONCURRENCY,
+        concurrency = LEAN_VALIDATION_ROW_GROUP_CONCURRENCY,
+        concurrency_bound =
+            "shed scheduler row-group bound; object_store transport may cap requests",
         "building catchment id index and validation levels"
     );
     if num_row_groups == 0 {
@@ -1644,7 +1669,7 @@ async fn read_ids_levels_with_row_groups_async(
                 Ok::<_, SessionError>((row_group, rows))
             }
         })
-        .buffered(ID_INDEX_ROW_GROUP_CONCURRENCY)
+        .buffered(LEAN_VALIDATION_ROW_GROUP_CONCURRENCY)
         .collect::<Vec<_>>()
         .await;
 
@@ -1673,7 +1698,9 @@ async fn read_ids_levels_with_row_groups_async(
         num_rows = validation_levels.len(),
         num_row_groups,
         projected_columns = "id,level",
-        concurrency = ID_INDEX_ROW_GROUP_CONCURRENCY,
+        concurrency = LEAN_VALIDATION_ROW_GROUP_CONCURRENCY,
+        concurrency_bound =
+            "shed scheduler row-group bound; object_store transport may cap requests",
         elapsed_ms = started.elapsed().as_millis(),
         "id index and validation levels built"
     );
@@ -2126,6 +2153,21 @@ mod tests {
     // Fixture helpers
     // -----------------------------------------------------------------------
 
+    struct ReadIdLevelDelayGuard;
+
+    impl ReadIdLevelDelayGuard {
+        fn set(delay_ms: usize) -> Self {
+            set_read_id_level_row_group_delay_for_test(delay_ms);
+            Self
+        }
+    }
+
+    impl Drop for ReadIdLevelDelayGuard {
+        fn drop(&mut self) {
+            set_read_id_level_row_group_delay_for_test(0);
+        }
+    }
+
     /// Minimal valid WKB polygon bytes for a small square.
     fn minimal_wkb_polygon(minx: f64, miny: f64, maxx: f64, maxy: f64) -> Vec<u8> {
         let mut wkb = Vec::new();
@@ -2457,9 +2499,10 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         reset_read_id_level_max_in_flight_for_test();
+        let _delay_guard = ReadIdLevelDelayGuard::set(25);
 
         let tmp = NamedTempFile::new().unwrap();
-        let units: Vec<_> = (1..=32)
+        let units: Vec<_> = (1..=40)
             .map(|id| {
                 let x = id as f32;
                 (
@@ -2484,8 +2527,70 @@ mod tests {
         let expected_pairs: Vec<_> = units.iter().map(|unit| (unit.0, unit.1)).collect();
         assert_eq!(pairs, expected_pairs);
         assert!(
-            read_id_level_max_in_flight_for_test() > 1,
-            "read_id_levels_async should overlap row-group reads; max in-flight was {}",
+            read_id_level_max_in_flight_for_test() > 16,
+            "read_id_levels_async should exceed the old 16-way bound; max in-flight was {}",
+            read_id_level_max_in_flight_for_test()
+        );
+        assert!(
+            read_id_level_max_in_flight_for_test() <= LEAN_VALIDATION_ROW_GROUP_CONCURRENCY,
+            "read_id_levels_async should stay within the lean validation bound {}; max in-flight was {}",
+            LEAN_VALIDATION_ROW_GROUP_CONCURRENCY,
+            read_id_level_max_in_flight_for_test()
+        );
+    }
+
+    #[test]
+    fn test_read_ids_levels_with_row_groups_overlaps_row_group_reads() {
+        let _guard = GEOMETRY_DECODE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        reset_read_id_level_max_in_flight_for_test();
+        let _delay_guard = ReadIdLevelDelayGuard::set(25);
+
+        let tmp = NamedTempFile::new().unwrap();
+        let units: Vec<_> = (1..=40)
+            .map(|id| {
+                let x = id as f32;
+                (
+                    id,
+                    (id % 8) as i16,
+                    x,
+                    None,
+                    [x, 0.0f32, x + 0.5f32, 0.5f32],
+                )
+            })
+            .collect();
+        write_fixture_with_levels(tmp.path(), &units, 1);
+
+        let (store, path, _) = local_object_artifact(tmp.path()).unwrap();
+        let file_size = std::fs::metadata(tmp.path()).unwrap().len();
+        let result =
+            read_ids_levels_with_row_groups(&store, &path, file_size, &None, &None, &None).unwrap();
+
+        let ids: Vec<_> = result.ids.iter().map(|id| id.get()).collect();
+        let expected_ids: Vec<_> = units.iter().map(|unit| unit.0).collect();
+        assert_eq!(ids, expected_ids);
+        for (index, unit) in units.iter().enumerate() {
+            let unit_id = UnitId::new(unit.0).unwrap();
+            assert_eq!(result.id_row_groups.get(&unit_id), Some(&index));
+            assert_eq!(
+                result
+                    .validation_levels_from_open
+                    .as_ref()
+                    .and_then(|levels| levels.get(&unit_id))
+                    .map(|level| level.get()),
+                Some(unit.1)
+            );
+        }
+        assert!(
+            read_id_level_max_in_flight_for_test() > 16,
+            "merged id/level reader should exceed the old 16-way bound; max in-flight was {}",
+            read_id_level_max_in_flight_for_test()
+        );
+        assert!(
+            read_id_level_max_in_flight_for_test() <= LEAN_VALIDATION_ROW_GROUP_CONCURRENCY,
+            "merged id/level reader should stay within the lean validation bound {}; max in-flight was {}",
+            LEAN_VALIDATION_ROW_GROUP_CONCURRENCY,
             read_id_level_max_in_flight_for_test()
         );
     }
