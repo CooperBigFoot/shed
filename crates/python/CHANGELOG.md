@@ -7,7 +7,7 @@ per-commit Rust crate versioning).
 
 ## [Unreleased]
 
-## [0.2.2rc1] - 2026-06-06
+## [0.2.2] - 2026-06-06
 
 - perf: rebuild against the core validation sidecar and id-index reuse fix, so a
   warm open skips the full referential re-scan. Repeat opens are substantially
