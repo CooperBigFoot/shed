@@ -7,6 +7,14 @@ per-commit Rust crate versioning).
 
 ## [Unreleased]
 
+## [0.2.2rc1] - 2026-06-06
+
+- perf: rebuild against the core validation sidecar and id-index reuse fix, so a
+  warm open skips the full referential re-scan. Repeat opens are substantially
+  faster once the cache is populated; first/cold open is unchanged because it
+  populates the cache. No API or input-contract change; requires HFX v0.2.1
+  datasets (unchanged from 0.2.1).
+
 ## [0.2.1] - 2026-06-06
 
 - perf: dataset open no longer reads the full catchment `geometry` column for
