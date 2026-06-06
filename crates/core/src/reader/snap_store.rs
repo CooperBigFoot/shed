@@ -508,7 +508,11 @@ impl SnapStore {
     }
 
     pub(crate) fn artifact_meta(&self) -> Option<ArtifactMeta> {
-        ArtifactMeta::from_parts(self.file_etag.as_deref(), self.file_size)
+        ArtifactMeta::from_parts(
+            self.path.as_ref(),
+            self.file_etag.as_deref(),
+            self.file_size,
+        )
     }
 
     fn object_reader(&self) -> Box<dyn AsyncFileReader> {

@@ -819,7 +819,11 @@ impl CatchmentStore {
     }
 
     pub(crate) fn artifact_meta(&self) -> Option<ArtifactMeta> {
-        ArtifactMeta::from_parts(self.file_etag.as_deref(), self.file_size)
+        ArtifactMeta::from_parts(
+            self.path_display.clone(),
+            self.file_etag.as_deref(),
+            self.file_size,
+        )
     }
 
     /// Return the successful geometry decode count for `id` in this store.

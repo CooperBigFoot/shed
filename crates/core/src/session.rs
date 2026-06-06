@@ -4,6 +4,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bytes::BytesMut;
 use futures_util::StreamExt;
@@ -115,6 +117,33 @@ pub struct DatasetSession {
 struct DeclaredSnapStore {
     decl: SnapDecl,
     store: SnapStore,
+}
+
+#[derive(Debug, Clone)]
+struct ValidationSidecarInputs {
+    hfx_format_version: String,
+    manifest: Option<ArtifactMeta>,
+    graph: Option<ArtifactMeta>,
+    catchments: Option<ArtifactMeta>,
+    snaps: Option<Vec<ArtifactMeta>>,
+}
+
+#[cfg(test)]
+static SNAP_VALIDATION_SCAN_COUNT_FOR_TEST: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+fn record_snap_validation_scan_for_test() {
+    SNAP_VALIDATION_SCAN_COUNT_FOR_TEST.fetch_add(1, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+fn snap_validation_scan_count_for_test() -> usize {
+    SNAP_VALIDATION_SCAN_COUNT_FOR_TEST.load(Ordering::SeqCst)
+}
+
+#[cfg(test)]
+fn reset_snap_validation_scan_count_for_test() {
+    SNAP_VALIDATION_SCAN_COUNT_FOR_TEST.store(0, Ordering::SeqCst);
 }
 
 impl DatasetSession {
@@ -340,6 +369,11 @@ impl DatasetSession {
             let raster_cache = Arc::new(RemoteRasterCache::new(cache.root().to_path_buf()));
             (cache, raster_cache)
         };
+        let manifest_path = remote_artifact_path(root, "manifest.json");
+        let graph_path = remote_artifact_path(root, "graph.parquet");
+        let manifest_meta = remote_artifact_meta(store.as_ref(), &manifest_path, "manifest.json");
+        let graph_meta = remote_artifact_meta(store.as_ref(), &graph_path, "graph.parquet");
+
         let (manifest, aux_declarations, graph) = if let Some(cached) =
             cache.read_entry_for_source(url, root)?
         {
@@ -351,14 +385,12 @@ impl DatasetSession {
             );
             (cached.manifest, cached.aux, cached.graph)
         } else {
-            let manifest_path = remote_artifact_path(root, "manifest.json");
-            let graph_path = remote_artifact_path(root, "graph.parquet");
-
             let t = std::time::Instant::now();
             let manifest_bytes = {
                 let _guard = StageGuard::enter(Stage::ManifestFetch);
                 record_path(manifest_path.as_ref());
-                let bytes = read_remote_artifact(store.as_ref(), manifest_path, "manifest.json")?;
+                let bytes =
+                    read_remote_artifact(store.as_ref(), manifest_path.clone(), "manifest.json")?;
                 record_bytes(bytes.len() as u64);
                 bytes
             };
@@ -376,7 +408,8 @@ impl DatasetSession {
             let (graph_bytes, graph) = {
                 let _guard = StageGuard::enter(Stage::GraphFetch);
                 record_path(graph_path.as_ref());
-                let bytes = read_remote_artifact(store.as_ref(), graph_path, "graph.parquet")?;
+                let bytes =
+                    read_remote_artifact(store.as_ref(), graph_path.clone(), "graph.parquet")?;
                 record_bytes(bytes.len() as u64);
                 let graph = reader::graph::load_graph_from_bytes(bytes.clone())?;
                 (bytes, graph)
@@ -439,16 +472,23 @@ impl DatasetSession {
 
         let catchments_meta = catchments.artifact_meta();
         let snap_meta = snap_stores
-            .first()
-            .and_then(|declared_snap| declared_snap.store.artifact_meta());
-        let validation_hit = snap_stores.len() <= 1
-            && validation_sidecar_matches(
-                &cache,
-                &fabric_name,
-                &adapter_version,
-                &catchments_meta,
-                snap_meta.as_ref(),
-            );
+            .iter()
+            .map(|declared_snap| {
+                declared_snap
+                    .store
+                    .artifact_meta()
+                    .map(|meta| meta.with_path(declared_snap.decl.snap.clone()))
+            })
+            .collect::<Option<Vec<_>>>();
+        let validation_inputs = ValidationSidecarInputs {
+            hfx_format_version: manifest.format_version().to_string(),
+            manifest: manifest_meta,
+            graph: graph_meta,
+            catchments: catchments_meta,
+            snaps: snap_meta,
+        };
+        let validation_hit =
+            validation_sidecar_matches(&cache, &fabric_name, &adapter_version, &validation_inputs);
 
         if validation_hit {
             debug!(
@@ -476,7 +516,7 @@ impl DatasetSession {
                 validate_snap_refs(&declared_snap.store, &declared_snap.decl, &catchment_levels)?;
             }
             if let Some(sidecar) =
-                validation_sidecar_for_current_metadata(catchments_meta.clone(), snap_meta.clone())
+                validation_sidecar_for_current_metadata(validation_inputs.clone())
             {
                 cache.write_validation_sidecar_best_effort(
                     &fabric_name,
@@ -940,6 +980,10 @@ fn path_escapes_root(raw_path: &str) -> bool {
 
 const RANGE_GET_CHUNK_TARGET_BYTES: u64 = 4 * 1024 * 1024;
 
+/// Validate graph/catchment referential integrity.
+///
+/// Changing open-time referential validation semantics requires bumping
+/// `validation_logic_version`.
 fn validate_graph_catchments(
     manifest: &Manifest,
     graph: &DrainageGraph,
@@ -1049,11 +1093,18 @@ fn validate_graph_catchments(
     Ok(catchment_levels)
 }
 
+/// Validate snap/catchment referential integrity.
+///
+/// Changing open-time referential validation semantics requires bumping
+/// `validation_logic_version`.
 fn validate_snap_refs(
     snap_store: &SnapStore,
     decl: &SnapDecl,
     catchment_levels: &HashMap<UnitId, Level>,
 ) -> Result<(), SessionError> {
+    #[cfg(test)]
+    record_snap_validation_scan_for_test();
+
     let snap_refs = snap_store.read_all_snap_refs()?;
     for snap_ref in &snap_refs {
         let unit_id = snap_ref.unit_id;
@@ -1131,6 +1182,28 @@ fn read_remote_artifact(
     })
 }
 
+fn remote_artifact_meta(
+    store: &dyn ObjectStore,
+    path: &ObjectPath,
+    artifact: &'static str,
+) -> Option<ArtifactMeta> {
+    let meta = RT
+        .block_on(async { store.head(path).await })
+        .map_err(|source| {
+            debug!(
+                artifact,
+                path = %path,
+                error = %source,
+                "remote artifact metadata unavailable for validation sidecar token"
+            );
+            source
+        });
+    let Ok(meta) = meta else {
+        return None;
+    };
+    ArtifactMeta::from_parts(artifact, meta.e_tag.as_deref(), meta.size)
+}
+
 fn remote_artifact_ranges(size: u64, concurrency: usize) -> Vec<Range<u64>> {
     let chunk_count = size.div_ceil(RANGE_GET_CHUNK_TARGET_BYTES);
     let range_count = chunk_count.min(concurrency as u64).max(1);
@@ -1148,22 +1221,39 @@ fn validation_sidecar_matches(
     cache: &RemoteArtifactCache,
     fabric_name: &str,
     adapter_version: &str,
-    catchments: &Option<ArtifactMeta>,
-    snap: Option<&ArtifactMeta>,
+    inputs: &ValidationSidecarInputs,
 ) -> bool {
-    let Some(catchments) = catchments.as_ref() else {
+    let (Some(manifest), Some(graph), Some(catchments), Some(snaps)) = (
+        inputs.manifest.as_ref(),
+        inputs.graph.as_ref(),
+        inputs.catchments.as_ref(),
+        inputs.snaps.as_ref(),
+    ) else {
         return false;
     };
     cache
         .read_validation_sidecar(fabric_name, adapter_version)
-        .is_some_and(|sidecar| sidecar.matches(catchments, snap))
+        .is_some_and(|sidecar| {
+            sidecar.matches(
+                &inputs.hfx_format_version,
+                manifest,
+                graph,
+                catchments,
+                snaps,
+            )
+        })
 }
 
 fn validation_sidecar_for_current_metadata(
-    catchments: Option<ArtifactMeta>,
-    snap: Option<ArtifactMeta>,
+    inputs: ValidationSidecarInputs,
 ) -> Option<ValidationSidecar> {
-    catchments.map(|catchments| ValidationSidecar::current(catchments, snap))
+    Some(ValidationSidecar::current(
+        inputs.hfx_format_version,
+        inputs.manifest?,
+        inputs.graph?,
+        inputs.catchments?,
+        inputs.snaps?,
+    ))
 }
 
 #[cfg(test)]
@@ -1514,6 +1604,11 @@ mod tests {
     }
 
     fn manifest_bytes_with_rasters(snap: bool, rasters: bool) -> String {
+        let snap_paths = if snap { &["snap.parquet"][..] } else { &[] };
+        manifest_bytes_with_snap_paths_and_rasters(snap_paths, rasters)
+    }
+
+    fn manifest_bytes_with_snap_paths_and_rasters(snap_paths: &[&str], rasters: bool) -> String {
         let mut manifest = serde_json::json!({
             "format_version": "0.2.1",
             "fabric_name": "testfabric",
@@ -1525,15 +1620,15 @@ mod tests {
             "adapter_version": "test-v1",
             "auxiliary": []
         });
-        if snap {
+        for (index, snap_path) in snap_paths.iter().enumerate() {
             manifest["auxiliary"]
                 .as_array_mut()
                 .unwrap()
                 .push(serde_json::json!({
                     "schema": "hfx.aux.snap.v1",
-                    "artifacts": { "snap": "snap.parquet" },
+                    "artifacts": { "snap": snap_path },
                     "metadata": {
-                        "name": "test-snap",
+                        "name": format!("test-snap-{index}"),
                         "description": "Synthetic snap targets.",
                         "references_levels": [0],
                         "weight_semantics": "higher is preferred"
@@ -1811,6 +1906,31 @@ mod tests {
 
     fn put_remote_manifest_and_graph(store: &Arc<InMemory>, root: &ObjectPath, snap: bool) {
         put_remote_manifest_graph_with_rasters(store, root, snap, false);
+    }
+
+    fn put_remote_manifest_and_graph_with_snap_paths(
+        store: &Arc<InMemory>,
+        root: &ObjectPath,
+        snap_paths: &[&str],
+    ) {
+        RT.block_on(async {
+            store
+                .put(
+                    &root.clone().join("manifest.json"),
+                    PutPayload::from(manifest_bytes_with_snap_paths_and_rasters(
+                        snap_paths, false,
+                    )),
+                )
+                .await
+                .unwrap();
+            store
+                .put(
+                    &root.clone().join("graph.parquet"),
+                    PutPayload::from(graph_bytes()),
+                )
+                .await
+                .unwrap();
+        });
     }
 
     fn put_remote_manifest_graph_with_rasters(
@@ -2102,6 +2222,18 @@ mod tests {
         });
     }
 
+    fn put_remote_snaps(store: &Arc<InMemory>, root: &ObjectPath, snap_paths: &[&str]) {
+        RT.block_on(async {
+            for snap_path in snap_paths {
+                let object_path = ObjectPath::from(format!("{}/{}", root.as_ref(), snap_path));
+                store
+                    .put(&object_path, PutPayload::from(snap_bytes()))
+                    .await
+                    .unwrap();
+            }
+        });
+    }
+
     #[test]
     fn second_remote_open_uses_persistent_indexes_and_validation_sidecar() {
         let _decode_guard = GEOMETRY_DECODE_TEST_LOCK
@@ -2180,6 +2312,54 @@ mod tests {
             read_id_level_scans, 0,
             "sidecar-hit open should not scan catchment id/level rows"
         );
+    }
+
+    #[test]
+    fn second_remote_open_with_two_snaps_uses_validation_sidecar() {
+        let _decode_guard = GEOMETRY_DECODE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let cache_dir = tempfile::TempDir::new().unwrap();
+        let _cache_env = CacheEnv::set(cache_dir.path());
+        let base_store = Arc::new(InMemory::new());
+        let root = ObjectPath::from("dataset/root");
+        let snap_paths = ["aux/snap-a.parquet", "aux/snap-b.parquet"];
+        put_remote_manifest_and_graph_with_snap_paths(&base_store, &root, &snap_paths);
+        put_remote_catchments(&base_store, &root);
+        put_remote_snaps(&base_store, &root, &snap_paths);
+        let object_store = Arc::clone(&base_store) as Arc<dyn ObjectStore>;
+        let url = Url::parse("s3://shed-test/dataset/root").unwrap();
+
+        DatasetSession::open_remote(object_store.clone(), &root, &url, None).unwrap();
+
+        reset_read_id_level_scan_count_for_test();
+        super::reset_snap_validation_scan_count_for_test();
+        DatasetSession::open_remote(object_store, &root, &url, None).unwrap();
+
+        assert_eq!(
+            read_id_level_scan_count_for_test(),
+            0,
+            "valid two-snap token should skip catchment id/level validation"
+        );
+        assert_eq!(
+            super::snap_validation_scan_count_for_test(),
+            0,
+            "valid two-snap token should skip snap validation scans"
+        );
+
+        let sidecar_path = cache_dir
+            .path()
+            .join("testfabric")
+            .join("test-v1")
+            .join("validated.json");
+        let sidecar: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(sidecar_path).unwrap()).unwrap();
+        let snaps = sidecar["snaps"].as_array().unwrap();
+        let snap_paths_in_token = snaps
+            .iter()
+            .map(|snap| snap["path"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(snap_paths_in_token, snap_paths);
     }
 
     #[test]

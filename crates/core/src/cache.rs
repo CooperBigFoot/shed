@@ -32,26 +32,59 @@ pub(crate) struct RemoteArtifactCache {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) struct ValidationSidecar {
-    pub(crate) catchments_etag: String,
-    pub(crate) catchments_size: u64,
-    pub(crate) snap_etag: Option<String>,
-    pub(crate) snap_size: Option<u64>,
+    #[serde(default)]
+    pub(crate) token_format_version: SidecarFormatVersion,
+    #[serde(default)]
+    pub(crate) validation_logic_version: ValidationLogicVersion,
+    #[serde(default)]
+    pub(crate) hfx_format_version: String,
+    #[serde(default)]
+    pub(crate) manifest: ArtifactMeta,
+    #[serde(default)]
+    pub(crate) graph: ArtifactMeta,
+    #[serde(default)]
+    pub(crate) catchments: ArtifactMeta,
+    #[serde(default)]
+    pub(crate) snaps: Vec<ArtifactMeta>,
+    #[serde(default)]
     pub(crate) validated_at: u64,
-    pub(crate) shed_version: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(transparent)]
+pub(crate) struct SidecarFormatVersion(pub(crate) u32);
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(transparent)]
+pub(crate) struct ValidationLogicVersion(pub(crate) String);
+
+/// Bump when open-time referential validation semantics change.
+pub(crate) const VALIDATION_LOGIC_VERSION: &str = "r2-open-reuse-v1";
+const TOKEN_FORMAT_VERSION: SidecarFormatVersion = SidecarFormatVersion(2);
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) struct ArtifactMeta {
+    pub(crate) path: String,
     pub(crate) etag: String,
     pub(crate) size: u64,
 }
 
 impl ArtifactMeta {
-    pub(crate) fn from_parts(etag: Option<&str>, size: u64) -> Option<Self> {
+    pub(crate) fn from_parts(
+        path: impl Into<String>,
+        etag: Option<&str>,
+        size: u64,
+    ) -> Option<Self> {
         etag.map(|etag| Self {
+            path: path.into(),
             etag: etag.to_owned(),
             size,
         })
+    }
+
+    pub(crate) fn with_path(mut self, path: impl Into<String>) -> Self {
+        self.path = path.into();
+        self
     }
 }
 
@@ -235,23 +268,45 @@ impl RemoteArtifactCache {
 }
 
 impl ValidationSidecar {
-    pub(crate) fn current(catchments: ArtifactMeta, snap: Option<ArtifactMeta>) -> Self {
+    pub(crate) fn current(
+        hfx_format_version: impl Into<String>,
+        manifest: ArtifactMeta,
+        graph: ArtifactMeta,
+        catchments: ArtifactMeta,
+        snaps: Vec<ArtifactMeta>,
+    ) -> Self {
+        let mut snaps = snaps;
+        snaps.sort_by(|left, right| left.path.cmp(&right.path));
         Self {
-            catchments_etag: catchments.etag,
-            catchments_size: catchments.size,
-            snap_etag: snap.as_ref().map(|meta| meta.etag.clone()),
-            snap_size: snap.map(|meta| meta.size),
+            token_format_version: TOKEN_FORMAT_VERSION,
+            validation_logic_version: ValidationLogicVersion(VALIDATION_LOGIC_VERSION.to_owned()),
+            hfx_format_version: hfx_format_version.into(),
+            manifest,
+            graph,
+            catchments,
+            snaps,
             validated_at: validated_at_unix_seconds(),
-            shed_version: env!("CARGO_PKG_VERSION").to_owned(),
         }
     }
 
-    pub(crate) fn matches(&self, catchments: &ArtifactMeta, snap: Option<&ArtifactMeta>) -> bool {
-        self.catchments_etag == catchments.etag
-            && self.catchments_size == catchments.size
-            && self.snap_etag.as_deref() == snap.map(|meta| meta.etag.as_str())
-            && self.snap_size == snap.map(|meta| meta.size)
-            && self.shed_version == env!("CARGO_PKG_VERSION")
+    pub(crate) fn matches(
+        &self,
+        hfx_format_version: &str,
+        manifest: &ArtifactMeta,
+        graph: &ArtifactMeta,
+        catchments: &ArtifactMeta,
+        snaps: &[ArtifactMeta],
+    ) -> bool {
+        let mut sorted_snaps = snaps.to_vec();
+        sorted_snaps.sort_by(|left, right| left.path.cmp(&right.path));
+
+        self.token_format_version == TOKEN_FORMAT_VERSION
+            && self.validation_logic_version.0 == VALIDATION_LOGIC_VERSION
+            && self.hfx_format_version == hfx_format_version
+            && self.manifest == *manifest
+            && self.graph == *graph
+            && self.catchments == *catchments
+            && self.snaps == sorted_snaps
     }
 }
 
@@ -311,7 +366,40 @@ pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArtifactMeta, RemoteArtifactCache, ValidationSidecar};
+    use super::{ArtifactMeta, RemoteArtifactCache, ValidationLogicVersion, ValidationSidecar};
+
+    fn artifact(path: &str, etag: &str, size: u64) -> ArtifactMeta {
+        ArtifactMeta {
+            path: path.into(),
+            etag: etag.into(),
+            size,
+        }
+    }
+
+    fn sidecar_with_two_snaps() -> ValidationSidecar {
+        ValidationSidecar::current(
+            "0.2.1",
+            artifact("manifest.json", "manifest-etag", 11),
+            artifact("graph.parquet", "graph-etag", 22),
+            artifact("catchments.parquet", "catch-etag", 33),
+            vec![
+                artifact("aux/snap-b.parquet", "snap-b-etag", 55),
+                artifact("aux/snap-a.parquet", "snap-a-etag", 44),
+            ],
+        )
+    }
+
+    fn token_inputs() -> (ArtifactMeta, ArtifactMeta, ArtifactMeta, Vec<ArtifactMeta>) {
+        (
+            artifact("manifest.json", "manifest-etag", 11),
+            artifact("graph.parquet", "graph-etag", 22),
+            artifact("catchments.parquet", "catch-etag", 33),
+            vec![
+                artifact("aux/snap-a.parquet", "snap-a-etag", 44),
+                artifact("aux/snap-b.parquet", "snap-b-etag", 55),
+            ],
+        )
+    }
 
     #[test]
     fn id_index_path_uses_artifact_cache_dir() {
@@ -327,35 +415,124 @@ mod tests {
 
     #[test]
     fn validation_sidecar_matches_exact_metadata_and_version() {
-        let catchments = ArtifactMeta {
-            etag: "catch-etag".into(),
-            size: 123,
-        };
-        let snap = ArtifactMeta {
-            etag: "snap-etag".into(),
-            size: 456,
-        };
-        let sidecar = ValidationSidecar::current(catchments.clone(), Some(snap.clone()));
+        let (manifest, graph, catchments, snaps) = token_inputs();
+        let sidecar = sidecar_with_two_snaps();
 
-        assert!(sidecar.matches(&catchments, Some(&snap)));
-        assert!(!sidecar.matches(
-            &ArtifactMeta {
-                etag: "other".into(),
-                size: 123,
-            },
-            Some(&snap)
-        ));
-        assert!(!sidecar.matches(&catchments, None));
+        assert!(sidecar.matches("0.2.1", &manifest, &graph, &catchments, &snaps));
     }
 
     #[test]
     fn validation_sidecar_matches_absent_snap() {
-        let catchments = ArtifactMeta {
-            etag: "catch-etag".into(),
-            size: 123,
-        };
-        let sidecar = ValidationSidecar::current(catchments.clone(), None);
+        let manifest = artifact("manifest.json", "manifest-etag", 11);
+        let graph = artifact("graph.parquet", "graph-etag", 22);
+        let catchments = artifact("catchments.parquet", "catch-etag", 33);
+        let sidecar = ValidationSidecar::current(
+            "0.2.1",
+            manifest.clone(),
+            graph.clone(),
+            catchments.clone(),
+            Vec::new(),
+        );
 
-        assert!(sidecar.matches(&catchments, None));
+        assert!(sidecar.matches("0.2.1", &manifest, &graph, &catchments, &[]));
+    }
+
+    #[test]
+    fn legacy_validation_sidecar_without_manifest_attestation_fails_closed() {
+        let legacy = serde_json::json!({
+            "catchments_etag": "catch-etag",
+            "catchments_size": 123,
+            "snap_etag": null,
+            "snap_size": null,
+            "validated_at": 1,
+            "shed_version": env!("CARGO_PKG_VERSION")
+        });
+
+        let sidecar: ValidationSidecar = serde_json::from_value(legacy).unwrap();
+        let (manifest, graph, catchments, snaps) = token_inputs();
+
+        assert!(!sidecar.matches("0.2.1", &manifest, &graph, &catchments, &snaps));
+    }
+
+    #[test]
+    fn validation_sidecar_patch_version_change_does_not_invalidate_v2_token() {
+        let (manifest, graph, catchments, snaps) = token_inputs();
+        let mut serialized = serde_json::to_value(sidecar_with_two_snaps()).unwrap();
+        serialized["shed_version"] = serde_json::json!("0.0.0-different-patch");
+        let sidecar: ValidationSidecar = serde_json::from_value(serialized).unwrap();
+
+        assert!(sidecar.matches("0.2.1", &manifest, &graph, &catchments, &snaps));
+    }
+
+    #[test]
+    fn validation_sidecar_logic_version_change_invalidates() {
+        let (manifest, graph, catchments, snaps) = token_inputs();
+        let mut sidecar = sidecar_with_two_snaps();
+        sidecar.validation_logic_version = ValidationLogicVersion("different-logic".into());
+
+        assert!(!sidecar.matches("0.2.1", &manifest, &graph, &catchments, &snaps));
+    }
+
+    #[test]
+    fn validation_sidecar_artifact_metadata_changes_invalidate() {
+        let (manifest, graph, catchments, snaps) = token_inputs();
+        let sidecar = sidecar_with_two_snaps();
+
+        assert!(!sidecar.matches(
+            "0.2.1",
+            &artifact("manifest.json", "other-manifest", 11),
+            &graph,
+            &catchments,
+            &snaps
+        ));
+        assert!(!sidecar.matches(
+            "0.2.1",
+            &manifest,
+            &graph,
+            &artifact("catchments.parquet", "catch-etag", 34),
+            &snaps
+        ));
+        let changed_snap = vec![
+            artifact("aux/snap-a.parquet", "snap-a-etag", 44),
+            artifact("aux/snap-b.parquet", "snap-b-etag", 56),
+        ];
+        assert!(!sidecar.matches("0.2.1", &manifest, &graph, &catchments, &changed_snap));
+    }
+
+    #[test]
+    fn validation_sidecar_graph_metadata_mismatch_fails_closed() {
+        let (manifest, _graph, catchments, snaps) = token_inputs();
+        let sidecar = sidecar_with_two_snaps();
+
+        assert!(!sidecar.matches(
+            "0.2.1",
+            &manifest,
+            &artifact("graph.parquet", "other-graph", 22),
+            &catchments,
+            &snaps
+        ));
+        assert!(!sidecar.matches(
+            "0.2.1",
+            &manifest,
+            &artifact("graph.parquet", "graph-etag", 23),
+            &catchments,
+            &snaps
+        ));
+    }
+
+    #[test]
+    fn validation_sidecar_matches_two_snaps_regardless_of_declaration_order() {
+        let (manifest, graph, catchments, mut snaps) = token_inputs();
+        let sidecar = sidecar_with_two_snaps();
+        snaps.reverse();
+
+        assert_eq!(
+            sidecar.snaps,
+            vec![
+                artifact("aux/snap-a.parquet", "snap-a-etag", 44),
+                artifact("aux/snap-b.parquet", "snap-b-etag", 55),
+            ]
+        );
+        assert!(sidecar.matches("0.2.1", &manifest, &graph, &catchments, &snaps));
     }
 }
