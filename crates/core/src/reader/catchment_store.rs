@@ -1422,6 +1422,15 @@ pub(crate) fn reset_geometry_decode_counts_for_test() {
 }
 
 #[cfg(test)]
+pub(crate) fn geometry_decode_rows_for_test() -> usize {
+    GEOMETRY_DECODE_COUNTS_FOR_TEST
+        .lock()
+        .expect("geometry decode count mutex poisoned")
+        .values()
+        .sum()
+}
+
+#[cfg(test)]
 pub(crate) fn read_id_level_scan_count_for_test() -> usize {
     READ_ID_LEVEL_SCAN_COUNT_FOR_TEST.load(Ordering::SeqCst)
 }

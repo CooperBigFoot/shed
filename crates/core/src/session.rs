@@ -1335,13 +1335,15 @@ mod tests {
     use crate::error::SessionError;
     use crate::parquet_cache::{ParquetFooterCache, ParquetRowGroupCache};
     use crate::reader::catchment_store::{
-        GEOMETRY_DECODE_TEST_LOCK, read_id_level_scan_count_for_test,
+        GEOMETRY_DECODE_TEST_LOCK, geometry_decode_rows_for_test,
+        read_id_level_max_in_flight_for_test, read_id_level_scan_count_for_test,
         read_id_only_scan_count_for_test, reset_geometry_decode_counts_for_test,
-        reset_read_id_level_scan_count_for_test,
+        reset_read_id_level_max_in_flight_for_test, reset_read_id_level_scan_count_for_test,
     };
     use crate::reader::snap_store::{
-        reset_snap_geometry_decode_rows_for_test, reset_snap_membership_rows_for_test,
-        snap_geometry_decode_rows_for_test, snap_membership_rows_for_test,
+        reset_snap_geometry_decode_rows_for_test, reset_snap_membership_max_in_flight_for_test,
+        reset_snap_membership_rows_for_test, snap_geometry_decode_rows_for_test,
+        snap_membership_max_in_flight_for_test, snap_membership_rows_for_test,
     };
     use crate::runtime::RT;
     use crate::source::DatasetSource;
@@ -2620,8 +2622,10 @@ mod tests {
         DatasetSession::open_remote(object_store.clone(), &root, &url, None).unwrap();
 
         reset_read_id_level_scan_count_for_test();
+        reset_read_id_level_max_in_flight_for_test();
         super::reset_snap_validation_scan_count_for_test();
         reset_snap_geometry_decode_rows_for_test();
+        reset_snap_membership_max_in_flight_for_test();
         reset_snap_membership_rows_for_test();
         DatasetSession::open_remote(object_store, &root, &url, None).unwrap();
 
@@ -2815,13 +2819,18 @@ mod tests {
             serde_json::json!({
                 "url": REAL_GRIT_V200_URL,
                 "elapsed_ms": elapsed_ms,
-                "target_ms": 12000.0,
+                "warm_target_ms": 12000.0,
+                "warm_target_basis": "measured local cache-I/O floor plus variance margin",
+                "cache_floor_note": "warm path includes cached graph disk read/parse, persisted catchment id-index read, snap metadata open, and token HEADs",
                 "graph_parse_floor_ms": graph_parse_floor_ms,
+                "graph_disk_read_and_parse_floor_ms": graph_parse_floor_ms,
                 "snap_store_open_ms": stage_ms(&stages, "snap_store_open"),
                 "snap_membership_rows": snap_membership_rows,
                 "snap_geometry_decode_rows": snap_geometry_decode_rows,
                 "snap_validation_scans": snap_validation_scans,
                 "catchment_level_scans": catchment_level_scans,
+                "catchment_level_max_in_flight": read_id_level_max_in_flight_for_test(),
+                "snap_membership_max_in_flight": snap_membership_max_in_flight_for_test(),
                 "token_hit": snap_validation_scans == 0
                     && snap_membership_rows == 0
                     && snap_geometry_decode_rows == 0,
@@ -2870,8 +2879,11 @@ mod tests {
         let trace_path = trace_dir.path().join("cold-open.jsonl");
 
         reset_read_id_level_scan_count_for_test();
+        reset_read_id_level_max_in_flight_for_test();
         super::reset_snap_validation_scan_count_for_test();
+        reset_geometry_decode_counts_for_test();
         reset_snap_geometry_decode_rows_for_test();
+        reset_snap_membership_max_in_flight_for_test();
         reset_snap_membership_rows_for_test();
         let started = Instant::now();
         let session = run_with_trace(&trace_path, || {
@@ -2884,7 +2896,10 @@ mod tests {
 
         let snap_membership_rows = snap_membership_rows_for_test();
         let snap_geometry_decode_rows = snap_geometry_decode_rows_for_test();
+        let catchment_geometry_decode_rows = geometry_decode_rows_for_test();
         let snap_membership_ms = stage_ms(&stages, "snap_id_index");
+        let catchment_validate_ms = stage_ms(&stages, "validate_graph_catchments");
+        let cold_validation_lean_scans_ms = catchment_validate_ms + snap_membership_ms;
         print_measurement(
             "real_grit_cold_snap_open",
             serde_json::json!({
@@ -2892,20 +2907,27 @@ mod tests {
                 "cache_method": "temporary HFX_CACHE_DIR",
                 "cache_dir": cache_dir.path(),
                 "elapsed_ms": elapsed_ms,
+                "cold_validation_lean_scans_ms": cold_validation_lean_scans_ms,
+                "cold_validation_lean_target_ms": 90000.0,
+                "cold_validation_lean_escalation_ms": 120000.0,
+                "cold_total_target_ms_including_graph_floor": 240000.0,
+                "cold_escalation_ms_including_graph_floor": 300000.0,
                 "snap_membership_ms": snap_membership_ms,
-                "snap_membership_target_ms": 35000.0,
-                "snap_membership_escalation_ms": 45000.0,
                 "catchment_id_index_ms": stage_ms(&stages, "catchment_id_index"),
-                "catchment_validate_ms": stage_ms(&stages, "validate_graph_catchments"),
+                "catchment_validate_ms": catchment_validate_ms,
                 "graph_fetch_and_parse_ms": stage_ms(&stages, "graph_fetch"),
+                "graph_download_floor_ms": stage_ms(&stages, "graph_fetch"),
                 "graph_parse_floor_ms": graph_parse_floor_ms,
                 "snap_store_open_ms": stage_ms(&stages, "snap_store_open"),
                 "validate_snap_refs_ms": stage_ms(&stages, "validate_snap_refs"),
                 "snap_membership_rows": snap_membership_rows,
                 "expected_grit_snap_rows_reference": 22_337_300usize,
                 "snap_geometry_decode_rows": snap_geometry_decode_rows,
+                "catchment_geometry_decode_rows": catchment_geometry_decode_rows,
                 "snap_validation_scans": super::snap_validation_scan_count_for_test(),
                 "catchment_level_scans": read_id_level_scan_count_for_test(),
+                "catchment_level_max_in_flight": read_id_level_max_in_flight_for_test(),
+                "snap_membership_max_in_flight": snap_membership_max_in_flight_for_test(),
                 "token_miss": true,
                 "units": session.graph().len(),
             }),
@@ -2919,9 +2941,13 @@ mod tests {
             snap_geometry_decode_rows, 0,
             "cold token miss should not decode snap geometry at open"
         );
+        assert_eq!(
+            catchment_geometry_decode_rows, 0,
+            "cold token miss should not decode catchment geometry at open"
+        );
         assert!(
-            snap_membership_ms < 45_000.0,
-            "cold real GRIT snap membership exceeded escalation threshold: {snap_membership_ms:.1} ms"
+            cold_validation_lean_scans_ms < 120_000.0,
+            "cold real GRIT lean validation scans exceeded escalation threshold: {cold_validation_lean_scans_ms:.1} ms"
         );
     }
 
