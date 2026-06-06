@@ -257,6 +257,16 @@ pub enum SessionError {
         reason: String,
     },
 
+    /// Fired when snap references are requested from a lazily opened snap store
+    /// that intentionally skipped membership loading.
+    #[error("snap references are not loaded for {artifact} opened in {mode}")]
+    SnapRefsNotLoaded {
+        /// The snap artifact whose references were requested.
+        artifact: &'static str,
+        /// The open mode that left references unloaded.
+        mode: &'static str,
+    },
+
     /// Fired when a snap geometry is neither a WKB Point nor a WKB LineString.
     #[error("invalid snap geometry at row {row}: {reason}")]
     SnapGeometryInvalid {

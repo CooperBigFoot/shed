@@ -136,6 +136,18 @@ struct UnitIdRowGroupReadContext {
 }
 
 #[derive(Clone)]
+struct SnapMembershipRowGroupReadContext {
+    store: Arc<dyn ObjectStore>,
+    path: ObjectPath,
+    file_size: u64,
+    reader_metadata: ArrowReaderMetadata,
+    mask: ProjectionMask,
+    parquet_cache: Option<Arc<ParquetRowGroupCache>>,
+    footer_cache: Option<Arc<ParquetFooterCache>>,
+    cache_ident: Option<ArtifactIdent>,
+}
+
+#[derive(Clone)]
 struct SnapBboxRowGroupReadContext {
     store: Arc<dyn ObjectStore>,
     path: ObjectPath,
@@ -151,6 +163,20 @@ struct SnapBboxRowGroupReadContext {
 pub(crate) struct SnapUnitRef {
     pub(crate) snap_id: SnapId,
     pub(crate) unit_id: UnitId,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SnapOpenMode {
+    LazyMetadata,
+    ColdMembershipValidation,
+}
+
+#[derive(Debug)]
+enum SnapRefsState {
+    #[cfg_attr(not(test), allow(dead_code))]
+    NotLoaded,
+    Loaded(Vec<SnapUnitRef>),
 }
 
 #[derive(Debug, Default)]
@@ -172,6 +198,21 @@ impl SnapValidationReadStats {
     }
 }
 
+#[derive(Debug, Default)]
+struct SnapMembershipReadStats {
+    refs: Vec<SnapUnitRef>,
+    batches_read: usize,
+    membership_rows: usize,
+}
+
+impl SnapMembershipReadStats {
+    fn extend(&mut self, row_group_stats: SnapMembershipReadStats) {
+        self.refs.extend(row_group_stats.refs);
+        self.batches_read += row_group_stats.batches_read;
+        self.membership_rows += row_group_stats.membership_rows;
+    }
+}
+
 /// Lazy reader for snap.parquet with row-group bbox pruning.
 #[derive(Debug)]
 pub struct SnapStore {
@@ -184,7 +225,7 @@ pub struct SnapStore {
     total_rows: u64,
     #[allow(dead_code)]
     bbox_col_indices: Option<BboxColIndices>,
-    all_snap_refs: Vec<SnapUnitRef>,
+    snap_refs: SnapRefsState,
     /// Optional column-chunk cache shared across all readers for this engine.
     parquet_cache: Option<Arc<ParquetRowGroupCache>>,
     /// Optional footer metadata cache shared across all readers for this engine.
@@ -216,6 +257,7 @@ impl SnapStore {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -232,6 +274,7 @@ impl SnapStore {
             path,
             path_display,
             HeadErrorMode::RemoteArtifact,
+            None,
             None,
             None,
             None,
@@ -284,6 +327,32 @@ impl SnapStore {
             parquet_cache,
             footer_cache,
             id_index_path,
+            None,
+        )
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn open_with_mode(
+        store: Arc<dyn ObjectStore>,
+        path: ObjectPath,
+        path_display: String,
+        head_error_mode: HeadErrorMode,
+        fabric_info: Option<(String, String)>,
+        parquet_cache: Option<Arc<ParquetRowGroupCache>>,
+        footer_cache: Option<Arc<ParquetFooterCache>>,
+        mode: SnapOpenMode,
+    ) -> Result<Self, SessionError> {
+        Self::open_object(
+            store,
+            path,
+            path_display,
+            head_error_mode,
+            fabric_info,
+            parquet_cache,
+            footer_cache,
+            None,
+            Some(mode),
         )
     }
 
@@ -297,6 +366,7 @@ impl SnapStore {
         parquet_cache: Option<Arc<ParquetRowGroupCache>>,
         footer_cache: Option<Arc<ParquetFooterCache>>,
         id_index_path: Option<PathBuf>,
+        mode: Option<SnapOpenMode>,
     ) -> Result<Self, SessionError> {
         let _guard = StageGuard::enter(Stage::SnapStoreOpen);
         record_path(&path_display);
@@ -388,23 +458,56 @@ impl SnapStore {
             }
         }
 
-        let all_snap_refs = read_or_build_id_index(
-            &store,
-            &path,
-            file_size,
-            head_meta.e_tag.as_deref(),
-            parquet_cache.clone(),
-            footer_cache.clone(),
-            cache_ident.clone(),
-            id_index_path.as_deref(),
-            &path_display,
-        )?;
+        let snap_refs = match mode {
+            None => SnapRefsState::Loaded(read_or_build_id_index(
+                &store,
+                &path,
+                file_size,
+                head_meta.e_tag.as_deref(),
+                parquet_cache.clone(),
+                footer_cache.clone(),
+                cache_ident.clone(),
+                id_index_path.as_deref(),
+                &path_display,
+            )?),
+            Some(SnapOpenMode::LazyMetadata) => SnapRefsState::NotLoaded,
+            Some(SnapOpenMode::ColdMembershipValidation) => {
+                let refs = if id_index_path.is_some() {
+                    read_or_build_id_index(
+                        &store,
+                        &path,
+                        file_size,
+                        head_meta.e_tag.as_deref(),
+                        parquet_cache.clone(),
+                        footer_cache.clone(),
+                        cache_ident.clone(),
+                        id_index_path.as_deref(),
+                        &path_display,
+                    )?
+                } else {
+                    let _guard = StageGuard::enter(Stage::SnapIdIndex);
+                    record_path(&path_display);
+                    read_all_snap_membership_refs_from_store(
+                        &store,
+                        &path,
+                        file_size,
+                        parquet_cache.clone(),
+                        footer_cache.clone(),
+                        cache_ident.clone(),
+                    )?
+                };
+                SnapRefsState::Loaded(refs)
+            }
+        };
 
         debug!(
             row_groups = row_groups.len(),
             groups_without_stats = groups_without_stats.len(),
             total_rows,
-            indexed_ids = all_snap_refs.len(),
+            indexed_ids = match &snap_refs {
+                SnapRefsState::NotLoaded => 0,
+                SnapRefsState::Loaded(refs) => refs.len(),
+            },
             "snap store opened"
         );
 
@@ -417,7 +520,7 @@ impl SnapStore {
             groups_without_stats,
             total_rows,
             bbox_col_indices,
-            all_snap_refs,
+            snap_refs,
             parquet_cache,
             footer_cache,
             cache_ident,
@@ -538,15 +641,25 @@ impl SnapStore {
     /// | Row contains a null `unit_id` | [`SessionError::InvalidRow`] |
     /// | `unit_id` value fails domain validation | [`SessionError::InvalidRow`] |
     pub fn read_all_unit_ids(&self) -> Result<Vec<hfx_core::UnitId>, SessionError> {
-        Ok(self
-            .all_snap_refs
-            .iter()
-            .map(|snap_ref| snap_ref.unit_id)
-            .collect())
+        match &self.snap_refs {
+            SnapRefsState::Loaded(refs) => {
+                Ok(refs.iter().map(|snap_ref| snap_ref.unit_id).collect())
+            }
+            SnapRefsState::NotLoaded => Err(SessionError::SnapRefsNotLoaded {
+                artifact: ARTIFACT,
+                mode: "LazyMetadata",
+            }),
+        }
     }
 
     pub(crate) fn read_all_snap_refs(&self) -> Result<Vec<SnapUnitRef>, SessionError> {
-        Ok(self.all_snap_refs.clone())
+        match &self.snap_refs {
+            SnapRefsState::Loaded(refs) => Ok(refs.clone()),
+            SnapRefsState::NotLoaded => Err(SessionError::SnapRefsNotLoaded {
+                artifact: ARTIFACT,
+                mode: "LazyMetadata",
+            }),
+        }
     }
 
     /// Return the total number of snap target rows across all row groups.
@@ -583,6 +696,24 @@ fn read_all_snap_refs_from_store(
     cache_ident: Option<ArtifactIdent>,
 ) -> Result<Vec<SnapUnitRef>, SessionError> {
     RT.block_on(read_all_snap_refs_from_store_async(
+        store,
+        path,
+        file_size,
+        parquet_cache,
+        footer_cache,
+        cache_ident,
+    ))
+}
+
+fn read_all_snap_membership_refs_from_store(
+    store: &Arc<dyn ObjectStore>,
+    path: &ObjectPath,
+    file_size: u64,
+    parquet_cache: Option<Arc<ParquetRowGroupCache>>,
+    footer_cache: Option<Arc<ParquetFooterCache>>,
+    cache_ident: Option<ArtifactIdent>,
+) -> Result<Vec<SnapUnitRef>, SessionError> {
+    RT.block_on(read_all_snap_membership_refs_from_store_async(
         store,
         path,
         file_size,
@@ -663,6 +794,194 @@ fn read_or_build_id_index(
     }
 
     Ok(ids)
+}
+
+#[instrument(skip(store, parquet_cache, footer_cache, cache_ident), fields(path = %path))]
+async fn read_all_snap_membership_refs_from_store_async(
+    store: &Arc<dyn ObjectStore>,
+    path: &ObjectPath,
+    file_size: u64,
+    parquet_cache: Option<Arc<ParquetRowGroupCache>>,
+    footer_cache: Option<Arc<ParquetFooterCache>>,
+    cache_ident: Option<ArtifactIdent>,
+) -> Result<Vec<SnapUnitRef>, SessionError> {
+    let started = Instant::now();
+    let builder = ParquetRecordBatchStreamBuilder::new(object_reader_with_cache(
+        store,
+        path,
+        file_size,
+        parquet_cache.clone(),
+        footer_cache.clone(),
+        cache_ident.clone(),
+    ))
+    .await
+    .map_err(|e| SessionError::ParquetParse {
+        artifact: ARTIFACT,
+        source: e,
+    })?;
+    let metadata = builder.metadata().clone();
+    let num_row_groups = metadata.num_row_groups();
+
+    let reader_metadata = ArrowReaderMetadata::try_new(metadata.clone(), Default::default())
+        .map_err(|e| SessionError::ParquetParse {
+            artifact: ARTIFACT,
+            source: e,
+        })?;
+    let parquet_schema = reader_metadata.parquet_schema();
+    let id_col_idx = parquet_schema
+        .columns()
+        .iter()
+        .position(|c| c.name() == "id")
+        .ok_or_else(|| SessionError::parquet_schema(ARTIFACT, "missing column \"id\""))?;
+    let unit_id_col_idx = parquet_schema
+        .columns()
+        .iter()
+        .position(|c| c.name() == "unit_id")
+        .ok_or_else(|| SessionError::parquet_schema(ARTIFACT, "missing column \"unit_id\""))?;
+
+    let mask = ProjectionMask::roots(parquet_schema, vec![id_col_idx, unit_id_col_idx]);
+    let selected_row_groups: Vec<usize> = (0..num_row_groups).collect();
+    let rg_absolute_starts = absolute_row_starts(&metadata, &selected_row_groups);
+    let read_context = SnapMembershipRowGroupReadContext {
+        store: Arc::clone(store),
+        path: path.clone(),
+        file_size,
+        reader_metadata,
+        mask,
+        parquet_cache,
+        footer_cache,
+        cache_ident,
+    };
+    debug!(
+        row_groups = num_row_groups,
+        concurrency = ID_INDEX_ROW_GROUP_CONCURRENCY,
+        projected_columns = "id,unit_id",
+        "reading snap membership refs for cold validation"
+    );
+    let row_group_results = stream::iter(selected_row_groups.into_iter().zip(rg_absolute_starts))
+        .map(|(row_group, absolute_start)| {
+            let read_context = read_context.clone();
+            async move {
+                read_snap_membership_refs_row_group_async(read_context, row_group, absolute_start)
+                    .await
+            }
+        })
+        .buffered(ID_INDEX_ROW_GROUP_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+
+    let mut stats = SnapMembershipReadStats::default();
+    for row_group_result in row_group_results {
+        stats.extend(row_group_result?);
+    }
+    info!(
+        refs = stats.refs.len(),
+        row_groups = num_row_groups,
+        batches = stats.batches_read,
+        membership_rows = stats.membership_rows,
+        concurrency = ID_INDEX_ROW_GROUP_CONCURRENCY,
+        elapsed_ms = started.elapsed().as_millis(),
+        projected_columns = "id,unit_id",
+        "cold snap membership read complete"
+    );
+    Ok(stats.refs)
+}
+
+async fn read_snap_membership_refs_row_group_async(
+    context: SnapMembershipRowGroupReadContext,
+    row_group: usize,
+    absolute_start: usize,
+) -> Result<SnapMembershipReadStats, SessionError> {
+    let builder = ParquetRecordBatchStreamBuilder::new_with_metadata(
+        object_reader_with_cache(
+            &context.store,
+            &context.path,
+            context.file_size,
+            context.parquet_cache,
+            context.footer_cache,
+            context.cache_ident,
+        ),
+        context.reader_metadata,
+    );
+    let mut stream = builder
+        .with_projection(context.mask)
+        .with_row_groups(vec![row_group])
+        .with_batch_size(8192)
+        .build()
+        .map_err(|e| SessionError::ParquetParse {
+            artifact: ARTIFACT,
+            source: e,
+        })?;
+
+    let mut stats = SnapMembershipReadStats::default();
+    let mut offset_in_group = 0usize;
+    while let Some(reader) =
+        stream
+            .next_row_group()
+            .await
+            .map_err(|e| SessionError::RowGroupReadError {
+                artifact: ARTIFACT,
+                row_group,
+                source: e,
+            })?
+    {
+        for batch_result in reader {
+            let batch = batch_result.map_err(|e| SessionError::RowGroupReadError {
+                artifact: ARTIFACT,
+                row_group,
+                source: parquet::errors::ParquetError::ArrowError(e.to_string()),
+            })?;
+            let absolute_row = absolute_start + offset_in_group;
+            let id_col = batch
+                .column_by_name("id")
+                .and_then(|column| column.as_any().downcast_ref::<Int64Array>())
+                .ok_or_else(|| SessionError::parquet_schema(ARTIFACT, "id column is not Int64"))?;
+            let unit_id_col = batch
+                .column_by_name("unit_id")
+                .and_then(|column| column.as_any().downcast_ref::<Int64Array>())
+                .ok_or_else(|| {
+                    SessionError::parquet_schema(ARTIFACT, "unit_id column is not Int64")
+                })?;
+            stats.batches_read += 1;
+            stats.membership_rows += batch.num_rows();
+            #[cfg(test)]
+            SNAP_MEMBERSHIP_ROWS_FOR_TEST.fetch_add(batch.num_rows(), Ordering::SeqCst);
+            for i in 0..batch.num_rows() {
+                if id_col.is_null(i) {
+                    return Err(SessionError::invalid_row(
+                        ARTIFACT,
+                        absolute_row + i,
+                        "null id",
+                    ));
+                }
+                if unit_id_col.is_null(i) {
+                    return Err(SessionError::invalid_row(
+                        ARTIFACT,
+                        absolute_row + i,
+                        "null unit_id",
+                    ));
+                }
+                let snap_id = SnapId::new(id_col.value(i)).map_err(|e| {
+                    SessionError::invalid_row(
+                        ARTIFACT,
+                        absolute_row + i,
+                        format!("invalid id: {e}"),
+                    )
+                })?;
+                let unit_id = UnitId::new(unit_id_col.value(i)).map_err(|e| {
+                    SessionError::invalid_row(
+                        ARTIFACT,
+                        absolute_row + i,
+                        format!("invalid unit_id: {e}"),
+                    )
+                })?;
+                stats.refs.push(SnapUnitRef { snap_id, unit_id });
+            }
+            offset_in_group += batch.num_rows();
+        }
+    }
+
+    Ok(stats)
 }
 
 #[instrument(skip(store, parquet_cache, footer_cache, cache_ident), fields(path = %path))]
@@ -1245,7 +1564,7 @@ fn geometry_type_name(geometry: &Geometry<f64>) -> &'static str {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum HeadErrorMode {
+pub(crate) enum HeadErrorMode {
     LocalIo,
     RemoteArtifact,
 }
@@ -1353,7 +1672,9 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use arrow::array::{BinaryBuilder, BooleanBuilder, Float32Builder, Int64Builder};
+    use arrow::array::{
+        BinaryBuilder, BooleanBuilder, Float32Array, Float32Builder, Int64Array, Int64Builder,
+    };
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use bytes::Bytes;
@@ -1370,6 +1691,7 @@ mod tests {
     use tracing_subscriber::prelude::*;
 
     use super::*;
+    use crate::reader::catchment_store::GEOMETRY_DECODE_TEST_LOCK;
 
     /// Minimal valid WKB LineString with two points.
     fn minimal_wkb_linestring(x1: f64, y1: f64, x2: f64, y2: f64) -> Vec<u8> {
@@ -1469,6 +1791,41 @@ mod tests {
         writer.close().unwrap();
 
         tmp
+    }
+
+    fn write_custom_snap_parquet(
+        schema: Arc<Schema>,
+        columns: Vec<Arc<dyn Array>>,
+    ) -> NamedTempFile {
+        let tmp = NamedTempFile::new().unwrap();
+        let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+        let file = tmp.reopen().unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        tmp
+    }
+
+    fn binary_column(values: &[Vec<u8>]) -> Arc<dyn Array> {
+        let mut builder = BinaryBuilder::new();
+        for value in values {
+            builder.append_value(value);
+        }
+        Arc::new(builder.finish())
+    }
+
+    fn open_local_with_mode(path: &Path, mode: SnapOpenMode) -> Result<SnapStore, SessionError> {
+        let (store, object_path, path_display) = local_object_artifact(path)?;
+        SnapStore::open_with_mode(
+            store,
+            object_path,
+            path_display,
+            HeadErrorMode::LocalIo,
+            None,
+            None,
+            None,
+            mode,
+        )
     }
 
     #[derive(Debug, Default)]
@@ -1712,6 +2069,137 @@ mod tests {
     }
 
     #[test]
+    fn test_cold_membership_open_reads_refs_without_decoding_geometry() {
+        let _decode_guard = GEOMETRY_DECODE_TEST_LOCK
+            .lock()
+            .expect("geometry decode test lock should not be poisoned");
+        reset_snap_geometry_decode_rows_for_test();
+        reset_snap_membership_rows_for_test();
+        let geom = minimal_wkb_linestring(1.0, 1.0, 2.0, 2.0);
+        let rows = vec![
+            SnapRow {
+                id: 1,
+                unit_id: 10,
+                weight: 0.5,
+                is_mainstem: true,
+                minx: -10.0,
+                miny: -5.0,
+                maxx: -9.0,
+                maxy: -4.0,
+                geom: minimal_wkb_linestring(-10.0, -5.0, -9.0, -4.0),
+            },
+            SnapRow {
+                id: 2,
+                unit_id: 20,
+                weight: 0.8,
+                is_mainstem: false,
+                minx: 1.0,
+                miny: 1.0,
+                maxx: 2.0,
+                maxy: 2.0,
+                geom,
+            },
+        ];
+
+        let tmp = write_snap_parquet(&rows);
+        let store = open_local_with_mode(tmp.path(), SnapOpenMode::ColdMembershipValidation)
+            .expect("cold membership snap store should open");
+
+        assert_eq!(store.read_all_snap_refs().unwrap().len(), 2);
+        assert!(snap_membership_rows_for_test() > 0);
+        assert_eq!(snap_geometry_decode_rows_for_test(), 0);
+    }
+
+    #[test]
+    fn test_lazy_open_rejects_wrong_stem_role_column_type() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("unit_id", DataType::Int64, false),
+            Field::new("weight", DataType::Float32, false),
+            Field::new("stem_role", DataType::Int64, true),
+            Field::new("bbox_minx", DataType::Float32, false),
+            Field::new("bbox_miny", DataType::Float32, false),
+            Field::new("bbox_maxx", DataType::Float32, false),
+            Field::new("bbox_maxy", DataType::Float32, false),
+            Field::new("geometry", DataType::Binary, false),
+        ]));
+        let geom = minimal_wkb_linestring(1.0, 1.0, 2.0, 2.0);
+        let tmp = write_custom_snap_parquet(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1])) as Arc<dyn Array>,
+                Arc::new(Int64Array::from(vec![10])) as Arc<dyn Array>,
+                Arc::new(Float32Array::from(vec![1.0])) as Arc<dyn Array>,
+                Arc::new(Int64Array::from(vec![1])) as Arc<dyn Array>,
+                Arc::new(Float32Array::from(vec![1.0])) as Arc<dyn Array>,
+                Arc::new(Float32Array::from(vec![1.0])) as Arc<dyn Array>,
+                Arc::new(Float32Array::from(vec![2.0])) as Arc<dyn Array>,
+                Arc::new(Float32Array::from(vec![2.0])) as Arc<dyn Array>,
+                binary_column(&[geom]),
+            ],
+        );
+
+        let result = open_local_with_mode(tmp.path(), SnapOpenMode::LazyMetadata);
+
+        assert!(matches!(result, Err(SessionError::ParquetSchema { .. })));
+    }
+
+    #[test]
+    fn test_lazy_open_rejects_missing_geometry_column() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("unit_id", DataType::Int64, false),
+            Field::new("weight", DataType::Float32, false),
+            Field::new("bbox_minx", DataType::Float32, false),
+            Field::new("bbox_miny", DataType::Float32, false),
+            Field::new("bbox_maxx", DataType::Float32, false),
+            Field::new("bbox_maxy", DataType::Float32, false),
+        ]));
+        let tmp = write_custom_snap_parquet(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1])) as Arc<dyn Array>,
+                Arc::new(Int64Array::from(vec![10])) as Arc<dyn Array>,
+                Arc::new(Float32Array::from(vec![1.0])) as Arc<dyn Array>,
+                Arc::new(Float32Array::from(vec![1.0])) as Arc<dyn Array>,
+                Arc::new(Float32Array::from(vec![1.0])) as Arc<dyn Array>,
+                Arc::new(Float32Array::from(vec![2.0])) as Arc<dyn Array>,
+                Arc::new(Float32Array::from(vec![2.0])) as Arc<dyn Array>,
+            ],
+        );
+
+        let result = open_local_with_mode(tmp.path(), SnapOpenMode::LazyMetadata);
+
+        assert!(matches!(result, Err(SessionError::ParquetSchema { .. })));
+    }
+
+    #[test]
+    fn test_lazy_open_rejects_partial_bbox_columns() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("unit_id", DataType::Int64, false),
+            Field::new("weight", DataType::Float32, false),
+            Field::new("bbox_minx", DataType::Float32, false),
+            Field::new("geometry", DataType::Binary, false),
+        ]));
+        let geom = minimal_wkb_linestring(1.0, 1.0, 2.0, 2.0);
+        let tmp = write_custom_snap_parquet(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1])) as Arc<dyn Array>,
+                Arc::new(Int64Array::from(vec![10])) as Arc<dyn Array>,
+                Arc::new(Float32Array::from(vec![1.0])) as Arc<dyn Array>,
+                Arc::new(Float32Array::from(vec![1.0])) as Arc<dyn Array>,
+                binary_column(&[geom]),
+            ],
+        );
+
+        let result = open_local_with_mode(tmp.path(), SnapOpenMode::LazyMetadata);
+
+        assert!(matches!(result, Err(SessionError::ParquetSchema { .. })));
+    }
+
+    #[test]
     fn test_query_by_bbox_returns_matching() {
         let geom = minimal_wkb_linestring(1.0, 1.0, 2.0, 2.0);
         let rows = vec![
@@ -1769,6 +2257,46 @@ mod tests {
         assert_eq!(records[0]["stage"], "outlet_resolve");
         assert_eq!(records[0]["row_groups"], 1);
         assert_eq!(records[0]["matches"], 1);
+    }
+
+    #[test]
+    fn test_lazy_open_query_by_bbox_returns_matching() {
+        let geom = minimal_wkb_linestring(1.0, 1.0, 2.0, 2.0);
+        let rows = vec![
+            SnapRow {
+                id: 1,
+                unit_id: 10,
+                weight: 0.5,
+                is_mainstem: true,
+                minx: -10.0,
+                miny: -5.0,
+                maxx: -9.0,
+                maxy: -4.0,
+                geom: minimal_wkb_linestring(-10.0, -5.0, -9.0, -4.0),
+            },
+            SnapRow {
+                id: 2,
+                unit_id: 20,
+                weight: 0.8,
+                is_mainstem: false,
+                minx: 1.0,
+                miny: 1.0,
+                maxx: 2.0,
+                maxy: 2.0,
+                geom: geom.clone(),
+            },
+        ];
+
+        let tmp = write_snap_parquet(&rows);
+        let store = open_local_with_mode(tmp.path(), SnapOpenMode::LazyMetadata)
+            .expect("lazy snap store should open");
+
+        let query = BoundingBox::new(0.5, 0.5, 3.0, 3.0).unwrap();
+        let results = store.query_by_bbox(&query).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id(), SnapId::new(2).unwrap());
+        assert_eq!(results[0].unit_id(), UnitId::new(20).unwrap());
     }
 
     #[test]
