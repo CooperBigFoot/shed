@@ -7,7 +7,7 @@ per-commit Rust crate versioning).
 
 ## [Unreleased]
 
-## [0.2.3] - TBD
+## [0.2.3] - 2026-06-07
 
 - fix: `bench_trace` now flushes trace output on exit.
 - typing: added `bench_trace` to the packaged type stubs.
