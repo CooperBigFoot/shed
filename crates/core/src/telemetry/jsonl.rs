@@ -183,6 +183,7 @@ impl JsonlLayer {
         };
         if let Err(error) = serde_json::to_writer(&mut *writer, &line)
             .and_then(|()| writer.write_all(b"\n").map_err(serde_json::Error::io))
+            .and_then(|()| writer.flush().map_err(serde_json::Error::io))
         {
             debug!(%error, "failed to write bench trace JSONL record");
         }
@@ -302,6 +303,24 @@ mod tests {
         assert_eq!(records[0]["stage"], "outlet_resolve");
         assert!(records[0]["timestamp"].as_u64().is_some());
         assert!(records[0]["duration_ms"].as_f64().is_some());
+    }
+
+    #[test]
+    fn flushes_closed_stage_span_before_guard_drop() {
+        let file = NamedTempFile::new().expect("temp file should be created");
+        let (layer, _guard) = JsonlLayer::from_path(file.path()).expect("layer should be created");
+        let subscriber = tracing_subscriber::registry().with(layer);
+
+        tracing::subscriber::with_default(subscriber, || {
+            {
+                let _stage = StageGuard::enter(Stage::OutletResolve);
+            }
+
+            let records = collect_records(file.path());
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0]["kind"], "stage");
+            assert_eq!(records[0]["stage"], "outlet_resolve");
+        });
     }
 
     #[test]
