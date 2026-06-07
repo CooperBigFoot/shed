@@ -1,6 +1,6 @@
 //! PyO3 bindings for the shed watershed delineation engine.
 //!
-//! Exposes [`Engine`] and [`DelineationResult`] to Python, plus a hierarchy
+//! Exposes `Engine` and `DelineationResult` to Python, plus a hierarchy
 //! of typed exceptions rooted at `ShedError`.
 //!
 //! The compiled extension module is named `_pyshed` (note the leading
