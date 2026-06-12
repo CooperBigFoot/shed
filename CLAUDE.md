@@ -38,29 +38,21 @@ These guidelines are guardrails against common LLM coding mistakes. They bias to
 - Bug fixes should be tied to a reproduction or regression test when practical.
 - Behavior changes should end with the smallest useful verification: tests, build, or a concrete manual check.
 
-## Version Bumping (mandatory)
+## Releases (curated)
 
-**Every commit MUST include a patch version bump.** No exceptions.
-
-Before committing, follow this exact sequence:
-
-1. `./scripts/bump-version.sh patch` — modifies `Cargo.toml` version field
-2. Stage `Cargo.toml` alongside code changes
-3. Commit with a conventional commit message
-4. `git tag v$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')` — tag the commit
+**Versions change only on intentional, curated releases — never per commit.**
 
 **Rules:**
 
-- **Patch bumps**: Automatic with every commit. Claude MUST do this.
-- **Minor/major bumps**: Only when the user explicitly requests. Use `./scripts/bump-version.sh minor` or `./scripts/bump-version.sh major`.
-- **Never let tooling create its own commit or tag.** Fold version changes into the real commit.
-- **Always tag** after every commit.
+- **Regular commits**: Use conventional commit messages. Do NOT bump the version and do NOT create tags. Agents never create or push tags.
+- **Release tags**: Use the `v*` namespace and are created by a human at release time.
+- **Release-time bump tool**: `./scripts/bump-version.sh <patch|minor|major>` modifies the `Cargo.toml` version field. It is invoked only as part of preparing a curated release.
 
 > **Note:** `cargo bump` does not support Cargo workspaces (it panics). Use `./scripts/bump-version.sh` instead — it edits `Cargo.toml` directly.
 
-### Pyshed exemption
+### Pyshed releases (standalone)
 
-The `pyshed` crate (`crates/python/`) is **exempt** from the per-commit patch-bump rule. Its
+The `pyshed` crate (`crates/python/`) follows its own standalone release process. Its
 version evolves only on intentional PyPI releases and uses a separate tag namespace:
 
 - Bump with `./scripts/bump-pyshed-version.sh <patch|minor|major|set <PEP440-version>>`.

@@ -44,25 +44,17 @@ are expected to follow those conventions.
 
 ### Workspace Rust crates
 
-Every commit to the workspace must include a patch version bump:
+Use conventional commit messages. Regular commits carry no version bump and no
+tag. The workspace version changes only as part of a curated release prepared
+by maintainers; `./scripts/bump-version.sh` is invoked only during release
+preparation. Release tags use the `v*` namespace and are created by a human at
+release time.
 
-```bash
-./scripts/bump-version.sh patch   # bumps workspace Cargo.toml
-```
+### Pyshed release process (standalone)
 
-Stage `Cargo.toml` alongside your code changes and tag after each commit:
-
-```bash
-git tag v$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-```
-
-Use `./scripts/bump-version.sh minor` or `major` only when explicitly requested.
-
-### Pyshed exemption
-
-`crates/python/` (`pyshed`) is **exempt** from the per-commit patch-bump rule.
-Its version changes only on intentional PyPI releases and uses a separate tag
-namespace (`pyshed-v*`) so it does not collide with the workspace `v*` tags.
+`crates/python/` (`pyshed`) has its own standalone release process. Its version
+changes only on intentional PyPI releases and uses a separate tag namespace
+(`pyshed-v*`) so it does not collide with the workspace `v*` tags.
 
 ```bash
 # Stable release
